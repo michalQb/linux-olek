@@ -43,6 +43,23 @@ info()
 	printf "  %-7s %s\n" "${1}" "${2}"
 }
 
+# If CONFIG_FG_KASLR is selected, generate a linker script which will
+# declare all custom text sections for future boottime shuffling
+gen_text_sections()
+{
+	local shift=$(sed -n 's/^CONFIG_FG_KASLR_SHIFT=\(.*\)$/\1/p' include/config/auto.conf)
+	local assert=""
+
+	is_enabled CONFIG_HAVE_ASM_FUNCTION_SECTIONS && assert="-a"
+
+	info GEN .tmp_vmlinux.lds
+
+	${PERL} ${srctree}/scripts/generate_text_sections.pl	\
+		${assert} -s "${shift}" vmlinux.o		\
+		< "${objtree}/${KBUILD_LDS}"			\
+		> .tmp_vmlinux.lds
+}
+
 # Link of vmlinux
 # ${1} - output file
 # ${2}, ${3}, ... - optional extra .o files
@@ -54,11 +71,18 @@ vmlinux_link()
 	local ld
 	local ldflags
 	local ldlibs
+	local lds
 
 	info LD ${output}
 
 	# skip output file argument
 	shift
+
+	if is_enabled CONFIG_FG_KASLR; then
+		lds=".tmp_vmlinux.lds"
+	else
+		lds="${objtree}/${KBUILD_LDS}"
+	fi
 
 	if is_enabled CONFIG_LTO_CLANG || is_enabled CONFIG_X86_KERNEL_IBT; then
 		# Use vmlinux.o instead of performing the slow LTO link again.
@@ -87,7 +111,7 @@ vmlinux_link()
 		ldlibs=
 	fi
 
-	ldflags="${ldflags} ${wl}--script=${objtree}/${KBUILD_LDS}"
+	ldflags="${ldflags} ${wl}--script=${lds}"
 
 	# The kallsyms linking does not need debug symbols included.
 	if [ "$output" != "${output#.tmp_vmlinux.kallsyms}" ] ; then
@@ -214,6 +238,10 @@ if [ "$1" = "clean" ]; then
 fi
 
 ${MAKE} -f "${srctree}/scripts/Makefile.build" obj=init init/version-timestamp.o
+
+if is_enabled CONFIG_FG_KASLR; then
+	gen_text_sections
+fi
 
 btf_vmlinux_bin_o=""
 if is_enabled CONFIG_DEBUG_INFO_BTF; then
