@@ -962,7 +962,7 @@ endif
 # `include/linux/linkage.h` for explanation. This flag is to enable GAS to
 # insert the name of the previous section instead of `%S` inside .pushsection
 ifdef CONFIG_HAVE_ASM_FUNCTION_SECTIONS
-ifneq ($(CONFIG_LD_DEAD_CODE_DATA_ELIMINATION)$(CONFIG_LTO_CLANG),)
+ifneq ($(CONFIG_LD_DEAD_CODE_DATA_ELIMINATION)$(CONFIG_LTO_CLANG)$(CONFIG_FG_KASLR),)
 SECSUBST_AFLAGS := -Wa,--sectname-subst
 KBUILD_AFLAGS_KERNEL += $(SECSUBST_AFLAGS)
 KBUILD_CFLAGS_KERNEL += $(SECSUBST_AFLAGS)
@@ -976,10 +976,24 @@ KBUILD_CFLAGS_MODULE += -Wa,--sectname-subst
 endif
 endif # CONFIG_HAVE_ASM_FUNCTION_SECTIONS
 
-# `rustc`'s `-Zfunction-sections` applies to data too (as of 1.59.0).
+# ClangLTO implies `-ffunction-sections -fdata-sections`, no need
+# to specify them manually and trigger a pointless full rebuild
+ifndef CONFIG_LTO_CLANG
+ifneq ($(CONFIG_LD_DEAD_CODE_DATA_ELIMINATION)$(CONFIG_FG_KASLR),)
+KBUILD_CFLAGS_KERNEL += -ffunction-sections
+endif
+
 ifdef CONFIG_LD_DEAD_CODE_DATA_ELIMINATION
-KBUILD_CFLAGS_KERNEL += -ffunction-sections -fdata-sections
+KBUILD_CFLAGS_KERNEL += -fdata-sections
+endif
+endif # CONFIG_LTO_CLANG
+
+# `rustc`'s `-Zfunction-sections` applies to data too (as of 1.59.0).
+ifneq ($(CONFIG_LD_DEAD_CODE_DATA_ELIMINATION)$(CONFIG_FG_KASLR),)
 KBUILD_RUSTFLAGS_KERNEL += -Zfunction-sections=y
+endif
+
+ifdef CONFIG_LD_DEAD_CODE_DATA_ELIMINATION
 LDFLAGS_vmlinux += --gc-sections
 endif
 
