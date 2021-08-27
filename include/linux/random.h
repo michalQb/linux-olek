@@ -110,6 +110,22 @@ static inline unsigned long get_random_canary(void)
 	return get_random_long() & CANARY_MASK;
 }
 
+/**
+ * shuffle_array - use a Fisher-Yates algorithm to shuffle an array.
+ * @arr: pointer to the array
+ * @nents: the number of elements in the array
+ */
+#define shuffle_array(arr, nents) ({				\
+	typeof(&(arr)[0]) __arr = &(arr)[0];			\
+	size_t __i;						\
+								\
+	for (__i = (nents) - 1; __i > 0; __i--) {		\
+		size_t __j = get_random_long() % (__i + 1);	\
+								\
+		swap(__arr[__i], __arr[__j]);			\
+	}							\
+})
+
 void __init random_init_early(const char *command_line);
 void __init random_init(void);
 bool rng_is_initialized(void);
