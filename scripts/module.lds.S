@@ -3,6 +3,9 @@
  * Archs are free to supply their own linker scripts.  ld will
  * combine them automatically.
  */
+
+#include <asm-generic/vmlinux.lds.h>
+
 SECTIONS {
 	/DISCARD/ : {
 		*(.discard)
@@ -47,6 +50,14 @@ SECTIONS {
 		*(.rodata .rodata.[0-9a-zA-Z_]*)
 		*(.rodata..L*)
 	}
+#endif
+
+#ifdef CONFIG_MODULE_FG_KASLR
+	.text : {
+		*(TEXT_MAIN_MODULE)
+	}
+
+	TEXT_FG_KASLR
 #endif
 }
 
