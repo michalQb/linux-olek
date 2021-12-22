@@ -80,7 +80,7 @@
 #define rva(X) ((X) - startup_32)
 
 	.code32
-SYM_FUNC_START(startup_32)
+SYM_FUNC_START_SECT(startup_32, startup)
 	/*
 	 * 32bit entry is 0 and it is ABI so immutable!
 	 * If we come here directly from a bootloader,
@@ -305,8 +305,10 @@ SYM_FUNC_START(startup_32)
 SYM_FUNC_END(startup_32)
 
 #ifdef CONFIG_EFI_MIXED
+SYM_PUSH_SECTION(startup)
 	.org 0x190
-SYM_FUNC_START(efi32_stub_entry)
+SYM_POP_SECTION()
+SYM_FUNC_START_SECT(efi32_stub_entry, startup)
 	add	$0x4, %esp		/* Discard return address */
 	popl	%ecx
 	popl	%edx
@@ -340,8 +342,10 @@ SYM_FUNC_END(efi32_stub_entry)
 #endif
 
 	.code64
+SYM_PUSH_SECTION(startup)
 	.org 0x200
-SYM_CODE_START(startup_64)
+SYM_POP_SECTION()
+SYM_CODE_START_SECT(startup_64, startup)
 	/*
 	 * 64bit entry is 0x200 and it is ABI so immutable!
 	 * We come here either from startup_32 or directly from a
@@ -558,8 +562,10 @@ trampoline_return:
 SYM_CODE_END(startup_64)
 
 #ifdef CONFIG_EFI_STUB
+SYM_PUSH_SECTION(startup)
 	.org 0x390
-SYM_FUNC_START(efi64_stub_entry)
+SYM_POP_SECTION()
+SYM_FUNC_START_SECT(efi64_stub_entry, startup)
 	and	$~0xf, %rsp			/* realign the stack */
 	movq	%rdx, %rbx			/* save boot_params pointer */
 	call	efi_main
@@ -571,7 +577,7 @@ SYM_FUNC_ALIAS(efi_stub_entry, efi64_stub_entry)
 #endif
 
 	.text
-SYM_FUNC_START_LOCAL_NOALIGN(.Lrelocated)
+SYM_FUNC_START_LOCAL_NOALIGN_SECT(.Lrelocated, relocated)
 
 /*
  * Clear BSS (stack is currently empty)
@@ -701,20 +707,22 @@ SYM_CODE_START(trampoline_32bit_src)
 SYM_CODE_END(trampoline_32bit_src)
 
 	.code64
-SYM_FUNC_START_LOCAL_NOALIGN(.Lpaging_enabled)
+SYM_FUNC_START_LOCAL_NOALIGN_SECT(.Lpaging_enabled, trampoline_32bit_src)
 	/* Return from the trampoline */
 	jmp	*%rdi
 SYM_FUNC_END(.Lpaging_enabled)
 
+SYM_PUSH_SECTION(trampoline_32bit_src)
 	/*
          * The trampoline code has a size limit.
          * Make sure we fail to compile if the trampoline code grows
          * beyond TRAMPOLINE_32BIT_CODE_SIZE bytes.
 	 */
 	.org	trampoline_32bit_src + TRAMPOLINE_32BIT_CODE_SIZE
+SYM_POP_SECTION()
 
 	.code32
-SYM_FUNC_START_LOCAL_NOALIGN(.Lno_longmode)
+SYM_FUNC_START_LOCAL_NOALIGN_SECT(.Lno_longmode, no_longmode)
 	/* This isn't an x86-64 CPU, so hang intentionally, we cannot continue */
 1:
 	hlt
@@ -778,7 +786,7 @@ SYM_DATA(efi_is64, .byte 1)
 
 	__HEAD
 	.code32
-SYM_FUNC_START(efi32_pe_entry)
+SYM_FUNC_START_SECT(efi32_pe_entry, startup)
 /*
  * efi_status_t efi32_pe_entry(efi_handle_t image_handle,
  *			       efi_system_table_32_t *sys_table)
@@ -870,7 +878,7 @@ SYM_DATA_END(loaded_image_proto)
  *
  * Physical offset is expected in %ebp
  */
-SYM_FUNC_START(startup32_set_idt_entry)
+SYM_FUNC_START_SECT(startup32_set_idt_entry, startup)
 	push    %ebx
 	push    %ecx
 
@@ -903,7 +911,7 @@ SYM_FUNC_START(startup32_set_idt_entry)
 SYM_FUNC_END(startup32_set_idt_entry)
 #endif
 
-SYM_FUNC_START(startup32_load_idt)
+SYM_FUNC_START_SECT(startup32_load_idt, startup)
 #ifdef CONFIG_AMD_MEM_ENCRYPT
 	/* #VC handler */
 	leal    rva(startup32_vc_handler)(%ebp), %eax
@@ -935,7 +943,7 @@ SYM_FUNC_END(startup32_load_idt)
  * succeed. An incorrect C-bit position will map all memory unencrypted, so that
  * the compare will use the encrypted random data and fail.
  */
-SYM_FUNC_START(startup32_check_sev_cbit)
+SYM_FUNC_START_SECT(startup32_check_sev_cbit, startup)
 #ifdef CONFIG_AMD_MEM_ENCRYPT
 	pushl	%eax
 	pushl	%ebx

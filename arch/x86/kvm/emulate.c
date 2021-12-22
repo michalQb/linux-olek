@@ -323,6 +323,7 @@ static int fastop(struct x86_emulate_ctxt *ctxt, fastop_t fop);
 #define FASTOP_SIZE	16
 
 #define __FOP_FUNC(name) \
+	__ASM_PUSH_SECTION(name) "\n\t" \
 	".align " __stringify(FASTOP_SIZE) " \n\t" \
 	".type " name ", @function \n\t" \
 	name ":\n\t" \
@@ -334,7 +335,8 @@ static int fastop(struct x86_emulate_ctxt *ctxt, fastop_t fop);
 
 #define __FOP_RET(name) \
 	"11: " ASM_RET \
-	".size " name ", .-" name "\n\t"
+	".size " name ", .-" name "\n\t" \
+	ASM_POP_SECTION() "\n\t"
 
 #define FOP_RET(name) \
 	__FOP_RET(#name)
@@ -342,6 +344,7 @@ static int fastop(struct x86_emulate_ctxt *ctxt, fastop_t fop);
 #define __FOP_START(op, align) \
 	extern void em_##op(struct fastop *fake); \
 	asm(".pushsection .text, \"ax\" \n\t" \
+	    ASM_PUSH_SECTION(em_##op) "\n\t" \
 	    ".global em_" #op " \n\t" \
 	    ".align " __stringify(align) " \n\t" \
 	    "em_" #op ":\n\t"
@@ -349,6 +352,7 @@ static int fastop(struct x86_emulate_ctxt *ctxt, fastop_t fop);
 #define FOP_START(op) __FOP_START(op, FASTOP_SIZE)
 
 #define FOP_END \
+	    ASM_POP_SECTION() "\n\t" \
 	    ".popsection")
 
 #define __FOPNOP(name) \

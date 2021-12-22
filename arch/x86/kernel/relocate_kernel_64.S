@@ -39,10 +39,13 @@
 #define CP_PA_BACKUP_PAGES_MAP	DATA(0x30)
 
 	.text
+SYM_PUSH_SECTION(kexec_control_code)
 	.align PAGE_SIZE
 	.code64
-SYM_CODE_START_NOALIGN(relocate_range)
-SYM_CODE_START_NOALIGN(relocate_kernel)
+SYM_POP_SECTION()
+SYM_CODE_START(relocate_range)
+SYM_POP_SECTION()
+SYM_CODE_START_NOALIGN_SECT(relocate_kernel, kexec_control_code)
 	UNWIND_HINT_EMPTY
 	ANNOTATE_NOENDBR
 	/*
@@ -112,7 +115,7 @@ SYM_CODE_START_NOALIGN(relocate_kernel)
 	int3
 SYM_CODE_END(relocate_kernel)
 
-SYM_CODE_START_LOCAL_NOALIGN(identity_mapped)
+SYM_CODE_START_LOCAL_NOALIGN_SECT(identity_mapped, kexec_control_code)
 	UNWIND_HINT_EMPTY
 	/* set return address to 0 if not preserving context */
 	pushq	$0
@@ -230,7 +233,7 @@ SYM_CODE_START_LOCAL_NOALIGN(identity_mapped)
 	int3
 SYM_CODE_END(identity_mapped)
 
-SYM_CODE_START_LOCAL_NOALIGN(virtual_mapped)
+SYM_CODE_START_LOCAL_NOALIGN_SECT(virtual_mapped, kexec_control_code)
 	UNWIND_HINT_EMPTY
 	ANNOTATE_NOENDBR // RET target, above
 	movq	RSP(%r8), %rsp
@@ -255,7 +258,7 @@ SYM_CODE_START_LOCAL_NOALIGN(virtual_mapped)
 SYM_CODE_END(virtual_mapped)
 
 	/* Do the copies */
-SYM_CODE_START_LOCAL_NOALIGN(swap_pages)
+SYM_CODE_START_LOCAL_NOALIGN_SECT(swap_pages, kexec_control_code)
 	UNWIND_HINT_EMPTY
 	movq	%rdi, %rcx 	/* Put the page_list in %rcx */
 	xorl	%edi, %edi
@@ -313,5 +316,6 @@ SYM_CODE_START_LOCAL_NOALIGN(swap_pages)
 	int3
 SYM_CODE_END(swap_pages)
 
+SYM_PUSH_SECTION(kexec_control_code)
 	.skip KEXEC_CONTROL_CODE_MAX_SIZE - (. - relocate_kernel), 0xcc
 SYM_CODE_END(relocate_range);
