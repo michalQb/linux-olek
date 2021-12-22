@@ -1424,6 +1424,12 @@ config ARCH_HAS_NONLEAF_PMD_YOUNG
 	  address translations. Page table walkers that clear the accessed bit
 	  may use this capability to reduce their search space.
 
+config ARCH_SUPPORTS_ASM_FUNCTION_SECTIONS
+	bool
+	help
+	  An arch should select this if it can be built and run with its
+	  asm functions placed into separate sections to improve DCE and LTO.
+
 source "kernel/gcov/Kconfig"
 
 source "scripts/gcc-plugins/Kconfig"
