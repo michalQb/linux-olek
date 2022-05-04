@@ -1400,12 +1400,13 @@ static int fl_set_enc_opt(struct nlattr **tb, struct fl_flow_key *key,
 		switch (nla_type(nla_opt_key)) {
 		case TCA_FLOWER_KEY_ENC_OPTS_GENEVE:
 			if (key->enc_opts.dst_opt_type &&
-			    key->enc_opts.dst_opt_type != TUNNEL_GENEVE_OPT) {
+			    key->enc_opts.dst_opt_type !=
+			    IP_TUNNEL_GENEVE_OPT_BIT) {
 				NL_SET_ERR_MSG(extack, "Duplicate type for geneve options");
 				return -EINVAL;
 			}
 			option_len = 0;
-			key->enc_opts.dst_opt_type = TUNNEL_GENEVE_OPT;
+			key->enc_opts.dst_opt_type = IP_TUNNEL_GENEVE_OPT_BIT;
 			option_len = fl_set_geneve_opt(nla_opt_key, key,
 						       key_depth, option_len,
 						       extack);
@@ -1416,7 +1417,7 @@ static int fl_set_enc_opt(struct nlattr **tb, struct fl_flow_key *key,
 			/* At the same time we need to parse through the mask
 			 * in order to verify exact and mask attribute lengths.
 			 */
-			mask->enc_opts.dst_opt_type = TUNNEL_GENEVE_OPT;
+			mask->enc_opts.dst_opt_type = IP_TUNNEL_GENEVE_OPT_BIT;
 			option_len = fl_set_geneve_opt(nla_opt_msk, mask,
 						       msk_depth, option_len,
 						       extack);
@@ -1435,7 +1436,7 @@ static int fl_set_enc_opt(struct nlattr **tb, struct fl_flow_key *key,
 				return -EINVAL;
 			}
 			option_len = 0;
-			key->enc_opts.dst_opt_type = TUNNEL_VXLAN_OPT;
+			key->enc_opts.dst_opt_type = IP_TUNNEL_VXLAN_OPT_BIT;
 			option_len = fl_set_vxlan_opt(nla_opt_key, key,
 						      key_depth, option_len,
 						      extack);
@@ -1446,7 +1447,7 @@ static int fl_set_enc_opt(struct nlattr **tb, struct fl_flow_key *key,
 			/* At the same time we need to parse through the mask
 			 * in order to verify exact and mask attribute lengths.
 			 */
-			mask->enc_opts.dst_opt_type = TUNNEL_VXLAN_OPT;
+			mask->enc_opts.dst_opt_type = IP_TUNNEL_VXLAN_OPT_BIT;
 			option_len = fl_set_vxlan_opt(nla_opt_msk, mask,
 						      msk_depth, option_len,
 						      extack);
@@ -1465,7 +1466,7 @@ static int fl_set_enc_opt(struct nlattr **tb, struct fl_flow_key *key,
 				return -EINVAL;
 			}
 			option_len = 0;
-			key->enc_opts.dst_opt_type = TUNNEL_ERSPAN_OPT;
+			key->enc_opts.dst_opt_type = IP_TUNNEL_ERSPAN_OPT_BIT;
 			option_len = fl_set_erspan_opt(nla_opt_key, key,
 						       key_depth, option_len,
 						       extack);
@@ -1476,7 +1477,7 @@ static int fl_set_enc_opt(struct nlattr **tb, struct fl_flow_key *key,
 			/* At the same time we need to parse through the mask
 			 * in order to verify exact and mask attribute lengths.
 			 */
-			mask->enc_opts.dst_opt_type = TUNNEL_ERSPAN_OPT;
+			mask->enc_opts.dst_opt_type = IP_TUNNEL_ERSPAN_OPT_BIT;
 			option_len = fl_set_erspan_opt(nla_opt_msk, mask,
 						       msk_depth, option_len,
 						       extack);
@@ -1496,7 +1497,7 @@ static int fl_set_enc_opt(struct nlattr **tb, struct fl_flow_key *key,
 				return -EINVAL;
 			}
 			option_len = 0;
-			key->enc_opts.dst_opt_type = TUNNEL_GTP_OPT;
+			key->enc_opts.dst_opt_type = IP_TUNNEL_GTP_OPT_BIT;
 			option_len = fl_set_gtp_opt(nla_opt_key, key,
 						    key_depth, option_len,
 						    extack);
@@ -1507,7 +1508,7 @@ static int fl_set_enc_opt(struct nlattr **tb, struct fl_flow_key *key,
 			/* At the same time we need to parse through the mask
 			 * in order to verify exact and mask attribute lengths.
 			 */
-			mask->enc_opts.dst_opt_type = TUNNEL_GTP_OPT;
+			mask->enc_opts.dst_opt_type = IP_TUNNEL_GTP_OPT_BIT;
 			option_len = fl_set_gtp_opt(nla_opt_msk, mask,
 						    msk_depth, option_len,
 						    extack);
@@ -3001,22 +3002,22 @@ static int fl_dump_key_options(struct sk_buff *skb, int enc_opt_type,
 		goto nla_put_failure;
 
 	switch (enc_opts->dst_opt_type) {
-	case TUNNEL_GENEVE_OPT:
+	case IP_TUNNEL_GENEVE_OPT_BIT:
 		err = fl_dump_key_geneve_opt(skb, enc_opts);
 		if (err)
 			goto nla_put_failure;
 		break;
-	case TUNNEL_VXLAN_OPT:
+	case IP_TUNNEL_VXLAN_OPT_BIT:
 		err = fl_dump_key_vxlan_opt(skb, enc_opts);
 		if (err)
 			goto nla_put_failure;
 		break;
-	case TUNNEL_ERSPAN_OPT:
+	case IP_TUNNEL_ERSPAN_OPT_BIT:
 		err = fl_dump_key_erspan_opt(skb, enc_opts);
 		if (err)
 			goto nla_put_failure;
 		break;
-	case TUNNEL_GTP_OPT:
+	case IP_TUNNEL_GTP_OPT_BIT:
 		err = fl_dump_key_gtp_opt(skb, enc_opts);
 		if (err)
 			goto nla_put_failure;
