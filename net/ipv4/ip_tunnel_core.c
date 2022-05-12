@@ -957,6 +957,8 @@ static const struct nla_policy ip6_tun_policy[LWTUNNEL_IP6_MAX + 1] = {
 	[LWTUNNEL_IP6_TC]		= { .type = NLA_U8 },
 	[LWTUNNEL_IP6_FLAGS]		= { .type = NLA_U16 },
 	[LWTUNNEL_IP6_OPTS]		= { .type = NLA_NESTED },
+	[LWTUNNEL_IP6_FLAGS_BITMAP]	=
+		NLA_POLICY_BITMAP(__IP_TUNNEL_FLAG_NUM),
 };
 
 static int ip6_tun_build_state(struct net *net, struct nlattr *attr,
@@ -967,6 +969,8 @@ static int ip6_tun_build_state(struct net *net, struct nlattr *attr,
 	struct nlattr *tb[LWTUNNEL_IP6_MAX + 1];
 	struct lwtunnel_state *new_state;
 	struct ip_tunnel_info *tun_info;
+	IP_TUNNEL_DECLARE_FLAGS(flags);
+	bool set_flags = false;
 	int err, opt_len;
 
 	err = nla_parse_nested_deprecated(tb, LWTUNNEL_IP6_MAX, attr,
@@ -1007,14 +1011,20 @@ static int ip6_tun_build_state(struct net *net, struct nlattr *attr,
 	if (tb[LWTUNNEL_IP6_TC])
 		tun_info->key.tos = nla_get_u8(tb[LWTUNNEL_IP6_TC]);
 
-	if (tb[LWTUNNEL_IP6_FLAGS]) {
-		IP_TUNNEL_DECLARE_FLAGS(flags);
+	if (tb[LWTUNNEL_IP6_FLAGS_BITMAP]) {
+		nla_get_bitmap(tb[LWTUNNEL_IP6_FLAGS_BITMAP], flags,
+			       __IP_TUNNEL_FLAG_NUM);
+		set_flags = true;
+	} else if (tb[LWTUNNEL_IP6_FLAGS]) {
 		__be16 data;
 
 		data = nla_get_be16(tb[LWTUNNEL_IP6_FLAGS]);
 		ip_tunnel_flags_from_be16(flags, data);
-		ip_tunnel_clear_options_present(flags);
+		set_flags = true;
+	}
 
+	if (set_flags) {
+		ip_tunnel_clear_options_present(flags);
 		bitmap_or(tun_info->key.tun_flags, tun_info->key.tun_flags,
 			  flags, __IP_TUNNEL_FLAG_NUM);
 	}
@@ -1040,7 +1050,9 @@ static int ip6_tun_fill_encap_info(struct sk_buff *skb,
 	    nla_put_u8(skb, LWTUNNEL_IP6_HOPLIMIT, tun_info->key.ttl) ||
 	    nla_put_be16(skb, LWTUNNEL_IP6_FLAGS,
 			 ip_tunnel_flags_to_be16(tun_info->key.tun_flags)) ||
-	    ip_tun_fill_encap_opts(skb, LWTUNNEL_IP6_OPTS, tun_info))
+	    ip_tun_fill_encap_opts(skb, LWTUNNEL_IP6_OPTS, tun_info) ||
+	    nla_put_bitmap(skb, LWTUNNEL_IP6_FLAGS_BITMAP,
+			   tun_info->key.tun_flags, __IP_TUNNEL_FLAG_NUM))
 		return -ENOMEM;
 
 	return 0;
@@ -1054,8 +1066,11 @@ static int ip6_tun_encap_nlsize(struct lwtunnel_state *lwtstate)
 		+ nla_total_size(1)	/* LWTUNNEL_IP6_HOPLIMIT */
 		+ nla_total_size(1)	/* LWTUNNEL_IP6_TC */
 		+ nla_total_size(2)	/* LWTUNNEL_IP6_FLAGS */
-		+ ip_tun_opts_nlsize(lwt_tun_info(lwtstate));
+		+ ip_tun_opts_nlsize(lwt_tun_info(lwtstate))
 					/* LWTUNNEL_IP6_OPTS */
+		+ nla_total_size_bitmap(__IP_TUNNEL_FLAG_NUM)
+					/* LWTUNNEL_IP6_FLAGS_BITMAP */
+		;
 }
 
 static const struct lwtunnel_encap_ops ip6_tun_lwt_ops = {
