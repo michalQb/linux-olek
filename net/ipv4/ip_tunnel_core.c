@@ -1156,7 +1156,10 @@ void ip_tunnel_netlink_parms(struct nlattr *data[],
 	if (!data[IFLA_IPTUN_PMTUDISC] || nla_get_u8(data[IFLA_IPTUN_PMTUDISC]))
 		parms->iph.frag_off = htons(IP_DF);
 
-	if (data[IFLA_IPTUN_FLAGS]) {
+	if (data[IFLA_IPTUN_FLAGS_BITMAP]) {
+		nla_get_bitmap(data[IFLA_IPTUN_FLAGS_BITMAP], parms->i_flags,
+			       __IP_TUNNEL_FLAG_NUM);
+	} else if (data[IFLA_IPTUN_FLAGS]) {
 		__be16 flags;
 
 		flags = nla_get_be16(data[IFLA_IPTUN_FLAGS]);

@@ -1695,6 +1695,8 @@ static size_t ipip6_get_size(const struct net_device *dev)
 		nla_total_size(2) +
 		/* IFLA_IPTUN_FWMARK */
 		nla_total_size(4) +
+		/* IFLA_IPTUN_FLAGS_BITMAP */
+		nla_total_size_bitmap(__IP_TUNNEL_FLAG_NUM) +
 		0;
 }
 
@@ -1713,7 +1715,9 @@ static int ipip6_fill_info(struct sk_buff *skb, const struct net_device *dev)
 	    nla_put_u8(skb, IFLA_IPTUN_PROTO, parm->iph.protocol) ||
 	    nla_put_be16(skb, IFLA_IPTUN_FLAGS,
 			 ip_tunnel_flags_to_be16(parm->i_flags)) ||
-	    nla_put_u32(skb, IFLA_IPTUN_FWMARK, tunnel->fwmark))
+	    nla_put_u32(skb, IFLA_IPTUN_FWMARK, tunnel->fwmark) ||
+	    nla_put_bitmap(skb, IFLA_IPTUN_FLAGS_BITMAP, parm->i_flags,
+			   __IP_TUNNEL_FLAG_NUM))
 		goto nla_put_failure;
 
 #ifdef CONFIG_IPV6_SIT_6RD
@@ -1745,6 +1749,9 @@ nla_put_failure:
 }
 
 static const struct nla_policy ipip6_policy[IFLA_IPTUN_MAX + 1] = {
+	[IFLA_IPTUN_UNSPEC]		= {
+		.strict_start_type	= IFLA_IPTUN_FLAGS_BITMAP,
+	},
 	[IFLA_IPTUN_LINK]		= { .type = NLA_U32 },
 	[IFLA_IPTUN_LOCAL]		= { .type = NLA_U32 },
 	[IFLA_IPTUN_REMOTE]		= { .type = NLA_U32 },
@@ -1764,6 +1771,8 @@ static const struct nla_policy ipip6_policy[IFLA_IPTUN_MAX + 1] = {
 	[IFLA_IPTUN_ENCAP_SPORT]	= { .type = NLA_U16 },
 	[IFLA_IPTUN_ENCAP_DPORT]	= { .type = NLA_U16 },
 	[IFLA_IPTUN_FWMARK]		= { .type = NLA_U32 },
+	[IFLA_IPTUN_FLAGS_BITMAP]	=
+		NLA_POLICY_BITMAP(__IP_TUNNEL_FLAG_NUM),
 };
 
 static void ipip6_dellink(struct net_device *dev, struct list_head *head)
