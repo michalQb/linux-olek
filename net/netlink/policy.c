@@ -234,6 +234,10 @@ int netlink_policy_dump_attr_size_estimate(const struct nla_policy *pt)
 		       2 * (nla_attr_size(0) + nla_attr_size(sizeof(u64)));
 	case NLA_BITFIELD32:
 		return common + nla_attr_size(sizeof(u32));
+	case NLA_BIGINT:
+		/* maximum is common, aligned validation mask as u32-arr */
+		return common +
+		       nla_total_size_bigint(nla_policy_bigint_nbits(pt));
 	case NLA_STRING:
 	case NLA_NUL_STRING:
 	case NLA_BINARY:
@@ -245,6 +249,36 @@ int netlink_policy_dump_attr_size_estimate(const struct nla_policy *pt)
 
 	/* this should then cause a warning later */
 	return 0;
+}
+
+static bool
+__netlink_policy_dump_write_attr_bigint(struct sk_buff *skb,
+					const struct nla_policy *pt)
+{
+	if (pt->validation_type == NLA_VALIDATE_MASK) {
+		if (nla_put_bigint(skb, NL_POLICY_TYPE_ATTR_BIGINT_MASK,
+				   nla_policy_bigint_mask(pt),
+				   nla_policy_bigint_nbits(pt)))
+			return false;
+	} else {
+		unsigned long *mask;
+		int ret;
+
+		mask = bitmap_alloc(nla_policy_bigint_nbits(pt),
+				    in_task() ? GFP_KERNEL : GFP_ATOMIC);
+		if (!mask)
+			return false;
+
+		bitmap_fill(mask, nla_policy_bigint_nbits(pt));
+		ret = nla_put_bigint(skb, NL_POLICY_TYPE_ATTR_BIGINT_MASK,
+				     mask, nla_policy_bigint_nbits(pt));
+		bitmap_free(mask);
+
+		if (ret)
+			return false;
+	}
+
+	return true;
 }
 
 static int
@@ -345,6 +379,12 @@ __netlink_policy_dump_write_attr(struct netlink_policy_dump_state *state,
 		if (nla_put_u32(skb, NL_POLICY_TYPE_ATTR_BITFIELD32_MASK,
 				pt->bitfield32_valid))
 			goto nla_put_failure;
+		break;
+	case NLA_BIGINT:
+		if (!__netlink_policy_dump_write_attr_bigint(skb, pt))
+			goto nla_put_failure;
+
+		type = NL_ATTR_TYPE_BIGINT;
 		break;
 	case NLA_STRING:
 	case NLA_NUL_STRING:

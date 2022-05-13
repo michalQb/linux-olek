@@ -298,6 +298,8 @@ struct nla_bitfield32 {
  *	entry has attributes again, the policy for those inner ones
  *	and the corresponding maxtype may be specified.
  * @NL_ATTR_TYPE_BITFIELD32: &struct nla_bitfield32 attribute
+ * @NL_ATTR_TYPE_BIGINT: array of 32-bit unsigned integers which form
+ *	one big integer or bitmap. Validated by an optional bitmask.
  */
 enum netlink_attribute_type {
 	NL_ATTR_TYPE_INVALID,
@@ -322,6 +324,7 @@ enum netlink_attribute_type {
 	NL_ATTR_TYPE_NESTED_ARRAY,
 
 	NL_ATTR_TYPE_BITFIELD32,
+	NL_ATTR_TYPE_BIGINT,
 };
 
 /**
@@ -351,6 +354,8 @@ enum netlink_attribute_type {
  *	bitfield32 type (U32)
  * @NL_POLICY_TYPE_ATTR_MASK: mask of valid bits for unsigned integers (U64)
  * @NL_POLICY_TYPE_ATTR_PAD: pad attribute for 64-bit alignment
+ * @NL_POLICY_TYPE_ATTR_BIGINT_MASK: array with mask of valid
+ *	bits for bigints
  *
  * @__NL_POLICY_TYPE_ATTR_MAX: number of attributes
  * @NL_POLICY_TYPE_ATTR_MAX: highest attribute number
@@ -369,6 +374,7 @@ enum netlink_policy_type_attr {
 	NL_POLICY_TYPE_ATTR_BITFIELD32_MASK,
 	NL_POLICY_TYPE_ATTR_PAD,
 	NL_POLICY_TYPE_ATTR_MASK,
+	NL_POLICY_TYPE_ATTR_BIGINT_MASK,
 
 	/* keep last */
 	__NL_POLICY_TYPE_ATTR_MAX,

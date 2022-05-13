@@ -81,6 +81,33 @@ static int validate_nla_bitfield32(const struct nlattr *nla,
 	return 0;
 }
 
+static int nla_validate_bigint_mask(const struct nla_policy *pt,
+				    const struct nlattr *nla,
+				    struct netlink_ext_ack *extack)
+{
+	unsigned long *bigint;
+	size_t nbits;
+	bool res;
+
+	nbits = min_t(size_t, BYTES_TO_BITS(nla_len(nla)),
+		      nla_policy_bigint_nbits(pt));
+
+	bigint = bitmap_alloc(nbits, in_task() ? GFP_KERNEL : GFP_ATOMIC);
+	if (!bigint)
+		return -ENOMEM;
+
+	nla_get_bigint(nla, bigint, nbits);
+	res = bitmap_andnot(bigint, bigint, nla_policy_bigint_mask(pt), nbits);
+	bitmap_free(bigint);
+
+	if (res) {
+		NL_SET_ERR_MSG_ATTR_POL(extack, nla, pt, "unexpected bit set");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int nla_validate_array(const struct nlattr *head, int len, int maxtype,
 			      const struct nla_policy *policy,
 			      struct netlink_ext_ack *extack,
@@ -365,6 +392,8 @@ static int nla_validate_mask(const struct nla_policy *pt,
 	case NLA_U64:
 		value = nla_get_u64(nla);
 		break;
+	case NLA_BIGINT:
+		return nla_validate_bigint_mask(pt, nla, extack);
 	default:
 		return -EINVAL;
 	}
@@ -443,6 +472,15 @@ static int validate_nla(const struct nlattr *nla, int maxtype,
 		err = validate_nla_bitfield32(nla, pt->bitfield32_valid);
 		if (err)
 			goto out_err;
+		break;
+
+	case NLA_BIGINT:
+		if (!bitmap_validate_arr32(nla_data(nla), nla_len(nla),
+					   nla_policy_bigint_nbits(pt))) {
+			err = -EINVAL;
+			goto out_err;
+		}
+
 		break;
 
 	case NLA_NUL_STRING:
@@ -672,7 +710,9 @@ nla_policy_len(const struct nla_policy *p, int n)
 	int i, len = 0;
 
 	for (i = 0; i < n; i++, p++) {
-		if (p->len)
+		if (p->type == NLA_BIGINT)
+			len += nla_total_size_bigint(nla_policy_bigint_nbits(p));
+		else if (p->len)
 			len += nla_total_size(p->len);
 		else if (nla_attr_len[p->type])
 			len += nla_total_size(nla_attr_len[p->type]);

@@ -2,7 +2,7 @@
 #ifndef __NET_NETLINK_H
 #define __NET_NETLINK_H
 
-#include <linux/types.h>
+#include <linux/bitmap.h>
 #include <linux/netlink.h>
 #include <linux/jiffies.h>
 #include <linux/in6.h>
@@ -180,6 +180,7 @@ enum {
 	NLA_S32,
 	NLA_S64,
 	NLA_BITFIELD32,
+	NLA_BIGINT,
 	NLA_REJECT,
 	__NLA_TYPE_MAX,
 };
@@ -235,12 +236,15 @@ enum nla_policy_validation {
  *                         given type fits, using it verifies minimum length
  *                         just like "All other"
  *    NLA_BITFIELD32       Unused
+ *    NLA_BIGINT           Number of bits in the big integer
  *    NLA_REJECT           Unused
  *    All other            Minimum length of attribute payload
  *
  * Meaning of validation union:
  *    NLA_BITFIELD32       This is a 32-bit bitmap/bitselector attribute and
  *                         `bitfield32_valid' is the u32 value of valid flags
+ *    NLA_BIGINT           `bigint_mask` is a pointer to the mask of the valid
+ *                         bits of the given bigint to perform the validation.
  *    NLA_REJECT           This attribute is always rejected and `reject_message'
  *                         may point to a string to report as the error instead
  *                         of the generic one in extended ACK.
@@ -327,6 +331,7 @@ struct nla_policy {
 			s16 min, max;
 			u8 network_byte_order:1;
 		};
+		const unsigned long *bigint_mask;
 		int (*validate)(const struct nlattr *attr,
 				struct netlink_ext_ack *extack);
 		/* This entry is special, and used for the attribute at index 0
@@ -450,6 +455,35 @@ struct nla_policy {
 	.max = _len						\
 }
 #define NLA_POLICY_MIN_LEN(_len)	NLA_POLICY_MIN(NLA_BINARY, _len)
+
+/**
+ * NLA_POLICY_BIGINT - represent &nla_policy for a bigint attribute
+ * @nbits - number of bits in the bigint
+ * @... - optional pointer to a bitmap carrying a mask of supported bits
+ */
+#define NLA_POLICY_BIGINT(nbits, ...) {					\
+	.type = NLA_BIGINT,						\
+	.len = (nbits),							\
+	.bigint_mask =							\
+		(typeof((__VA_ARGS__ + 0) ? : NULL))(__VA_ARGS__ + 0),	\
+	.validation_type = (__VA_ARGS__ + 0) ? NLA_VALIDATE_MASK : 0,	\
+}
+
+/* Simplify (and encourage) using the bigint type to send scalars */
+#define NLA_POLICY_BIGINT_TYPE(type, ...)				\
+	NLA_POLICY_BIGINT(BITS_PER_TYPE(type), ##__VA_ARGS__)
+
+#define NLA_POLICY_BIGINT_U8		NLA_POLICY_BIGINT_TYPE(u8)
+#define NLA_POLICY_BIGINT_U16		NLA_POLICY_BIGINT_TYPE(u16)
+#define NLA_POLICY_BIGINT_U32		NLA_POLICY_BIGINT_TYPE(u32)
+#define NLA_POLICY_BIGINT_U64		NLA_POLICY_BIGINT_TYPE(u64)
+
+/* Transparent alias (for readability purposes) */
+#define NLA_POLICY_BITMAP(nbits, ...)					\
+	NLA_POLICY_BIGINT((nbits), ##__VA_ARGS__)
+
+#define nla_policy_bigint_mask(pt)	((pt)->bigint_mask)
+#define nla_policy_bigint_nbits(pt)	((pt)->len)
 
 /**
  * struct nl_info - netlink source information
@@ -1557,6 +1591,28 @@ static inline int nla_put_bitfield32(struct sk_buff *skb, int attrtype,
 }
 
 /**
+ * nla_put_bigint - Add a bigint Netlink attribute to a socket buffer
+ * @skb: socket buffer to add attribute to
+ * @attrtype: attribute type
+ * @bigint: bigint to put, as array of unsigned longs
+ * @nbits: number of bits in the bigint
+ */
+static inline int nla_put_bigint(struct sk_buff *skb, int attrtype,
+				 const unsigned long *bigint,
+				 size_t nbits)
+{
+	struct nlattr *nla;
+
+	nla = nla_reserve(skb, attrtype, bitmap_arr32_size(nbits));
+	if (unlikely(!nla))
+		return -EMSGSIZE;
+
+	bitmap_to_arr32(nla_data(nla), bigint, nbits);
+
+	return 0;
+}
+
+/**
  * nla_get_u32 - return payload of u32 attribute
  * @nla: u32 netlink attribute
  */
@@ -1750,6 +1806,134 @@ static inline struct nla_bitfield32 nla_get_bitfield32(const struct nlattr *nla)
 }
 
 /**
+ * nla_get_bigint - Return a bigint from u32-array bigint Netlink attribute
+ * @nla: %NLA_BIGINT Netlink attribute
+ * @bigint: target container, as array of unsigned longs
+ * @nbits: expected number of bits in the bigint
+ */
+static inline void nla_get_bigint(const struct nlattr *nla,
+				  unsigned long *bigint,
+				  size_t nbits)
+{
+	size_t diff = BITS_TO_LONGS(nbits);
+
+	/* Core validated nla_len() is (n + 1) * sizeof(u32), leave a hint */
+	nbits = clamp_t(size_t, BYTES_TO_BITS(nla_len(nla)),
+			BITS_PER_TYPE(u32), nbits);
+	bitmap_from_arr32(bigint, nla_data(nla), nbits);
+
+	diff -= BITS_TO_LONGS(nbits);
+	memset(bigint + BITS_TO_LONGS(nbits), 0, diff * sizeof(long));
+}
+
+/* The macros below build the following set of functions, allowing to
+ * easily use the %NLA_BIGINT API to send scalar values. Their fake
+ * declarations are provided under #if 0, so that source code indexers
+ * could build references to them.
+ */
+#if 0
+int nla_put_bigint_s8(struct sk_buff *skb, int attrtype, __s8 value);
+__s8 nla_get_bigint_s8(const struct nlattr *nla);
+int nla_put_bigint_s16(struct sk_buff *skb, int attrtype, __s16 value);
+__s16 nla_get_bigint_s16(const struct nlattr *nla);
+int nla_put_bigint_s32(struct sk_buff *skb, int attrtype, __s32 value);
+__s32 nla_get_bigint_s32(const struct nlattr *nla);
+int nla_put_bigint_s64(struct sk_buff *skb, int attrtype, __s64 value);
+__s64 nla_get_bigint_s64(const struct nlattr *nla);
+
+int nla_put_bigint_u8(struct sk_buff *skb, int attrtype, __u8 value);
+__u8 nla_get_bigint_u8(const struct nlattr *nla);
+int nla_put_bigint_u16(struct sk_buff *skb, int attrtype, __u16 value);
+__u16 nla_get_bigint_u16(const struct nlattr *nla);
+int nla_put_bigint_u32(struct sk_buff *skb, int attrtype, __u32 value);
+__u32 nla_get_bigint_u32(const struct nlattr *nla);
+int nla_put_bigint_u64(struct sk_buff *skb, int attrtype, __u64 value);
+__u64 nla_get_bigint_u64(const struct nlattr *nla);
+
+int nla_put_bigint_be16(struct sk_buff *skb, int attrtype, __be16 value);
+__be16 nla_get_bigint_be16(const struct nlattr *nla);
+int nla_put_bigint_be32(struct sk_buff *skb, int attrtype, __be32 value);
+__be32 nla_get_bigint_be32(const struct nlattr *nla);
+int nla_put_bigint_be64(struct sk_buff *skb, int attrtype, __be64 value);
+__be64 nla_get_bigint_be64(const struct nlattr *nla);
+
+int nla_put_bigint_le16(struct sk_buff *skb, int attrtype, __le16 value);
+__le16 nla_get_bigint_le16(const struct nlattr *nla);
+int nla_put_bigint_le32(struct sk_buff *skb, int attrtype, __le32 value);
+__le32 nla_get_bigint_le32(const struct nlattr *nla);
+int nla_put_bigint_le64(struct sk_buff *skb, int attrtype, __le64 value);
+__le64 nla_get_bigint_le64(const struct nlattr *nla);
+
+int nla_put_bigint_net16(struct sk_buff *skb, int attrtype, __be16 value);
+__be16 nla_get_bigint_net16(const struct nlattr *nla);
+int nla_put_bigint_net32(struct sk_buff *skb, int attrtype, __be32 value);
+__be32 nla_get_bigint_net32(const struct nlattr *nla);
+int nla_put_bigint_net64(struct sk_buff *skb, int attrtype, __be64 value);
+__be64 nla_get_bigint_net64(const struct nlattr *nla);
+#endif
+
+#define NLA_BUILD_BIGINT_TYPE(type)					 \
+static inline int							 \
+nla_put_bigint_##type(struct sk_buff *skb, int attrtype, __##type value) \
+{									 \
+	DECLARE_BITMAP(bigint, BITS_PER_TYPE(u64)) = {			 \
+		BITMAP_FROM_U64((__force u64)value),			 \
+	};								 \
+									 \
+	return nla_put_bigint(skb, attrtype, bigint,			 \
+			      BITS_PER_TYPE(__##type));			 \
+}									 \
+									 \
+static inline __##type							 \
+nla_get_bigint_##type(const struct nlattr *nla)				 \
+{									 \
+	DECLARE_BITMAP(bigint, BITS_PER_TYPE(u64));			 \
+									 \
+	nla_get_bigint(nla, bigint, BITS_PER_TYPE(__##type));		 \
+									 \
+	return (__force __##type)BITMAP_TO_U64(bigint);			 \
+}
+
+#define NLA_BUILD_BIGINT_NET(width)					 \
+static inline int							 \
+nla_put_bigint_net##width(struct sk_buff *skb, int attrtype,		 \
+			  __be##width value)				 \
+{									 \
+	return nla_put_bigint_be##width(skb,				 \
+					attrtype | NLA_F_NET_BYTEORDER,  \
+					value);				 \
+}									 \
+									 \
+static inline __be##width						 \
+nla_get_bigint_net##width(const struct nlattr *nla)			 \
+{									 \
+	return nla_get_bigint_be##width(nla);				 \
+}
+
+#define NLA_BUILD_BIGINT_ORDER(order)					 \
+	NLA_BUILD_BIGINT_TYPE(order##16);				 \
+	NLA_BUILD_BIGINT_TYPE(order##32);				 \
+	NLA_BUILD_BIGINT_TYPE(order##64)
+
+NLA_BUILD_BIGINT_TYPE(s8);
+NLA_BUILD_BIGINT_TYPE(u8);
+
+NLA_BUILD_BIGINT_ORDER(s);
+NLA_BUILD_BIGINT_ORDER(u);
+NLA_BUILD_BIGINT_ORDER(be);
+NLA_BUILD_BIGINT_ORDER(le);
+
+NLA_BUILD_BIGINT_NET(16);
+NLA_BUILD_BIGINT_NET(32);
+NLA_BUILD_BIGINT_NET(64);
+
+/* Aliases for readability */
+#define nla_put_bitmap(skb, attrtype, bitmap, nbits)			 \
+	nla_put_bigint((skb), (attrtype), (bitmap), (nbits))
+#define nla_get_bitmap(nlattr, bitmap, nbits)				 \
+	nla_get_bigint((nlattr), (bitmap), (nbits))
+
+/**
  * nla_memdup - duplicate attribute memory (kmemdup)
  * @src: netlink attribute to duplicate from
  * @gfp: GFP mask
@@ -1920,6 +2104,28 @@ static inline int nla_total_size_64bit(int payload)
 #endif
 		;
 }
+
+/**
+ * nla_total_size_bigint - get total size of Netlink attr for a number of bits
+ * @nbits: number of bits to store in the attribute
+ *
+ * Returns the size in bytes of a Netlink attribute needed to carry
+ * the specified number of bits.
+ */
+static inline size_t nla_total_size_bigint(size_t nbits)
+{
+	return nla_total_size(bitmap_arr32_size(nbits));
+}
+
+#define nla_total_size_bigint_type(type)		\
+	nla_total_size_bigint(BITS_PER_TYPE(type))
+
+#define nla_total_size_bigint_u8()	nla_total_size_bigint_type(u8)
+#define nla_total_size_bigint_u16()	nla_total_size_bigint_type(u16)
+#define nla_total_size_bigint_u32()	nla_total_size_bigint_type(u32)
+#define nla_total_size_bigint_u64()	nla_total_size_bigint_type(u64)
+
+#define nla_total_size_bitmap(nbits)	nla_total_size_bigint(nbits)
 
 /**
  * nla_for_each_attr - iterate over a stream of attributes
