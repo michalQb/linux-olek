@@ -605,6 +605,7 @@ static void __init test_bitmap_arr32(void)
 	unsigned int nbits, next_bit;
 	u32 arr[EXP1_IN_BITS / 32];
 	DECLARE_BITMAP(bmap2, EXP1_IN_BITS);
+	bool valid;
 
 	memset(arr, 0xa5, sizeof(arr));
 
@@ -619,6 +620,9 @@ static void __init test_bitmap_arr32(void)
 			pr_err("bitmap_copy_arr32(nbits == %d:"
 				" tail is not safely cleared: %d\n",
 				nbits, next_bit);
+
+		valid = bitmap_validate_arr32(arr, bitmap_arr32_size(nbits), nbits);
+		expect_eq_uint(!!nbits, valid);
 
 		if (nbits < EXP1_IN_BITS - 32)
 			expect_eq_uint(arr[DIV_ROUND_UP(nbits, 32)],
