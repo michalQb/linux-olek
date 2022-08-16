@@ -41,6 +41,7 @@
 *.so
 *.so.dbg
 *.su
+*.syms
 *.symtypes
 *.symversions
 *.tab.[ch]

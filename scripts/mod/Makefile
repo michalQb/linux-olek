@@ -26,3 +26,12 @@ $(obj)/elfconfig.h: $(obj)/empty.o $(obj)/mk_elfconfig FORCE
 	$(call if_changed,elfconfig)
 
 targets += elfconfig.h
+
+# sympath: used to rewrite STT_FILE in object files from just filenames
+# to paths relative to $(srctree)
+hostprogs-always-$(CONFIG_KALLSYMS_PATHS)	+= sympath
+
+$(obj)/sympath: $(obj)/elfconfig.h
+
+# skip sympath for empty.o: makes no sense and creates a circular dependency
+$(obj)/empty.o: skip-sympath := 1

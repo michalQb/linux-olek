@@ -28,6 +28,7 @@
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
 
 #define KSYM_NAME_LEN		256
+#define KSYM_NAME_DELIM		':'
 
 struct sym_entry {
 	unsigned long long addr;
@@ -78,6 +79,61 @@ static void usage(void)
 static char *sym_name(const struct sym_entry *s)
 {
 	return (char *)s->sym + 1;
+}
+
+static bool sym_starts(const char *name, const char *str)
+{
+	const char *start;
+
+	start = strchr(name, KSYM_NAME_DELIM);
+	if (!start)
+		start = name;
+	else
+		start++;
+
+	return !strncmp(start, str, strlen(str));
+}
+
+static bool sym_matches(const char *name, const char *str)
+{
+	const char *start;
+
+	start = strchr(name, KSYM_NAME_DELIM);
+	if (!start)
+		start = name;
+	else
+		start++;
+
+	return !strcmp(start, str);
+}
+
+static bool sym_ends(const char *name, const char *str)
+{
+	const char *start;
+	int len;
+
+	start = strchr(name, KSYM_NAME_DELIM);
+	if (!start)
+		start = name;
+	else
+		start++;
+
+	len = strlen(start) - strlen(str);
+
+	return len >= 0 && !strcmp(start + len, str);
+}
+
+static bool sym_contains(const char *name, const char *str)
+{
+	const char *start;
+
+	start = strchr(name, KSYM_NAME_DELIM);
+	if (!start)
+		start = name;
+	else
+		start++;
+
+	return !!strstr(start, str);
 }
 
 static bool is_ignored_symbol(const char *name, char type)
@@ -140,22 +196,19 @@ static bool is_ignored_symbol(const char *name, char type)
 	const char * const *p;
 
 	for (p = ignored_symbols; *p; p++)
-		if (!strcmp(name, *p))
+		if (sym_matches(name, *p))
 			return true;
 
 	for (p = ignored_prefixes; *p; p++)
-		if (!strncmp(name, *p, strlen(*p)))
+		if (sym_starts(name, *p))
 			return true;
 
-	for (p = ignored_suffixes; *p; p++) {
-		int l = strlen(name) - strlen(*p);
-
-		if (l >= 0 && !strcmp(name + l, *p))
+	for (p = ignored_suffixes; *p; p++)
+		if (sym_ends(name, *p))
 			return true;
-	}
 
 	for (p = ignored_matches; *p; p++) {
-		if (strstr(name, *p))
+		if (sym_contains(name, *p))
 			return true;
 	}
 
@@ -167,10 +220,10 @@ static bool is_ignored_symbol(const char *name, char type)
 
 	if (toupper(type) == 'A') {
 		/* Keep these useful absolute symbols */
-		if (strcmp(name, "__kernel_syscall_via_break") &&
-		    strcmp(name, "__kernel_syscall_via_epc") &&
-		    strcmp(name, "__kernel_sigtramp") &&
-		    strcmp(name, "__gp"))
+		if (!sym_matches(name, "__kernel_syscall_via_break") &&
+		    !sym_matches(name, "__kernel_syscall_via_epc") &&
+		    !sym_matches(name, "__kernel_sigtramp") &&
+		    !sym_matches(name, "__gp"))
 			return true;
 	}
 
@@ -186,10 +239,10 @@ static void check_symbol_range(const char *sym, unsigned long long addr,
 	for (i = 0; i < entries; ++i) {
 		ar = &ranges[i];
 
-		if (strcmp(sym, ar->start_sym) == 0) {
+		if (sym_matches(sym, ar->start_sym)) {
 			ar->start = addr;
 			return;
-		} else if (strcmp(sym, ar->end_sym) == 0) {
+		} else if (sym_matches(sym, ar->end_sym)) {
 			ar->end = addr;
 			return;
 		}
@@ -217,7 +270,7 @@ static struct sym_entry *read_symbol(FILE *in)
 		return NULL;
 	}
 
-	if (strcmp(name, "_text") == 0)
+	if (sym_matches(name, "_text"))
 		_text = addr;
 
 	/* Ignore most absolute/undefined (?) symbols. */
@@ -280,9 +333,9 @@ static int symbol_valid(const struct sym_entry *s)
 		 * rules.
 		 */
 		if ((s->addr == text_range_text->end &&
-		     strcmp(name, text_range_text->end_sym)) ||
+		     !sym_matches(name, text_range_text->end_sym)) ||
 		    (s->addr == text_range_inittext->end &&
-		     strcmp(name, text_range_inittext->end_sym)))
+		     !sym_matches(name, text_range_inittext->end_sym)))
 			return 0;
 	}
 

@@ -1720,9 +1720,11 @@ config KALLSYMS
 	  symbolic stack backtraces. This increases the size of the kernel
 	  somewhat, as all symbols have to be loaded into the kernel image.
 
+if KALLSYMS
+
 config KALLSYMS_ALL
 	bool "Include all symbols in kallsyms"
-	depends on DEBUG_KERNEL && KALLSYMS
+	depends on DEBUG_KERNEL
 	help
 	  Normally kallsyms only contains the symbols of functions for nicer
 	  OOPS messages and backtraces (i.e., symbols from the text and inittext
@@ -1740,12 +1742,10 @@ config KALLSYMS_ALL
 
 config KALLSYMS_ABSOLUTE_PERCPU
 	bool
-	depends on KALLSYMS
 	default X86_64 && SMP
 
 config KALLSYMS_BASE_RELATIVE
 	bool
-	depends on KALLSYMS
 	default !IA64
 	help
 	  Instead of emitting them as absolute values in the native word size,
@@ -1760,6 +1760,26 @@ config KALLSYMS_BASE_RELATIVE
 	  but more importantly, it results in entries whose values are build
 	  time constants, and no relocation pass is required at runtime to fix
 	  up the entries based on the runtime load address of the kernel.
+
+config KALLSYMS_PATHS
+	bool "Include relative source file paths into kallsyms"
+	depends on KALLSYMS
+	depends on MODULES_USE_ELF_RELA # RFC: no rel support in sympath util
+	help
+	  This option makes kallsyms contain not only symbol name, but also
+	  its source file path relative to the kernel root. I.e.
+
+	  dev_gro_receive -> net/core/gro.c:dev_gro_receive
+
+	  Apart from giving more useful debugging info, this makes kallsyms
+	  values unique, and thus subsystems relying on kallsyms lookup
+	  (livepatch, probes) more reliable (due to not having to differ
+	  symbols with the same name by their positions in vmlinux).
+	  Enabling it makes kallsyms size ~1.5 times bigger, which means
+	  1-2% bigger kernel size, and total link step time longer by 1-2
+	  seconds.
+
+endif # KALLSYMS
 
 # end of the "standard kernel features (expert users)" menu
 

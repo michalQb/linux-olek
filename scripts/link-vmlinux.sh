@@ -157,7 +157,19 @@ kallsyms()
 	fi
 
 	info KSYMS ${2}
-	${NM} -n ${1} | scripts/kallsyms ${kallsymopt} > ${2}
+
+	if is_enabled CONFIG_KALLSYMS_PATHS; then
+		local objs="${KBUILD_VMLINUX_OBJS} ${KBUILD_VMLINUX_LIBS}"
+
+		if is_enabled CONFIG_MODULES; then
+			objs="${objs} .vmlinux.export.o"
+		fi
+
+		"${PERL}" "${srctree}/scripts/gen_sympaths.pl" ${1} ${objs} | \
+			scripts/kallsyms ${kallsymopt} > ${2}
+	else
+		${NM} -n ${1} | scripts/kallsyms ${kallsymopt} > ${2}
+	fi
 }
 
 # Perform one step in kallsyms generation, including temporary linking of

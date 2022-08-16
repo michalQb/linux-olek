@@ -252,6 +252,14 @@ cmd_gen_objtooldep = $(if $(objtool-enabled), { echo ; echo '$@: $$(wildcard $(o
 
 endif # CONFIG_OBJTOOL
 
+ifdef CONFIG_KALLSYMS_PATHS
+cmd_sympath = $(if $(skip-sympath),, ; $(objtree)/scripts/mod/sympath -p "$<" $@)
+
+cmd_symlist =  ; \
+	$(if $(real-prereqs), printf "$(obj)/%s " $(patsubst $(obj)/%,%,$(real-prereqs)) | xargs) \
+	$(PERL) $(srctree)/scripts/gen_sympaths.pl gen > $(@:%.a=%.syms)
+endif # CONFIG_KALLSYMS_PATHS
+
 # Useful for describing the dependency of composite objects
 # Usage:
 #   $(call multi_depend, multi_used_targets, suffix_to_remove, suffix_to_add)
@@ -293,7 +301,7 @@ quiet_cmd_ld = LD      $@
 # ---------------------------------------------------------------------------
 
 quiet_cmd_ar = AR      $@
-      cmd_ar = rm -f $@; $(AR) cDPrsT $@ $(real-prereqs)
+      cmd_ar = rm -f $@; $(AR) cDPrsT $@ $(real-prereqs) $(cmd_symlist)
 
 # Objcopy
 # ---------------------------------------------------------------------------
