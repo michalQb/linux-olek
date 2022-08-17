@@ -83,9 +83,10 @@ static inline void __endian(const void *src, void *dest, unsigned int size)
 
 #define TO_NATIVE(x)						\
 ({								\
-	typeof(x) __x;						\
-	__endian(&(x), &(__x), sizeof(__x));			\
-	__x;							\
+	typeof(x) __src = (x);					\
+	typeof(__src) __dst;					\
+	__endian(&__src, (void *)&__dst, sizeof(__src));	\
+	__dst;							\
 })
 
 #else /* endianness matches */
