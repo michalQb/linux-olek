@@ -1495,6 +1495,46 @@ void __bitmap_to_arr32(u32 *buf, const unsigned long *bitmap, unsigned int nbits
 EXPORT_SYMBOL(__bitmap_to_arr32);
 #endif
 
+/**
+ * bitmap_validate_arr32 - perform validation of a u32-array bitmap
+ * @arr: array of u32s, the dest bitmap
+ * @len: length of the array, in bytes
+ * @nbits: expected/supported number of bits in the bitmap
+ *
+ * Returns true if the array passes the checks (see below), false otherwise.
+ */
+bool bitmap_validate_arr32(const u32 *arr, size_t len, size_t nbits)
+{
+	size_t word = (nbits - 1) / BITS_PER_TYPE(u32);
+	u32 pos = (nbits - 1) % BITS_PER_TYPE(u32);
+
+	/* Must consist of 1...n full u32s */
+	if (!len || len % sizeof(u32))
+		return false;
+
+	/*
+	 * If the array is shorter than expected, assume we support
+	 * all of the bits set there.
+	 */
+	if (word >= len / sizeof(u32))
+		return true;
+
+	/* Last word must not contain any bits past the expected number */
+	if (arr[word] & (u32)~GENMASK(pos, 0))
+		return false;
+
+	/*
+	 * If the array is longer than expected, make sure all the bytes
+	 * past the expected length are zeroed.
+	 */
+	len -= bitmap_arr32_size(nbits);
+	if (memchr_inv(&arr[word + 1], 0, len))
+		return false;
+
+	return true;
+}
+EXPORT_SYMBOL(bitmap_validate_arr32);
+
 #if (BITS_PER_LONG == 32) && defined(__BIG_ENDIAN)
 /**
  * bitmap_from_arr64 - copy the contents of u64 array of bits to bitmap

@@ -7,7 +7,7 @@
 #include <linux/align.h>
 #include <linux/bitops.h>
 #include <linux/find.h>
-#include <linux/limits.h>
+#include <linux/overflow.h>
 #include <linux/string.h>
 #include <linux/types.h>
 
@@ -75,6 +75,8 @@ struct device;
  *  bitmap_from_arr64(dst, buf, nbits)          Copy nbits from u64[] buf to dst
  *  bitmap_to_arr32(buf, src, nbits)            Copy nbits from buf to u32[] dst
  *  bitmap_to_arr64(buf, src, nbits)            Copy nbits from buf to u64[] dst
+ *  bitmap_validate_arr32(buf, len, nbits)      Validate u32[] buf of len bytes
+ *  bitmap_arr32_size(nbits)                    Get size of u32[] arr for nbits
  *  bitmap_get_value8(map, start)               Get 8bit value from map at start
  *  bitmap_set_value8(map, value, start)        Set 8bit value to map at start
  *
@@ -324,6 +326,20 @@ static inline void bitmap_to_arr32(u32 *buf, const unsigned long *bitmap,
 		__bitmap_to_arr32(buf, bitmap, nbits);
 }
 
+bool bitmap_validate_arr32(const u32 *arr, size_t len, size_t nbits);
+
+/**
+ * bitmap_arr32_size - determine the size of array of u32s for a number of bits
+ * @nbits: number of bits to store in the array
+ *
+ * Returns the size in bytes of a u32s-array needed to carry the specified
+ * number of bits.
+ */
+static inline size_t bitmap_arr32_size(size_t nbits)
+{
+	return array_size(BITS_TO_U32(nbits), sizeof(u32));
+}
+
 /*
  * On 64-bit systems bitmaps are represented as u64 arrays internally. On LE32
  * machines the order of hi and lo parts of numbers match the bitmap structure.
@@ -571,9 +587,11 @@ static inline void bitmap_next_set_region(unsigned long *bitmap,
  */
 #if __BITS_PER_LONG == 64
 #define BITMAP_FROM_U64(n) (n)
+#define BITMAP_TO_U64(map) ((u64)(map)[0])
 #else
 #define BITMAP_FROM_U64(n) ((unsigned long) ((u64)(n) & ULONG_MAX)), \
 				((unsigned long) ((u64)(n) >> 32))
+#define BITMAP_TO_U64(map) (((u64)(map)[1] << 32) | (u64)(map)[0])
 #endif
 
 /**
