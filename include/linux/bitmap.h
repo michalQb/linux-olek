@@ -283,23 +283,46 @@ static inline void bitmap_copy_clear_tail(unsigned long *dst,
  * On 32-bit systems bitmaps are represented as u32 arrays internally. On LE64
  * machines the order of hi and lo parts of numbers match the bitmap structure.
  * In both cases conversion is not needed when copying data from/to arrays of
- * u32. But in LE64 case, typecast in bitmap_copy_clear_tail() may lead
- * to out-of-bound access. To avoid that, both LE and BE variants of 64-bit
- * architectures are not using bitmap_copy_clear_tail().
+ * u32. But in LE64 case, typecast in bitmap_copy_clear_tail() may lead to
+ * out-of-bound access. To avoid that, LE variant of 64-bit architectures uses
+ * bitmap_copy_clear_tail() only when @bitmap and @buf containers have the same
+ * size in memory (known at compile time), and 64-bit BEs never use it.
  */
-#if BITS_PER_LONG == 64
-void bitmap_from_arr32(unsigned long *bitmap, const u32 *buf,
-							unsigned int nbits);
-void bitmap_to_arr32(u32 *buf, const unsigned long *bitmap,
-							unsigned int nbits);
+#if BITS_PER_LONG == 32
+#define bitmap_arr32_compat(nbits)		true
+#elif defined(__LITTLE_ENDIAN)
+#define bitmap_arr32_compat(nbits)		\
+	(__builtin_constant_p(nbits) &&		\
+	 BITS_TO_U32(nbits) * sizeof(u32) ==	\
+	 BITS_TO_LONGS(nbits) * sizeof(long))
 #else
-#define bitmap_from_arr32(bitmap, buf, nbits)			\
-	bitmap_copy_clear_tail((unsigned long *) (bitmap),	\
-			(const unsigned long *) (buf), (nbits))
-#define bitmap_to_arr32(buf, bitmap, nbits)			\
-	bitmap_copy_clear_tail((unsigned long *) (buf),		\
-			(const unsigned long *) (bitmap), (nbits))
+#define bitmap_arr32_compat(nbits)		false
 #endif
+
+void __bitmap_from_arr32(unsigned long *bitmap, const u32 *buf, unsigned int nbits);
+void __bitmap_to_arr32(u32 *buf, const unsigned long *bitmap, unsigned int nbits);
+
+static inline void bitmap_from_arr32(unsigned long *bitmap, const u32 *buf,
+				     unsigned int nbits)
+{
+	const unsigned long *src = (const unsigned long *)buf;
+
+	if (bitmap_arr32_compat(nbits))
+		bitmap_copy_clear_tail(bitmap, src, nbits);
+	else
+		__bitmap_from_arr32(bitmap, buf, nbits);
+}
+
+static inline void bitmap_to_arr32(u32 *buf, const unsigned long *bitmap,
+				   unsigned int nbits)
+{
+	unsigned long *dst = (unsigned long *)buf;
+
+	if (bitmap_arr32_compat(nbits))
+		bitmap_copy_clear_tail(dst, bitmap, nbits);
+	else
+		__bitmap_to_arr32(buf, bitmap, nbits);
+}
 
 /*
  * On 64-bit systems bitmaps are represented as u64 arrays internally. On LE32

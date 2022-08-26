@@ -1449,12 +1449,12 @@ EXPORT_SYMBOL_GPL(devm_bitmap_zalloc);
 
 #if BITS_PER_LONG == 64
 /**
- * bitmap_from_arr32 - copy the contents of u32 array of bits to bitmap
+ * __bitmap_from_arr32 - copy the contents of u32 array of bits to bitmap
  *	@bitmap: array of unsigned longs, the destination bitmap
  *	@buf: array of u32 (in host byte order), the source bitmap
  *	@nbits: number of bits in @bitmap
  */
-void bitmap_from_arr32(unsigned long *bitmap, const u32 *buf, unsigned int nbits)
+void __bitmap_from_arr32(unsigned long *bitmap, const u32 *buf, unsigned int nbits)
 {
 	unsigned int i, halfwords;
 
@@ -1469,15 +1469,15 @@ void bitmap_from_arr32(unsigned long *bitmap, const u32 *buf, unsigned int nbits
 	if (nbits % BITS_PER_LONG)
 		bitmap[(halfwords - 1) / 2] &= BITMAP_LAST_WORD_MASK(nbits);
 }
-EXPORT_SYMBOL(bitmap_from_arr32);
+EXPORT_SYMBOL(__bitmap_from_arr32);
 
 /**
- * bitmap_to_arr32 - copy the contents of bitmap to a u32 array of bits
+ * __bitmap_to_arr32 - copy the contents of bitmap to a u32 array of bits
  *	@buf: array of u32 (in host byte order), the dest bitmap
  *	@bitmap: array of unsigned longs, the source bitmap
  *	@nbits: number of bits in @bitmap
  */
-void bitmap_to_arr32(u32 *buf, const unsigned long *bitmap, unsigned int nbits)
+void __bitmap_to_arr32(u32 *buf, const unsigned long *bitmap, unsigned int nbits)
 {
 	unsigned int i, halfwords;
 
@@ -1492,7 +1492,7 @@ void bitmap_to_arr32(u32 *buf, const unsigned long *bitmap, unsigned int nbits)
 	if (nbits % BITS_PER_LONG)
 		buf[halfwords - 1] &= (u32) (UINT_MAX >> ((-nbits) & 31));
 }
-EXPORT_SYMBOL(bitmap_to_arr32);
+EXPORT_SYMBOL(__bitmap_to_arr32);
 #endif
 
 #if (BITS_PER_LONG == 32) && defined(__BIG_ENDIAN)
