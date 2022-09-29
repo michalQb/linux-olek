@@ -600,6 +600,36 @@ static void __init test_bitmap_parse(void)
 	}
 }
 
+static const struct {
+	DECLARE_BITMAP(bitmap, 128);
+	u32 nbits;
+	u32 msglen;
+	u32 exp_size;
+	u32 exp_valid:1;
+} arr32_test_cases[] __initconst = {
+#define BITMAP_ARR32_CASE(h, l, nr, len, ev, es) {	\
+	.bitmap = {					\
+		BITMAP_FROM_U64(l),			\
+		BITMAP_FROM_U64(h),			\
+	},						\
+	.nbits = (nr),					\
+	.msglen = (len),				\
+	.exp_valid = (ev),				\
+	.exp_size = (es),				\
+}
+	/* fail: msglen is not a multiple of 4 */
+	BITMAP_ARR32_CASE(0x00000000, 0x0000accedeadfeed, 48,  6, false,  8),
+	/* pass: kernel supports more bits than received */
+	BITMAP_ARR32_CASE(0x00000000, 0xacdcbadadd0afc18, 90,  8, true,  12),
+	/* fail: unsupported bits set within the last supported word */
+	BITMAP_ARR32_CASE(0xfa588103, 0xd3d0a58544864a9c, 88, 12, false, 12),
+	/* fail: unsupported bits set past the last supported word */
+	BITMAP_ARR32_CASE(0x00b84e53, 0x0000a3bafb6484f8, 64, 16, false,  8),
+	/* pass: kernel supports less bits than received, no unsupported set */
+	BITMAP_ARR32_CASE(0x00000000, 0x848d7a2acc7ff31e, 64, 16, true,   8),
+#undef BITMAP_ARR32_CASE
+};
+
 static void __init test_bitmap_arr32(void)
 {
 	unsigned int nbits, next_bit;
@@ -627,6 +657,19 @@ static void __init test_bitmap_arr32(void)
 		if (nbits < EXP1_IN_BITS - 32)
 			expect_eq_uint(arr[DIV_ROUND_UP(nbits, 32)],
 								0xa5a5a5a5);
+	}
+
+	for (u32 i = 0; i < ARRAY_SIZE(arr32_test_cases); i++) {
+		typeof(*arr32_test_cases) *test = &arr32_test_cases[i];
+
+		memset(arr, 0, sizeof(arr));
+		bitmap_to_arr32(arr, test->bitmap, BYTES_TO_BITS(test->msglen));
+
+		valid = bitmap_validate_arr32(arr, test->msglen, test->nbits);
+		expect_eq_uint(test->exp_valid, valid);
+
+		expect_eq_uint(test->exp_size, bitmap_arr32_size(test->nbits));
+		expect_eq_uint((u32)BITMAP_TO_U64(test->bitmap), arr[0]);
 	}
 }
 
