@@ -844,15 +844,43 @@ size_t dma_opt_mapping_size(struct device *dev)
 EXPORT_SYMBOL_GPL(dma_opt_mapping_size);
 
 #ifdef CONFIG_DMA_NEED_SYNC
-bool dma_need_sync(struct device *dev, dma_addr_t dma_addr)
+bool __dma_need_sync(struct device *dev, dma_addr_t dma_addr)
 {
 	const struct dma_map_ops *ops = get_dma_ops(dev);
 
 	if (dma_map_direct(dev, ops))
+		/*
+		 * dma_skip_sync could've been set to false on first SWIOTLB
+		 * buffer mapping, but @dma_addr is not necessary an SWIOTLB
+		 * buffer. In this case, fall back to more granular check.
+		 */
 		return dma_direct_need_sync(dev, dma_addr);
-	return ops->sync_single_for_cpu || ops->sync_single_for_device;
+
+	return true;
 }
-EXPORT_SYMBOL_GPL(dma_need_sync);
+EXPORT_SYMBOL_GPL(__dma_need_sync);
+
+void dma_setup_skip_sync(struct device *dev)
+{
+	const struct dma_map_ops *ops = get_dma_ops(dev);
+	bool skip;
+
+	if (dma_map_direct(dev, ops))
+		/*
+		 * dma_skip_sync will be set to false on first SWIOTLB buffer
+		 * mapping, if any. During the device initialization, it's
+		 * enough to check only for DMA coherence.
+		 */
+		skip = dev_is_dma_coherent(dev);
+	else if (!ops->sync_single_for_device && !ops->sync_single_for_cpu)
+		skip = true;
+	else if (ops->can_skip_sync)
+		skip = ops->can_skip_sync(dev);
+	else
+		skip = false;
+
+	dma_set_skip_sync(dev, skip);
+}
 #endif /* CONFIG_DMA_NEED_SYNC */
 
 unsigned long dma_get_merge_boundary(struct device *dev)

@@ -93,9 +93,17 @@ static inline void debug_dma_map_single(struct device *dev, const void *addr,
 
 #ifdef CONFIG_DMA_NEED_SYNC
 
-#define dma_skip_sync(dev)			false
+static inline bool dma_skip_sync(const struct device *dev)
+{
+	return dev->dma_skip_sync;
+}
 
-bool dma_need_sync(struct device *dev, dma_addr_t dma_addr);
+bool __dma_need_sync(struct device *dev, dma_addr_t dma_addr);
+
+static inline bool dma_need_sync(struct device *dev, dma_addr_t dma_addr)
+{
+	return dma_skip_sync(dev) ? false : __dma_need_sync(dev, dma_addr);
+}
 
 #else /* !CONFIG_DMA_NEED_SYNC */
 
