@@ -648,7 +648,8 @@ clear_counts:
 int iavf_setup_tx_descriptors(struct iavf_ring *tx_ring)
 {
 	struct device *dev = tx_ring->dev;
-	int bi_size;
+	struct iavf_tx_desc *tx_desc;
+	int bi_size, j;
 
 	if (!dev)
 		return -ENOMEM;
@@ -674,6 +675,11 @@ int iavf_setup_tx_descriptors(struct iavf_ring *tx_ring)
 	tx_ring->next_to_use = 0;
 	tx_ring->next_to_clean = 0;
 	tx_ring->prev_pkt_ctr = -1;
+	for (j = 0; j < tx_ring->count; j++) {
+		tx_desc = IAVF_TX_DESC(tx_ring, j);
+		tx_desc->cmd_type_offset_bsz = 0;
+	}
+
 	return 0;
 
 err:

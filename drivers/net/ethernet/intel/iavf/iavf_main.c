@@ -706,17 +706,30 @@ static void iavf_configure_tx(struct iavf_adapter *adapter)
 }
 
 /**
+ * iavf_configure_rx_ring - Configure a single Rx ring
+ * @adapter: board private structure
+ * @rx_ring: Rx ring to be configured
+ * @rx_buf_len: buffer length that shall be used for the given Rx ring.
+ */
+void iavf_configure_rx_ring(struct iavf_adapter *adapter,
+			    struct iavf_ring *rx_ring)
+{
+	u32 queue_idx = rx_ring->queue_index;
+
+	rx_ring->tail = adapter->hw.hw_addr + IAVF_QRX_TAIL1(queue_idx);
+	iavf_alloc_rx_pages(rx_ring);
+}
+
+/**
  * iavf_configure_rx - Configure Receive Unit after Reset
  * @adapter: board private structure
  *
  * Configure the Rx unit of the MAC after a reset.
- **/
+ */
 static void iavf_configure_rx(struct iavf_adapter *adapter)
 {
-	struct iavf_hw *hw = &adapter->hw;
-
 	for (u32 i = 0; i < adapter->num_active_queues; i++)
-		adapter->rx_rings[i].tail = hw->hw_addr + IAVF_QRX_TAIL1(i);
+		iavf_configure_rx_ring(adapter, &adapter->rx_rings[i]);
 }
 
 /**
@@ -1208,19 +1221,12 @@ static void iavf_napi_disable_all(struct iavf_adapter *adapter)
 static void iavf_configure(struct iavf_adapter *adapter)
 {
 	struct net_device *netdev = adapter->netdev;
-	int i;
 
 	iavf_set_rx_mode(netdev);
 
 	iavf_configure_tx(adapter);
 	iavf_configure_rx(adapter);
 	adapter->aq_required |= IAVF_FLAG_AQ_CONFIGURE_QUEUES;
-
-	for (i = 0; i < adapter->num_active_queues; i++) {
-		struct iavf_ring *ring = &adapter->rx_rings[i];
-
-		iavf_alloc_rx_pages(ring);
-	}
 }
 
 /**
@@ -1460,6 +1466,72 @@ static void iavf_free_queues(struct iavf_adapter *adapter)
 }
 
 /**
+ * iavf_set_rx_queue_vlan_tag_loc - set location for VLAN tag offload in Rx
+ * @adapter: board private structure
+ * @rx_ring: Rx ring where VLAN tag offload for VLAN will be set
+ *
+ * Helper function for setting VLAN tag offload location in a given Rx ring.
+ */
+static void iavf_set_rx_queue_vlan_tag_loc(struct iavf_adapter *adapter,
+					   struct iavf_ring *rx_ring)
+{
+	struct virtchnl_vlan_supported_caps *caps;
+
+	/* prevent multiple L2TAG bits being set after VFR */
+	rx_ring->flags &=
+		~(IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1 |
+		  IAVF_RXR_FLAGS_VLAN_TAG_LOC_L2TAG2_2);
+
+	if (VLAN_ALLOWED(adapter)) {
+		rx_ring->flags |= IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1;
+		return;
+	}
+
+	if (!VLAN_V2_ALLOWED(adapter))
+		return;
+
+	caps = &adapter->vlan_v2_caps.offloads.stripping_support;
+
+	if ((caps->outer | caps->inner) & VIRTCHNL_VLAN_TAG_LOCATION_L2TAG1)
+		rx_ring->flags |= IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1;
+	else if ((caps->outer | caps->inner) & VIRTCHNL_VLAN_TAG_LOCATION_L2TAG2_2)
+		rx_ring->flags |= IAVF_RXR_FLAGS_VLAN_TAG_LOC_L2TAG2_2;
+}
+
+/**
+ * iavf_set_tx_queue_vlan_tag_loc - set location for VLAN tag offload in Tx
+ * @adapter: board private structure
+ * @tx_ring: Tx ring where VLAN tag offload for VLAN will be set
+ *
+ * Helper function for setting VLAN tag offload location in a given Tx ring.
+ */
+static void iavf_set_tx_queue_vlan_tag_loc(struct iavf_adapter *adapter,
+					   struct iavf_ring *tx_ring)
+{
+	struct virtchnl_vlan_supported_caps *caps;
+
+	/* prevent multiple L2TAG bits being set after VFR */
+	tx_ring->flags &=
+		~(IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1 |
+		  IAVF_TXR_FLAGS_VLAN_TAG_LOC_L2TAG2);
+
+	if (VLAN_ALLOWED(adapter)) {
+		tx_ring->flags |= IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1;
+		return;
+	}
+
+	if (!VLAN_V2_ALLOWED(adapter))
+		return;
+
+	caps = &adapter->vlan_v2_caps.offloads.insertion_support;
+
+	if ((caps->outer | caps->inner) & VIRTCHNL_VLAN_TAG_LOCATION_L2TAG1)
+		tx_ring->flags |= IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1;
+	else if ((caps->outer | caps->inner) & VIRTCHNL_VLAN_TAG_LOCATION_L2TAG2)
+		tx_ring->flags |= IAVF_TXR_FLAGS_VLAN_TAG_LOC_L2TAG2;
+}
+
+/**
  * iavf_set_queue_vlan_tag_loc - set location for VLAN tag offload
  * @adapter: board private structure
  *
@@ -1473,70 +1545,56 @@ void iavf_set_queue_vlan_tag_loc(struct iavf_adapter *adapter)
 	int i;
 
 	for (i = 0; i < adapter->num_active_queues; i++) {
-		struct iavf_ring *tx_ring = &adapter->tx_rings[i];
-		struct iavf_ring *rx_ring = &adapter->rx_rings[i];
-
-		/* prevent multiple L2TAG bits being set after VFR */
-		tx_ring->flags &=
-			~(IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1 |
-			  IAVF_TXR_FLAGS_VLAN_TAG_LOC_L2TAG2);
-		rx_ring->flags &=
-			~(IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1 |
-			  IAVF_RXR_FLAGS_VLAN_TAG_LOC_L2TAG2_2);
-
-		if (VLAN_ALLOWED(adapter)) {
-			tx_ring->flags |= IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1;
-			rx_ring->flags |= IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1;
-		} else if (VLAN_V2_ALLOWED(adapter)) {
-			struct virtchnl_vlan_supported_caps *stripping_support;
-			struct virtchnl_vlan_supported_caps *insertion_support;
-
-			stripping_support =
-				&adapter->vlan_v2_caps.offloads.stripping_support;
-			insertion_support =
-				&adapter->vlan_v2_caps.offloads.insertion_support;
-
-			if (stripping_support->outer) {
-				if (stripping_support->outer &
-				    VIRTCHNL_VLAN_TAG_LOCATION_L2TAG1)
-					rx_ring->flags |=
-						IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1;
-				else if (stripping_support->outer &
-					 VIRTCHNL_VLAN_TAG_LOCATION_L2TAG2_2)
-					rx_ring->flags |=
-						IAVF_RXR_FLAGS_VLAN_TAG_LOC_L2TAG2_2;
-			} else if (stripping_support->inner) {
-				if (stripping_support->inner &
-				    VIRTCHNL_VLAN_TAG_LOCATION_L2TAG1)
-					rx_ring->flags |=
-						IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1;
-				else if (stripping_support->inner &
-					 VIRTCHNL_VLAN_TAG_LOCATION_L2TAG2_2)
-					rx_ring->flags |=
-						IAVF_RXR_FLAGS_VLAN_TAG_LOC_L2TAG2_2;
-			}
-
-			if (insertion_support->outer) {
-				if (insertion_support->outer &
-				    VIRTCHNL_VLAN_TAG_LOCATION_L2TAG1)
-					tx_ring->flags |=
-						IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1;
-				else if (insertion_support->outer &
-					 VIRTCHNL_VLAN_TAG_LOCATION_L2TAG2)
-					tx_ring->flags |=
-						IAVF_TXR_FLAGS_VLAN_TAG_LOC_L2TAG2;
-			} else if (insertion_support->inner) {
-				if (insertion_support->inner &
-				    VIRTCHNL_VLAN_TAG_LOCATION_L2TAG1)
-					tx_ring->flags |=
-						IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1;
-				else if (insertion_support->inner &
-					 VIRTCHNL_VLAN_TAG_LOCATION_L2TAG2)
-					tx_ring->flags |=
-						IAVF_TXR_FLAGS_VLAN_TAG_LOC_L2TAG2;
-			}
-		}
+		iavf_set_rx_queue_vlan_tag_loc(adapter, &adapter->rx_rings[i]);
+		iavf_set_tx_queue_vlan_tag_loc(adapter, &adapter->tx_rings[i]);
 	}
+}
+
+/**
+ * iavf_init_rx_ring - Init pointers and flags for a given Rx ring
+ * @adapter: board private structure to initialize
+ * @ring_index: index of the ring to be initialized
+ *
+ * Init all basic pointers and flags in a newly allocated Rx ring.
+ */
+static void iavf_init_rx_ring(struct iavf_adapter *adapter,
+			      int ring_index)
+{
+	struct iavf_ring *rx_ring = &adapter->rx_rings[ring_index];
+
+	rx_ring->vsi = &adapter->vsi;
+	rx_ring->queue_index = ring_index;
+	rx_ring->netdev = adapter->netdev;
+	rx_ring->dev = &adapter->pdev->dev;
+	rx_ring->count = adapter->rx_desc_count;
+	rx_ring->itr_setting = IAVF_ITR_RX_DEF;
+}
+
+/**
+ * iavf_init_tx_ring - Init pointers and flags for a given Tx ring
+ * @adapter: board private structure to initialize
+ * @ring_index: index of the ring to be initialized
+ * @xdp_ring: set to true if the ring is XDP Tx queue
+ *
+ * Init all basic pointers and flags in a newly allocated Tx ring.
+ */
+static void iavf_init_tx_ring(struct iavf_adapter *adapter, int ring_index)
+{
+	struct iavf_ring *tx_ring = &adapter->tx_rings[ring_index];
+
+	tx_ring->vsi = &adapter->vsi;
+	tx_ring->queue_index = ring_index;
+	tx_ring->netdev = adapter->netdev;
+	tx_ring->dev = &adapter->pdev->dev;
+	tx_ring->count = adapter->tx_desc_count;
+	tx_ring->itr_setting = IAVF_ITR_TX_DEF;
+
+	tx_ring->flags = 0;
+
+	if (adapter->flags & IAVF_FLAG_WB_ON_ITR_CAPABLE)
+		tx_ring->flags |= IAVF_TXR_FLAGS_WB_ON_ITR;
+
+	u64_stats_init(&tx_ring->sq_stats.syncp);
 }
 
 /**
@@ -1549,7 +1607,8 @@ void iavf_set_queue_vlan_tag_loc(struct iavf_adapter *adapter)
  **/
 static int iavf_alloc_queues(struct iavf_adapter *adapter)
 {
-	int i, num_active_queues;
+	u32 num_active_queues;
+	int i;
 
 	/* If we're in reset reallocating queues we don't actually know yet for
 	 * certain the PF gave us the number of queues we asked for but we'll
@@ -1566,7 +1625,6 @@ static int iavf_alloc_queues(struct iavf_adapter *adapter)
 					  adapter->vsi_res->num_queue_pairs,
 					  (int)(num_online_cpus()));
 
-
 	adapter->tx_rings = kcalloc(num_active_queues,
 				    sizeof(struct iavf_ring), GFP_KERNEL);
 	if (!adapter->tx_rings)
@@ -1576,31 +1634,12 @@ static int iavf_alloc_queues(struct iavf_adapter *adapter)
 	if (!adapter->rx_rings)
 		goto err_out;
 
-	for (i = 0; i < num_active_queues; i++) {
-		struct iavf_ring *tx_ring;
-		struct iavf_ring *rx_ring;
-
-		tx_ring = &adapter->tx_rings[i];
-
-		tx_ring->queue_index = i;
-		tx_ring->netdev = adapter->netdev;
-		tx_ring->dev = &adapter->pdev->dev;
-		tx_ring->count = adapter->tx_desc_count;
-		tx_ring->itr_setting = IAVF_ITR_TX_DEF;
-		if (adapter->flags & IAVF_FLAG_WB_ON_ITR_CAPABLE)
-			tx_ring->flags |= IAVF_TXR_FLAGS_WB_ON_ITR;
-		u64_stats_init(&tx_ring->sq_stats.syncp);
-
-		rx_ring = &adapter->rx_rings[i];
-		rx_ring->queue_index = i;
-		rx_ring->netdev = adapter->netdev;
-		rx_ring->dev = &adapter->pdev->dev;
-		rx_ring->count = adapter->rx_desc_count;
-		rx_ring->itr_setting = IAVF_ITR_RX_DEF;
-		u64_stats_init(&rx_ring->rq_stats.syncp);
-	}
-
 	adapter->num_active_queues = num_active_queues;
+
+	for (i = 0; i < num_active_queues; i++) {
+		iavf_init_tx_ring(adapter, i);
+		iavf_init_rx_ring(adapter, i);
+	}
 
 	iavf_set_queue_vlan_tag_loc(adapter);
 

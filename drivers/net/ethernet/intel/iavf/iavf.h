@@ -264,8 +264,8 @@ struct iavf_adapter {
 	/* Lock to protect accesses to MAC and VLAN lists */
 	spinlock_t mac_vlan_list_lock;
 	char misc_vector_name[IFNAMSIZ + 9];
-	int num_active_queues;
-	int num_req_queues;
+	u32 num_active_queues;
+	u32 num_req_queues;
 
 	/* TX */
 	struct iavf_ring *tx_rings;
@@ -569,6 +569,8 @@ void iavf_virtchnl_completion(struct iavf_adapter *adapter,
 			      enum iavf_status v_retval, u8 *msg, u16 msglen);
 int iavf_process_pending_pf_msg(struct iavf_adapter *adapter,
 				unsigned int timeout_msecs);
+void iavf_configure_rx_ring(struct iavf_adapter *adapter,
+			    struct iavf_ring *rx_ring);
 int iavf_config_rss(struct iavf_adapter *adapter);
 int iavf_lan_add_device(struct iavf_adapter *adapter);
 int iavf_lan_del_device(struct iavf_adapter *adapter);
