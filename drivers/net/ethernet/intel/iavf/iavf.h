@@ -263,8 +263,8 @@ struct iavf_adapter {
 	/* Lock to protect accesses to MAC and VLAN lists */
 	spinlock_t mac_vlan_list_lock;
 	char misc_vector_name[IFNAMSIZ + 9];
-	int num_active_queues;
-	int num_req_queues;
+	u32 num_active_queues;
+	u32 num_req_queues;
 
 	/* TX */
 	struct iavf_ring *tx_rings;
