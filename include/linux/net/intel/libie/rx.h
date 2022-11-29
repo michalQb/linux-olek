@@ -173,7 +173,7 @@ static inline void libie_skb_set_hash(struct sk_buff *skb, u32 hash,
 struct libie_rq_stats;
 
 struct page_pool *libie_rx_page_pool_create(const struct net_device *dev,
-					    u32 size);
+					    u32 size, bool xdp);
 void libie_rx_page_pool_destroy(struct page_pool *pool,
 				struct libie_rq_stats *stats);
 
