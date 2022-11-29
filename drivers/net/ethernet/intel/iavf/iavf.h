@@ -538,11 +538,17 @@ int iavf_send_vf_offload_vlan_v2_msg(struct iavf_adapter *adapter);
 void iavf_set_queue_vlan_tag_loc(struct iavf_adapter *adapter);
 u16 iavf_get_num_vlans_added(struct iavf_adapter *adapter);
 void iavf_irq_enable(struct iavf_adapter *adapter, bool flush);
-void iavf_configure_queues(struct iavf_adapter *adapter);
+int iavf_configure_selected_queues(struct iavf_adapter *adapter, u32 qp_mask,
+				   bool wait);
+int iavf_configure_queues(struct iavf_adapter *adapter, bool wait);
 void iavf_deconfigure_queues(struct iavf_adapter *adapter);
-void iavf_enable_queues(struct iavf_adapter *adapter);
-void iavf_disable_queues(struct iavf_adapter *adapter);
-void iavf_map_queues(struct iavf_adapter *adapter);
+int iavf_enable_queues(struct iavf_adapter *adapter, bool wait);
+int iavf_disable_queues(struct iavf_adapter *adapter, bool wait);
+int iavf_enable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
+				u32 tx_queues, bool wait);
+int iavf_disable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
+				 u32 tx_queues, bool wait);
+int iavf_map_queues(struct iavf_adapter *adapter, bool wait);
 int iavf_request_queues(struct iavf_adapter *adapter, int num);
 void iavf_add_ether_addrs(struct iavf_adapter *adapter);
 void iavf_del_ether_addrs(struct iavf_adapter *adapter);
@@ -557,9 +563,12 @@ void iavf_set_rss_key(struct iavf_adapter *adapter);
 void iavf_set_rss_lut(struct iavf_adapter *adapter);
 void iavf_enable_vlan_stripping(struct iavf_adapter *adapter);
 void iavf_disable_vlan_stripping(struct iavf_adapter *adapter);
+int iavf_poll_for_link_status(struct iavf_adapter *adapter, unsigned int msecs);
 void iavf_virtchnl_completion(struct iavf_adapter *adapter,
 			      enum virtchnl_ops v_opcode,
 			      enum iavf_status v_retval, u8 *msg, u16 msglen);
+int iavf_process_pending_pf_msg(struct iavf_adapter *adapter,
+				unsigned int timeout_msecs);
 int iavf_config_rss(struct iavf_adapter *adapter);
 int iavf_lan_add_device(struct iavf_adapter *adapter);
 int iavf_lan_del_device(struct iavf_adapter *adapter);

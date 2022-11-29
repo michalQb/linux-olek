@@ -1978,12 +1978,12 @@ static int iavf_process_aq_command(struct iavf_adapter *adapter)
 	if (adapter->aq_required & IAVF_FLAG_AQ_GET_OFFLOAD_VLAN_V2_CAPS)
 		return iavf_send_vf_offload_vlan_v2_msg(adapter);
 	if (adapter->aq_required & IAVF_FLAG_AQ_DISABLE_QUEUES) {
-		iavf_disable_queues(adapter);
+		iavf_disable_queues(adapter, false);
 		return 0;
 	}
 
 	if (adapter->aq_required & IAVF_FLAG_AQ_MAP_VECTORS) {
-		iavf_map_queues(adapter);
+		iavf_map_queues(adapter, false);
 		return 0;
 	}
 
@@ -2018,12 +2018,12 @@ static int iavf_process_aq_command(struct iavf_adapter *adapter)
 	}
 
 	if (adapter->aq_required & IAVF_FLAG_AQ_CONFIGURE_QUEUES) {
-		iavf_configure_queues(adapter);
+		iavf_configure_queues(adapter, false);
 		return 0;
 	}
 
 	if (adapter->aq_required & IAVF_FLAG_AQ_ENABLE_QUEUES) {
-		iavf_enable_queues(adapter);
+		iavf_enable_queues(adapter, false);
 		return 0;
 	}
 
