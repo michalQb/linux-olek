@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright(c) 2013 - 2018 Intel Corporation. */
 
+#include <linux/bpf_trace.h>
+#include <linux/filter.h>
 #include <linux/prefetch.h>
 
 #include "iavf.h"
@@ -837,6 +839,17 @@ static inline void iavf_release_rx_desc(struct iavf_ring *rx_ring, u32 val)
 }
 
 /**
+ * iavf_is_xdp_enabled - Check if XDP is enabled on the RX ring
+ * @rx_ring: Rx descriptor ring
+ *
+ * Returns true, if the ring has been configured for XDP.
+ */
+static bool iavf_is_xdp_enabled(struct iavf_ring *rx_ring)
+{
+	return !!READ_ONCE(rx_ring->xdp_prog);
+}
+
+/**
  * iavf_rx_offset - Return expected offset into page to access data
  * @rx_ring: Ring we are requesting offset of
  *
@@ -844,7 +857,11 @@ static inline void iavf_release_rx_desc(struct iavf_ring *rx_ring, u32 val)
  */
 static inline unsigned int iavf_rx_offset(struct iavf_ring *rx_ring)
 {
-	return ring_uses_build_skb(rx_ring) ? IAVF_SKB_PAD : 0;
+	if (iavf_is_xdp_enabled(rx_ring))
+		return XDP_PACKET_HEADROOM;
+	if (ring_uses_build_skb(rx_ring))
+		return IAVF_SKB_PAD;
+	return 0;
 }
 
 /**
@@ -1320,10 +1337,48 @@ static struct iavf_rx_buffer *iavf_get_rx_buffer(struct iavf_ring *rx_ring,
 }
 
 /**
+ * iavf_rx_buf_adjust_pg_offset - update page offset of RX buffer after reading
+ * @rx_buff: used RX buffer
+ * @truesize: total size of consumed space
+ */
+static void iavf_rx_buf_adjust_pg_offset(struct iavf_rx_buffer *rx_buff,
+					 unsigned int truesize)
+{
+#if (PAGE_SIZE < 8192)
+	rx_buff->page_offset ^= truesize;
+#else
+	rx_buff->page_offset += truesize;
+#endif
+}
+
+/**
+ * iavf_get_xdp_frame_truesize - calculate total space consumed by packet
+ * @rx_ring: rx descriptor ring that received the packet
+ * @size: size of packet data
+ */
+static unsigned int
+iavf_get_xdp_frame_truesize(struct iavf_ring *rx_ring,
+			    unsigned int __maybe_unused size)
+{
+	unsigned int truesize;
+#if (PAGE_SIZE < 8192)
+	truesize = iavf_rx_pg_size(rx_ring) / 2;
+#else
+	/* XDP multibuffer will probably need reserved
+	 * sizeof(struct skb_shared_info) both when using build and construct
+	 */
+	truesize = SKB_DATA_ALIGN(size + iavf_rx_offset(rx_ring));
+	if (ring_uses_build_skb(rx_ring))
+		truesize += SKB_DATA_ALIGN(sizeof(struct skb_shared_info));
+#endif
+	return truesize;
+}
+
+/**
  * iavf_construct_skb - Allocate skb and populate it
  * @rx_ring: rx descriptor ring to transact packets on
  * @rx_buffer: rx buffer to pull data from
- * @size: size of buffer to add to skb
+ * @xdp: initialized XDP buffer
  *
  * This function allocates an skb.  It then populates it with the page
  * data from the current receive descriptor, taking care to set up the
@@ -1331,26 +1386,22 @@ static struct iavf_rx_buffer *iavf_get_rx_buffer(struct iavf_ring *rx_ring,
  */
 static struct sk_buff *iavf_construct_skb(struct iavf_ring *rx_ring,
 					  struct iavf_rx_buffer *rx_buffer,
-					  unsigned int size)
+					  struct xdp_buff *xdp)
 {
-	void *va;
-#if (PAGE_SIZE < 8192)
-	unsigned int truesize = iavf_rx_pg_size(rx_ring) / 2;
-#else
-	unsigned int truesize = SKB_DATA_ALIGN(size);
-#endif
+	unsigned int metasize = xdp->data - xdp->data_meta;
+	unsigned int size = xdp->data_end - xdp->data;
+	unsigned int truesize = xdp->frame_sz;
 	unsigned int headlen;
 	struct sk_buff *skb;
 
 	if (!rx_buffer)
 		return NULL;
 	/* prefetch first cache line of first page */
-	va = page_address(rx_buffer->page) + rx_buffer->page_offset;
-	net_prefetch(va);
+	net_prefetch(xdp->data_meta);
 
 	/* allocate a skb to store the frags */
 	skb = __napi_alloc_skb(&rx_ring->q_vector->napi,
-			       IAVF_RX_HDR_SIZE,
+			       IAVF_RX_HDR_SIZE + metasize,
 			       GFP_ATOMIC | __GFP_NOWARN);
 	if (unlikely(!skb))
 		return NULL;
@@ -1358,10 +1409,12 @@ static struct sk_buff *iavf_construct_skb(struct iavf_ring *rx_ring,
 	/* Determine available headroom for copy */
 	headlen = size;
 	if (headlen > IAVF_RX_HDR_SIZE)
-		headlen = eth_get_headlen(skb->dev, va, IAVF_RX_HDR_SIZE);
+		headlen = eth_get_headlen(skb->dev, xdp->data,
+					  IAVF_RX_HDR_SIZE);
 
 	/* align pull length to size of long to optimize memcpy performance */
-	memcpy(__skb_put(skb, headlen), va, ALIGN(headlen, sizeof(long)));
+	memcpy(__skb_put(skb, headlen + metasize), xdp->data_meta,
+	       ALIGN(headlen + metasize, sizeof(long)));
 
 	/* update all of the pointers */
 	size -= headlen;
@@ -1371,11 +1424,7 @@ static struct sk_buff *iavf_construct_skb(struct iavf_ring *rx_ring,
 				size, truesize);
 
 		/* buffer is used by skb, update page_offset */
-#if (PAGE_SIZE < 8192)
-		rx_buffer->page_offset ^= truesize;
-#else
-		rx_buffer->page_offset += truesize;
-#endif
+		iavf_rx_buf_adjust_pg_offset(rx_buffer, truesize);
 	} else {
 		/* buffer is unused, reset bias back to rx_buffer */
 		rx_buffer->pagecnt_bias++;
@@ -1388,45 +1437,41 @@ static struct sk_buff *iavf_construct_skb(struct iavf_ring *rx_ring,
  * iavf_build_skb - Build skb around an existing buffer
  * @rx_ring: Rx descriptor ring to transact packets on
  * @rx_buffer: Rx buffer to pull data from
- * @size: size of buffer to add to skb
+ * @xdp: initialized XDP buffer
  *
  * This function builds an skb around an existing Rx buffer, taking care
  * to set up the skb correctly and avoid any memcpy overhead.
  */
 static struct sk_buff *iavf_build_skb(struct iavf_ring *rx_ring,
 				      struct iavf_rx_buffer *rx_buffer,
-				      unsigned int size)
+				      struct xdp_buff *xdp)
 {
-	void *va;
-#if (PAGE_SIZE < 8192)
-	unsigned int truesize = iavf_rx_pg_size(rx_ring) / 2;
-#else
-	unsigned int truesize = SKB_DATA_ALIGN(sizeof(struct skb_shared_info)) +
-				SKB_DATA_ALIGN(IAVF_SKB_PAD + size);
-#endif
+	unsigned char metasize = xdp->data - xdp->data_meta;
+	unsigned int truesize = xdp->frame_sz;
 	struct sk_buff *skb;
 
-	if (!rx_buffer || !size)
+	if (!rx_buffer)
 		return NULL;
-	/* prefetch first cache line of first page */
-	va = page_address(rx_buffer->page) + rx_buffer->page_offset;
-	net_prefetch(va);
+	/* prefetch first cache line of first page. If xdp->data_meta
+	 * is unused, this points exactly as xdp->data, otherwise we
+	 * likely have a consumer accessing first few bytes of meta
+	 * data, and then actual data.
+	 */
+	net_prefetch(xdp->data_meta);
 
 	/* build an skb around the page buffer */
-	skb = napi_build_skb(va - IAVF_SKB_PAD, truesize);
+	skb = napi_build_skb(xdp->data_hard_start, truesize);
 	if (unlikely(!skb))
 		return NULL;
 
 	/* update pointers within the skb to store the data */
-	skb_reserve(skb, IAVF_SKB_PAD);
-	__skb_put(skb, size);
+	skb_reserve(skb, xdp->data - xdp->data_hard_start);
+	__skb_put(skb, xdp->data_end - xdp->data);
+	if (metasize)
+		skb_metadata_set(skb, metasize);
 
 	/* buffer is used by skb, update page_offset */
-#if (PAGE_SIZE < 8192)
-	rx_buffer->page_offset ^= truesize;
-#else
-	rx_buffer->page_offset += truesize;
-#endif
+	iavf_rx_buf_adjust_pg_offset(rx_buffer, truesize);
 
 	return skb;
 }
@@ -1496,6 +1541,94 @@ static bool iavf_is_non_eop(struct iavf_ring *rx_ring,
 }
 
 /**
+ * iavf_get_hard_start - Get start of memory consumed by the packet
+ * @rx_buff: rx buffer with packet
+ * @ring_rx_offset: offset of packet relative to the hard start
+ */
+static unsigned char *iavf_get_hard_start(struct iavf_rx_buffer *rx_buff,
+					  unsigned int ring_rx_offset)
+{
+	return page_address(rx_buff->page) + rx_buff->page_offset -
+	       ring_rx_offset;
+}
+
+/**
+ * iavf_prepare_xdp_buff - Set XDP buffer fields
+ * @xdp: XDP buffer to modify
+ * @rx_ring: rx ring being cleaned
+ * @rx_buffer: rx buffer with packet
+ * @rx_buff_size: size of packet data
+ */
+static void iavf_prepare_xdp_buff(struct xdp_buff *xdp,
+				  struct iavf_ring *rx_ring,
+				  struct iavf_rx_buffer *rx_buff,
+				  unsigned int rx_buff_size)
+{
+	unsigned char *hard_start;
+	unsigned int ring_rx_offset = iavf_rx_offset(rx_ring);
+
+	hard_start = iavf_get_hard_start(rx_buff, ring_rx_offset);
+	xdp_prepare_buff(xdp, hard_start, ring_rx_offset, rx_buff_size, true);
+#if (PAGE_SIZE >= 8192)
+	xdp->frame_sz = iavf_get_xdp_frame_truesize(rx_ring, rx_buff_size);
+#endif
+}
+
+/**
+ * iavf_init_xdp_buff - Init XDP buffer for ring
+ * @xdp: XDP buffer to init
+ * @rx_ring: rx ring being cleaned
+ */
+static void iavf_init_xdp_buff(struct xdp_buff *xdp, struct iavf_ring *rx_ring)
+{
+	unsigned int frame_sz;
+#if (PAGE_SIZE < 8192)
+	frame_sz = iavf_get_xdp_frame_truesize(rx_ring, 0);
+#else
+	frame_sz = 0;
+#endif
+	xdp_init_buff(xdp, frame_sz, &rx_ring->xdp_rxq);
+}
+
+/**
+ * iavf_run_xdp - Run XDP program and perform resulting action
+ * @rx_ring: RX descriptor ring to transact packets on
+ * @xdp: a prepared XDP buffer
+ * @xdp_prog: an XDP program assigned to the interface
+ * @rx_buffer: RX buffer with a packet
+ *
+ * Returns resulting XDP action.
+ **/
+static unsigned int
+iavf_run_xdp(struct iavf_ring *rx_ring, struct xdp_buff *xdp,
+	     struct bpf_prog *xdp_prog, struct iavf_rx_buffer *rx_buffer)
+{
+	unsigned int xdp_act;
+
+	xdp_act = bpf_prog_run_xdp(xdp_prog, xdp);
+
+	switch (xdp_act) {
+	case XDP_PASS:
+		return XDP_PASS;
+	case XDP_DROP:
+		rx_buffer->pagecnt_bias++;
+		break;
+	default:
+		bpf_warn_invalid_xdp_action(rx_ring->netdev, xdp_prog, xdp_act);
+		fallthrough;
+	case XDP_ABORTED:
+		rx_buffer->pagecnt_bias++;
+		goto xdp_err;
+	}
+
+	return xdp_act;
+xdp_err:
+	trace_xdp_exception(rx_ring->netdev, xdp_prog,
+			    xdp_act);
+	return XDP_ABORTED;
+}
+
+/**
  * iavf_clean_rx_irq - Clean completed descriptors from Rx ring - bounce buf
  * @rx_ring: rx descriptor ring to transact packets on
  * @budget: Total limit on number of packets to process
@@ -1510,9 +1643,15 @@ static bool iavf_is_non_eop(struct iavf_ring *rx_ring,
 static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 {
 	unsigned int total_rx_bytes = 0, total_rx_packets = 0;
-	struct sk_buff *skb = rx_ring->skb;
 	u16 cleaned_count = IAVF_DESC_UNUSED(rx_ring);
+	struct sk_buff *skb = rx_ring->skb;
+	struct bpf_prog *xdp_prog;
 	bool failure = false;
+	unsigned int xdp_act;
+	struct xdp_buff xdp;
+
+	iavf_init_xdp_buff(&xdp, rx_ring);
+	xdp_prog = rcu_dereference(rx_ring->xdp_prog);
 
 	while (likely(total_rx_packets < (unsigned int)budget)) {
 		struct iavf_rx_buffer *rx_buffer;
@@ -1553,14 +1692,34 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 		iavf_trace(clean_rx_irq, rx_ring, rx_desc, skb);
 		rx_buffer = iavf_get_rx_buffer(rx_ring, size);
 
+		if (!size)
+			goto skip_skb;
+
+		iavf_prepare_xdp_buff(&xdp, rx_ring, rx_buffer, size);
+		if (!xdp_prog)
+			goto construct_skb;
+
+		xdp_act = iavf_run_xdp(rx_ring, &xdp, xdp_prog, rx_buffer);
+		if (xdp_act == XDP_PASS)
+			goto construct_skb;
+
+		total_rx_bytes += size;
+		total_rx_packets++;
+
+		iavf_put_rx_buffer(rx_ring, rx_buffer);
+		cleaned_count++;
+		/* Update ntc and stats */
+		iavf_is_non_eop(rx_ring, rx_desc, skb);
+		continue;
+construct_skb:
 		/* retrieve a buffer from the ring */
 		if (skb)
 			iavf_add_rx_frag(rx_ring, rx_buffer, skb, size);
 		else if (ring_uses_build_skb(rx_ring))
-			skb = iavf_build_skb(rx_ring, rx_buffer, size);
+			skb = iavf_build_skb(rx_ring, rx_buffer, &xdp);
 		else
-			skb = iavf_construct_skb(rx_ring, rx_buffer, size);
-
+			skb = iavf_construct_skb(rx_ring, rx_buffer, &xdp);
+skip_skb:
 		/* exit if we failed to retrieve a buffer */
 		if (!skb) {
 			rx_ring->rx_stats.alloc_buff_failed++;
