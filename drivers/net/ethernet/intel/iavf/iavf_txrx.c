@@ -2,6 +2,8 @@
 /* Copyright(c) 2013 - 2018 Intel Corporation. */
 
 #include <linux/bitfield.h>
+#include <linux/bpf_trace.h>
+#include <linux/filter.h>
 #include <linux/net/intel/libie/rx.h>
 #include <linux/prefetch.h>
 
@@ -762,6 +764,17 @@ void iavf_free_rx_resources(struct iavf_ring *rx_ring)
 }
 
 /**
+ * iavf_is_xdp_enabled - Check if XDP is enabled on the RX ring
+ * @rx_ring: Rx descriptor ring
+ *
+ * Returns true, if the ring has been configured for XDP.
+ */
+static bool iavf_is_xdp_enabled(const struct iavf_ring *rx_ring)
+{
+	return !!rcu_access_pointer(rx_ring->xdp_prog);
+}
+
+/**
  * iavf_setup_rx_descriptors - Allocate Rx descriptors
  * @rx_ring: Rx descriptor ring (for a specific queue) to setup
  *
@@ -792,7 +805,8 @@ int iavf_setup_rx_descriptors(struct iavf_ring *rx_ring)
 		goto err;
 	}
 
-	pool = libie_rx_page_pool_create(rx_ring->netdev, rx_ring->count);
+	pool = libie_rx_page_pool_create(rx_ring->netdev, rx_ring->count,
+					 iavf_is_xdp_enabled(rx_ring));
 	if (IS_ERR(pool)) {
 		ret = PTR_ERR(pool);
 		goto err_free_dma;
@@ -1044,32 +1058,32 @@ static void iavf_add_rx_frag(struct sk_buff *skb, struct page *page, u32 hr,
 
 /**
  * iavf_build_skb - Build skb around an existing buffer
- * @page: Rx page to with the data
- * @hr: headroom in front of the data
- * @size: size of the data
+ * @xdp: initialized XDP buffer
  *
  * This function builds an skb around an existing Rx buffer, taking care
  * to set up the skb correctly and avoid any memcpy overhead.
  */
-static struct sk_buff *iavf_build_skb(struct page *page, u32 hr, u32 size)
+static struct sk_buff *iavf_build_skb(const struct xdp_buff *xdp)
 {
 	struct sk_buff *skb;
-	void *va;
+	u32 metasize;
 
-	/* prefetch first cache line of first page */
-	va = page_address(page);
-	net_prefetch(va + hr);
+	net_prefetch(xdp->data_meta);
 
 	/* build an skb around the page buffer */
-	skb = napi_build_skb(va, LIBIE_RX_TRUESIZE);
+	skb = napi_build_skb(xdp->data_hard_start, LIBIE_RX_TRUESIZE);
 	if (unlikely(!skb))
 		return NULL;
 
 	skb_mark_for_recycle(skb);
 
 	/* update pointers within the skb to store the data */
-	skb_reserve(skb, hr);
-	__skb_put(skb, size);
+	skb_reserve(skb, xdp->data - xdp->data_hard_start);
+	__skb_put(skb, xdp->data_end - xdp->data);
+
+	metasize = xdp->data - xdp->data_meta;
+	if (metasize)
+		skb_metadata_set(skb, metasize);
 
 	return skb;
 }
@@ -1088,6 +1102,39 @@ static bool iavf_is_non_eop(u64 qword, struct libie_rq_onstack_stats *stats)
 	stats->fragments++;
 
 	return true;
+}
+
+/**
+ * iavf_run_xdp - Run XDP program and perform resulting action
+ * @rx_ring: RX descriptor ring to transact packets on
+ * @xdp: a prepared XDP buffer
+ * @xdp_prog: an XDP program assigned to the interface
+ *
+ * Returns resulting XDP action.
+ */
+static unsigned int
+iavf_run_xdp(struct iavf_ring *rx_ring, struct xdp_buff *xdp,
+	     struct bpf_prog *xdp_prog)
+{
+	unsigned int xdp_act;
+
+	xdp_act = bpf_prog_run_xdp(xdp_prog, xdp);
+
+	switch (xdp_act) {
+	case XDP_PASS:
+	case XDP_DROP:
+		break;
+	default:
+		bpf_warn_invalid_xdp_action(rx_ring->netdev, xdp_prog, xdp_act);
+
+		fallthrough;
+	case XDP_ABORTED:
+		trace_xdp_exception(rx_ring->netdev, xdp_prog, xdp_act);
+
+		return XDP_DROP;
+	}
+
+	return xdp_act;
 }
 
 /**
@@ -1111,13 +1158,19 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 	struct sk_buff *skb = rx_ring->skb;
 	u32 ntc = rx_ring->next_to_clean;
 	u32 ring_size = rx_ring->count;
+	struct bpf_prog *xdp_prog;
 	u32 hr = pool->p.offset;
 	u32 cleaned_count = 0;
+	unsigned int xdp_act;
+	struct xdp_buff xdp;
+
+	xdp_prog = rcu_dereference(rx_ring->xdp_prog);
+	xdp_init_buff(&xdp, PAGE_SIZE, &rx_ring->xdp_rxq);
 
 	while (likely(cleaned_count < budget)) {
 		union iavf_rx_desc *rx_desc;
+		u32 size, put_size;
 		struct page *page;
-		unsigned int size;
 		u16 vlan_tag = 0;
 		u64 qword;
 
@@ -1161,32 +1214,52 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 		 */
 		if (unlikely(!size)) {
 			page_pool_recycle_direct(pool, page);
-			goto skip_data;
+			goto no_skb;
 		}
 
 		page_pool_dma_sync_for_cpu(pool, page, size);
+		put_size = size;
 
+		xdp_prepare_buff(&xdp, page_address(page), hr, size, true);
+		if (!xdp_prog)
+			goto construct_skb;
+
+		xdp_act = iavf_run_xdp(rx_ring, &xdp, xdp_prog);
+		put_size = max_t(u32, xdp.data_end - xdp.data_hard_start - hr,
+				 put_size);
+
+		if (xdp_act != XDP_PASS) {
+			page_pool_put_page(pool, page, put_size, true);
+
+			stats.bytes += size;
+			stats.packets++;
+
+			skb = NULL;
+			goto no_skb;
+		}
+
+construct_skb:
 		/* retrieve a buffer from the ring */
 		if (skb)
 			iavf_add_rx_frag(skb, page, hr, size);
 		else
-			skb = iavf_build_skb(page, hr, size);
+			skb = iavf_build_skb(&xdp);
 
 		/* exit if we failed to retrieve a buffer */
 		if (!skb) {
-			page_pool_put_page(pool, page, size, true);
+			page_pool_put_page(pool, page, put_size, true);
 			libie_stats_inc_one(&rx_ring->rq_stats,
 					    build_skb_fail);
 			break;
 		}
 
-skip_data:
+no_skb:
 		cleaned_count++;
 		to_refill++;
 		if (unlikely(++ntc == ring_size))
 			ntc = 0;
 
-		if (iavf_is_non_eop(qword, &stats))
+		if (iavf_is_non_eop(qword, &stats) || !skb)
 			continue;
 
 		prefetch(rx_desc);
@@ -1390,6 +1463,8 @@ int iavf_napi_poll(struct napi_struct *napi, int budget)
 	 */
 	budget_per_ring = max(budget/q_vector->num_ringpairs, 1);
 
+	rcu_read_lock();
+
 	iavf_for_each_ring(ring, q_vector->rx) {
 		int cleaned = iavf_clean_rx_irq(ring, budget_per_ring);
 
@@ -1398,6 +1473,8 @@ int iavf_napi_poll(struct napi_struct *napi, int budget)
 		if (cleaned >= budget_per_ring)
 			clean_complete = false;
 	}
+
+	rcu_read_unlock();
 
 	/* If work not completed, return budget and polling will return */
 	if (!clean_complete) {

@@ -132,13 +132,14 @@ static u32 libie_rx_sync_len(const struct net_device *dev, u32 hr)
  * libie_rx_page_pool_create - create a PP with the default libie settings
  * @dev: &net_device which a PP will be created for
  * @size: size of the PP, usually simply Rx queue len
+ * @xdp: whether XDP is enabled on the device
  *
  * Returns &page_pool on success, casted -errno on failure.
  */
 struct page_pool *libie_rx_page_pool_create(const struct net_device *dev,
-					    u32 size)
+					    u32 size, bool xdp)
 {
-	u32 hr = LIBIE_SKB_HEADROOM;
+	u32 hr = xdp ? LIBIE_XDP_HEADROOM : LIBIE_SKB_HEADROOM;
 	const struct page_pool_params pp = {
 		.flags		= PP_FLAG_DMA_MAP | PP_FLAG_DMA_MAP_WEAK |
 				  PP_FLAG_DMA_SYNC_DEV,
@@ -146,7 +147,7 @@ struct page_pool *libie_rx_page_pool_create(const struct net_device *dev,
 		.pool_size	= size,
 		.nid		= NUMA_NO_NODE,
 		.dev		= dev->dev.parent,
-		.dma_dir	= DMA_FROM_DEVICE,
+		.dma_dir	= xdp ? DMA_BIDIRECTIONAL : DMA_FROM_DEVICE,
 		.max_len	= libie_rx_sync_len(dev, hr),
 		.offset		= hr,
 	};
