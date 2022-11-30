@@ -1724,7 +1724,29 @@ static void iavf_init_tx_ring(struct iavf_adapter *adapter,
 	if (xdp_ring) {
 		tx_ring->queue_index += adapter->num_active_queues;
 		tx_ring->flags |= IAVF_TXRX_FLAGS_XDP;
+		spin_lock_init(&tx_ring->tx_lock);
 	}
+}
+
+/**
+ * iavf_xdp_cfg_tx_sharing - Enable XDP TxQ sharing, if needed
+ * @adapter: board private structure
+ *
+ * If there is more CPUs than rings, sharing XDP TxQ allows us
+ * to handle XDP_REDIRECT from other interfaces.
+ */
+static void iavf_xdp_cfg_tx_sharing(struct iavf_adapter *adapter)
+{
+	u32 num_active_queues = adapter->num_active_queues;
+	u32 num_cpus = num_online_cpus();
+
+	if (!iavf_adapter_xdp_active(adapter) || num_active_queues >= num_cpus)
+		return;
+
+	netdev_warn(adapter->netdev,
+		    "System has %u CPUs, but only %u XDP queues can be configured, entering XDP TxQ sharing mode, performance is decreased\n",
+		    num_cpus, num_active_queues);
+	static_branch_inc(&iavf_xdp_locking_key);
 }
 
 /**
@@ -1750,6 +1772,8 @@ static int iavf_alloc_xdp_queues(struct iavf_adapter *adapter, u32 num_active_qu
 		iavf_init_tx_ring(adapter, i, true);
 		adapter->rx_rings[i].xdp_ring = &adapter->xdp_rings[i];
 	}
+
+	iavf_xdp_cfg_tx_sharing(adapter);
 
 	return 0;
 }
@@ -3558,6 +3582,9 @@ void iavf_free_all_tx_resources(struct iavf_adapter *adapter)
 
 	if (!adapter->tx_rings)
 		return;
+
+	if (static_key_enabled(&iavf_xdp_locking_key))
+		static_branch_dec(&iavf_xdp_locking_key);
 
 	for (i = 0; i < adapter->num_active_queues; i++)
 		if (adapter->tx_rings[i].desc)

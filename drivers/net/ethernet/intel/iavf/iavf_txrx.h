@@ -272,7 +272,8 @@ struct iavf_ring {
 
 	struct bpf_prog __rcu *xdp_prog;
 	struct iavf_ring *xdp_ring;
-	struct sk_buff *skb;		/* When iavf_clean_rx_ring_irq() must
+	union {
+		struct sk_buff *skb;	/* When iavf_clean_rx_ring_irq() must
 					 * return before it sees the EOP for
 					 * the current packet, we save that skb
 					 * here and resume receiving this
@@ -280,6 +281,8 @@ struct iavf_ring {
 					 * iavf_clean_rx_ring_irq() is called
 					 * for this ring.
 					 */
+		spinlock_t tx_lock;	/* Protect XDP TX ring, when shared */
+	};
 
 	/* stats structs */
 	union {
@@ -339,6 +342,8 @@ u32 iavf_get_tx_pending(struct iavf_ring *ring, bool in_sw);
 void iavf_detect_recover_hung(struct iavf_vsi *vsi);
 int __iavf_maybe_stop_tx(struct iavf_ring *tx_ring, int size);
 bool __iavf_chk_linearize(struct sk_buff *skb);
+
+DECLARE_STATIC_KEY_FALSE(iavf_xdp_locking_key);
 
 int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 		  u32 flags);
@@ -484,8 +489,12 @@ static inline void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring,
 	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_TX) {
 		struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[first_idx];
 
+		if (static_branch_unlikely(&iavf_xdp_locking_key))
+			spin_lock(&xdp_ring->tx_lock);
 		tx_buf->rs_desc_idx = iavf_set_rs_bit(xdp_ring);
 		iavf_xdp_ring_update_tail(xdp_ring);
+		if (static_branch_unlikely(&iavf_xdp_locking_key))
+			spin_unlock(&xdp_ring->tx_lock);
 	}
 }
 
