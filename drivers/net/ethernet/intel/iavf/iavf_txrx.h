@@ -249,6 +249,7 @@ struct iavf_ring {
 	struct net_device *netdev;	/* netdev ring maps to */
 	union {
 		struct iavf_tx_buffer *tx_bi;
+		struct xdp_buff **xdp_buff;
 		struct page **rx_pages;
 	};
 	DECLARE_BITMAP(state, __IAVF_RING_STATE_NBITS);
@@ -479,8 +480,49 @@ static inline void __iavf_update_tx_ring_stats(struct iavf_ring *tx_ring,
 #define iavf_update_tx_ring_stats(r, p, b) \
 	__iavf_update_tx_ring_stats(r, &(r)->q_vector->tx, p, b)
 
+/**
+ * iavf_update_rx_ring_stats - Update RX ring stats
+ * @rx_ring: ring to bump
+ * @rc: TODO
+ * @rx_bytes: number of bytes processed since last update
+ * @rx_packets: number of packets processed since last update
+ **/
+static inline void __iavf_update_rx_ring_stats(struct iavf_ring *rx_ring,
+					       struct iavf_ring_container *rc,
+					       u32 rx_bytes, u32 rx_packets)
+{
+	u64_stats_update_begin(&rx_ring->syncp);
+	rx_ring->stats.packets += rx_packets;
+	rx_ring->stats.bytes += rx_bytes;
+	u64_stats_update_end(&rx_ring->syncp);
+	rc->total_packets += rx_packets;
+	rc->total_bytes += rx_bytes;
+}
+
+#define iavf_update_rx_ring_stats(r, p, b) \
+	__iavf_update_rx_ring_stats(r, &(r)->q_vector->rx, p, b)
+
+/**
+ * iavf_release_rx_desc - Store the new tail and head values
+ * @rx_ring: ring to bump
+ * @val: new head index
+ **/
+static inline void iavf_release_rx_desc(struct iavf_ring *rx_ring, u32 val)
+{
+	rx_ring->next_to_use = val;
+
+	/* Force memory writes to complete before letting h/w
+	 * know there are new descriptors to fetch.  (Only
+	 * applicable for weak-ordered memory model archs,
+	 * such as IA-64).
+	 */
+	wmb();
+	writel(val, rx_ring->tail);
+}
+
 #define IAVF_RXQ_XDP_ACT_FINALIZE_TX	BIT(0)
 #define IAVF_RXQ_XDP_ACT_FINALIZE_REDIR	BIT(1)
+#define IAVF_RXQ_XDP_ACT_STOP_NOW	BIT(2)
 
 /**
  * iavf_finalize_xdp_rx - Finalize XDP actions once per RX ring clean

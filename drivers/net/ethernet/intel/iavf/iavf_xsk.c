@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright(c) 2022 Intel Corporation. */
 
+#include <linux/bpf_trace.h>
+#include <linux/filter.h>
+#include <linux/net/intel/libie.h>
 #include <net/xdp_sock_drv.h>
 #include <net/xdp_sock.h>
 #include "iavf.h"
+#include "iavf_trace.h"
 #include "iavf_xsk.h"
 
 #define IAVF_PF_REQ_TIMEOUT_MS		300
@@ -286,7 +290,7 @@ static int iavf_xsk_pool_disable(struct iavf_adapter *adapter, u16 qid)
 		return -EINVAL;
 
 	clear_bit(qid, adapter->af_xdp_zc_qps);
-	xsk_pool_dma_unmap(pool, IAVF_RX_DMA_ATTR);
+	xsk_pool_dma_unmap(pool, LIBIE_RX_DMA_ATTR);
 
 	return 0;
 }
@@ -310,7 +314,7 @@ iavf_xsk_pool_enable(struct iavf_adapter *adapter, struct xsk_buff_pool *pool,
 	    qid >= vsi->netdev->real_num_tx_queues)
 		return -EINVAL;
 
-	err = xsk_pool_dma_map(pool, &adapter->pdev->dev, IAVF_RX_DMA_ATTR);
+	err = xsk_pool_dma_map(pool, &adapter->pdev->dev, LIBIE_RX_DMA_ATTR);
 	if (err)
 		return err;
 
@@ -345,6 +349,8 @@ int iavf_xsk_pool_setup(struct iavf_adapter *adapter,
 		     iavf_adapter_xdp_active(adapter);
 
 	if (if_running) {
+		struct iavf_ring *rx_ring = &adapter->rx_rings[qid];
+
 		if (iavf_lock_timeout(&adapter->crit_lock,
 				      IAVF_CRIT_LOCK_WAIT_TIMEOUT_MS))
 			return -EBUSY;
@@ -357,6 +363,15 @@ int iavf_xsk_pool_setup(struct iavf_adapter *adapter,
 		ret = iavf_qp_dis(adapter, qid);
 		if (ret) {
 			netdev_err(vsi->netdev, "iavf_qp_dis error = %d\n", ret);
+			goto xsk_pool_if_up;
+		}
+
+		iavf_free_rx_resources(rx_ring);
+
+		ret = iavf_setup_rx_descriptors(rx_ring);
+		if (ret) {
+			netdev_err(vsi->netdev,
+				   "iavf rx re-allocation error = %d\n", ret);
 			goto xsk_pool_if_up;
 		}
 	}
@@ -696,4 +711,418 @@ void iavf_xsk_clean_xdp_ring(struct iavf_ring *xdp_ring)
 
 	if (xsk_frames)
 		xsk_tx_completed(xdp_ring->xsk_pool, xsk_frames);
+}
+
+/**
+ * iavf_init_rx_descs_zc - pick buffers from XSK buffer pool and use it
+ * @pool: XSK Buffer pool to pull the buffers from
+ * @xdp: SW ring of xdp_buff that will hold the buffers
+ * @rx_desc: Pointer to Rx descriptors that will be filled
+ * @count: The number of buffers to allocate
+ *
+ * This function allocates a number of Rx buffers from the fill ring
+ * or the internal recycle mechanism and places them on the Rx ring.
+ *
+ * Note that ring wrap should be handled by caller of this function.
+ *
+ * Returns the amount of allocated Rx descriptors
+ */
+static u16 iavf_init_rx_descs_zc(struct xsk_buff_pool *pool,
+				 struct xdp_buff **xdp,
+				 union iavf_rx_desc *rx_desc, u16 count)
+{
+	dma_addr_t dma;
+	u16 num_buffs;
+	u16 i;
+
+	num_buffs = xsk_buff_alloc_batch(pool, xdp, count);
+	for (i = 0; i < num_buffs; i++) {
+		dma = xsk_buff_xdp_get_dma(*xdp);
+		rx_desc->read.pkt_addr = cpu_to_le64(dma);
+		rx_desc->wb.qword1.status_error_len = 0;
+
+		rx_desc++;
+		xdp++;
+	}
+
+	return num_buffs;
+}
+
+static struct xdp_buff **iavf_get_xdp_buff(struct iavf_ring *ring, u32 idx)
+{
+	return &ring->xdp_buff[idx];
+}
+
+/**
+ * __iavf_alloc_rx_buffers_zc - allocate a number of Rx buffers
+ * @rx_ring: Rx ring
+ * @count: The number of buffers to allocate
+ *
+ * Place the @count of descriptors onto Rx ring. Handle the ring wrap
+ * for case where space from next_to_use up to the end of ring is less
+ * than @count. Finally do a tail bump.
+ *
+ * Returns true if all allocations were successful, false if any fail.
+ */
+static bool __iavf_alloc_rx_buffers_zc(struct iavf_ring *rx_ring, u16 count)
+{
+	u32 nb_buffs_extra = 0, nb_buffs = 0;
+	u16 ntu = rx_ring->next_to_use;
+	union iavf_rx_desc *rx_desc;
+	u16 total_count = count;
+	struct xdp_buff **xdp;
+
+	rx_desc = IAVF_RX_DESC(rx_ring, ntu);
+	xdp = iavf_get_xdp_buff(rx_ring, ntu);
+
+	if (ntu + count >= rx_ring->count) {
+		nb_buffs_extra = iavf_init_rx_descs_zc(rx_ring->xsk_pool, xdp,
+						       rx_desc,
+						       rx_ring->count - ntu);
+		if (nb_buffs_extra != rx_ring->count - ntu) {
+			ntu += nb_buffs_extra;
+			goto exit;
+		}
+		rx_desc = IAVF_RX_DESC(rx_ring, 0);
+		xdp = iavf_get_xdp_buff(rx_ring, 0);
+		ntu = 0;
+		count -= nb_buffs_extra;
+		iavf_release_rx_desc(rx_ring, 0);
+
+		if (!count)
+			goto exit;
+	}
+
+	nb_buffs = iavf_init_rx_descs_zc(rx_ring->xsk_pool, xdp, rx_desc, count);
+
+	ntu += nb_buffs;
+	if (ntu == rx_ring->count)
+		ntu = 0;
+
+exit:
+	if (rx_ring->next_to_use != ntu)
+		iavf_release_rx_desc(rx_ring, ntu);
+
+	return total_count == (nb_buffs_extra + nb_buffs);
+}
+
+/**
+ * iavf_alloc_rx_buffers_zc - allocate a number of Rx buffers
+ * @rx_ring: Rx ring
+ * @count: The number of buffers to allocate
+ *
+ * Wrapper for internal allocation routine; figure out how many tail
+ * bumps should take place based on the given threshold
+ *
+ * Returns true if all calls to internal alloc routine succeeded
+ */
+static bool iavf_alloc_rx_buffers_zc(struct iavf_ring *rx_ring, u16 count)
+{
+	u16 rx_thresh = IAVF_RING_QUARTER(rx_ring);
+	u16 leftover, i, tail_bumps;
+
+	tail_bumps = count / rx_thresh;
+	leftover = count - (tail_bumps * rx_thresh);
+
+	for (i = 0; i < tail_bumps; i++)
+		if (!__iavf_alloc_rx_buffers_zc(rx_ring, rx_thresh))
+			return false;
+	return __iavf_alloc_rx_buffers_zc(rx_ring, leftover);
+}
+
+/**
+ * iavf_check_alloc_rx_buffers_zc - allocate a number of Rx buffers with logs
+ * @adapter: board private structure
+ * @rx_ring: Rx ring
+ *
+ * Wrapper for internal allocation routine; Prints out logs, if allocation
+ * did not go as expected
+ */
+void iavf_check_alloc_rx_buffers_zc(struct iavf_adapter *adapter,
+				    struct iavf_ring *rx_ring)
+{
+	u32 count = IAVF_DESC_UNUSED(rx_ring);
+
+	if (!xsk_buff_can_alloc(rx_ring->xsk_pool, count)) {
+		netdev_warn(adapter->netdev,
+			    "XSK buffer pool does not provide enough addresses to fill %d buffers on Rx ring %d\n",
+			    count, rx_ring->queue_index);
+		netdev_warn(adapter->netdev,
+			    "Change Rx ring/fill queue size to avoid performance issues\n");
+	}
+
+	if (!iavf_alloc_rx_buffers_zc(rx_ring, count))
+		netdev_warn(adapter->netdev,
+			    "Failed to allocate some buffers on XSK buffer pool enabled Rx ring %d\n",
+			    rx_ring->queue_index);
+}
+
+/**
+ * iavf_rx_xsk_pool - Get a valid xsk pool for RX ring
+ * @ring: Rx ring being configured
+ *
+ * Do not return a xsk pool, if socket is TX-only
+ **/
+static struct xsk_buff_pool *iavf_rx_xsk_pool(struct iavf_ring *ring)
+{
+	struct iavf_adapter *adapter = ring->vsi->back;
+	u16 qid = ring->queue_index;
+	struct xsk_buff_pool *pool;
+
+	if (!iavf_adapter_xdp_active(adapter) ||
+	    !test_bit(qid, adapter->af_xdp_zc_qps))
+		return NULL;
+
+	pool = xsk_get_pool_from_qid(adapter->netdev, qid);
+	if (!pool || !xsk_buff_can_alloc(pool, 1))
+		return NULL;
+
+	return pool;
+}
+
+void iavf_xsk_setup_rx_ring(struct iavf_ring *rx_ring)
+{
+	struct xsk_buff_pool *pool;
+
+	pool = iavf_rx_xsk_pool(rx_ring);
+	if (!pool)
+		return;
+
+	rx_ring->xsk_pool = pool;
+	rx_ring->flags |= IAVF_TXRX_FLAGS_XSK;
+}
+
+/**
+ * iavf_xsk_clean_rx_ring - clean buffer pool queues connected to a given Rx ring
+ * @rx_ring: ring to be cleaned
+ */
+void iavf_xsk_clean_rx_ring(struct iavf_ring *rx_ring)
+{
+	u16 ntc = rx_ring->next_to_clean;
+	u16 ntu = rx_ring->next_to_use;
+
+	while (ntc != ntu) {
+		struct xdp_buff *xdp = *iavf_get_xdp_buff(rx_ring, ntc);
+
+		xsk_buff_free(xdp);
+		ntc++;
+		if (ntc >= rx_ring->count)
+			ntc = 0;
+	}
+}
+
+static int iavf_xmit_xdp_buff_zc(struct xdp_buff *xdp,
+				 struct iavf_ring *xdp_ring)
+{
+	u32 batch_sz = IAVF_RING_QUARTER(xdp_ring);
+	u32 size = xdp->data_end - xdp->data;
+	u32 ntu = xdp_ring->next_to_use;
+	struct iavf_tx_buffer *tx_buff;
+	struct iavf_tx_desc *tx_desc;
+	void *data = xdp->data;
+	dma_addr_t dma;
+
+	if (unlikely(IAVF_DESC_UNUSED(xdp_ring) < batch_sz))
+		iavf_clean_xdp_irq_zc(xdp_ring);
+
+	if (unlikely(!IAVF_DESC_UNUSED(xdp_ring))) {
+		xdp_ring->tx_stats.tx_busy++;
+		return -EBUSY;
+	}
+
+	dma = xsk_buff_xdp_get_dma(xdp);
+	xsk_buff_raw_dma_sync_for_device(xdp_ring->xsk_pool, dma, size);
+
+	tx_buff = &xdp_ring->tx_bi[ntu];
+	tx_buff->bytecount = size;
+	tx_buff->gso_segs = 1;
+	/* TODO: set type to XSK_TX or XDP_XMIT depending on @map and assign
+	 * @xdp here.
+	 */
+	tx_buff->raw_buf = data;
+
+	/* record length, and DMA address */
+	dma_unmap_len_set(tx_buff, len, size);
+	dma_unmap_addr_set(tx_buff, dma, dma);
+
+	tx_desc = IAVF_TX_DESC(xdp_ring, ntu);
+	tx_desc->buffer_addr = cpu_to_le64(dma);
+	tx_desc->cmd_type_offset_bsz = iavf_build_ctob(IAVF_TX_DESC_CMD_EOP, 0,
+						       size, 0);
+
+	ntu++;
+	if (ntu > xdp_ring->next_rs) {
+		tx_desc = IAVF_TX_DESC(xdp_ring, xdp_ring->next_rs);
+		tx_desc->cmd_type_offset_bsz |=
+			cpu_to_le64(IAVF_TX_DESC_CMD_RS <<
+				    IAVF_TXD_QW1_CMD_SHIFT);
+		xdp_ring->next_rs += batch_sz;
+	}
+
+	if (ntu == xdp_ring->count) {
+		ntu = 0;
+		xdp_ring->next_rs = batch_sz - 1;
+	}
+
+	xdp_ring->next_to_use = ntu;
+	xdp_ring->xdp_tx_active++;
+
+	return 0;
+}
+
+/**
+ * iavf_run_xdp_zc - Run XDP program and perform resulting action for ZC
+ * @rx_ring: RX descriptor ring to transact packets on
+ * @xdp: a prepared XDP buffer
+ * @xdp_prog: an XDP program assigned to the interface
+ * @xdp_ring: XDP TX queue assigned to the RX ring
+ * @rxq_xdp_act: Logical OR of flags of XDP actions that require finalization
+ *
+ * Returns resulting XDP action.
+ **/
+static unsigned int
+iavf_run_xdp_zc(struct iavf_ring *rx_ring, struct xdp_buff *xdp,
+		struct bpf_prog *xdp_prog, struct iavf_ring *xdp_ring,
+		u32 *rxq_xdp_act)
+{
+	unsigned int xdp_act;
+	int err;
+
+	xdp_act = bpf_prog_run_xdp(xdp_prog, xdp);
+
+	if (likely(xdp_act == XDP_REDIRECT)) {
+		err = xdp_do_redirect(rx_ring->netdev, xdp, xdp_prog);
+		if (likely(!err)) {
+			*rxq_xdp_act |= IAVF_RXQ_XDP_ACT_FINALIZE_REDIR;
+			return XDP_REDIRECT;
+		}
+
+		if (xsk_uses_need_wakeup(rx_ring->xsk_pool) && err == -ENOBUFS)
+			*rxq_xdp_act |= IAVF_RXQ_XDP_ACT_STOP_NOW;
+
+		goto xdp_err;
+	}
+
+	switch (xdp_act) {
+	case XDP_TX:
+		err = iavf_xmit_xdp_buff_zc(xdp, xdp_ring);
+		if (unlikely(err))
+			goto xdp_err;
+
+		*rxq_xdp_act |= IAVF_RXQ_XDP_ACT_FINALIZE_TX;
+		break;
+	default:
+		bpf_warn_invalid_xdp_action(rx_ring->netdev, xdp_prog, xdp_act);
+
+		fallthrough;
+	case XDP_ABORTED:
+xdp_err:
+		trace_xdp_exception(rx_ring->netdev, xdp_prog, xdp_act);
+
+		fallthrough;
+	case XDP_DROP:
+		xsk_buff_free(xdp);
+
+		return XDP_DROP;
+	}
+
+	return xdp_act;
+}
+
+/**
+ * iavf_clean_rx_irq_zc - consumes packets from the hardware ring
+ * @rx_ring: AF_XDP Rx ring
+ * @budget: NAPI budget
+ *
+ * Returns number of processed packets on success, remaining budget on failure.
+ */
+int iavf_clean_rx_irq_zc(struct iavf_ring *rx_ring, int budget)
+{
+	unsigned int total_rx_bytes = 0, total_rx_packets = 0;
+	u32 ntc = rx_ring->next_to_clean;
+	u32 ring_size = rx_ring->count;
+	struct iavf_ring *xdp_ring;
+	struct bpf_prog *xdp_prog;
+	u32 cleaned_count = 0;
+	bool failure = false;
+	u32 rxq_xdp_act = 0;
+	u32 to_refill;
+
+	xdp_prog = rcu_dereference(rx_ring->xdp_prog);
+	xdp_ring = rx_ring->xdp_ring;
+
+	while (likely(cleaned_count < budget)) {
+		union iavf_rx_desc *rx_desc;
+		struct xdp_buff *xdp;
+		unsigned int size;
+		u64 qword;
+
+		rx_desc = IAVF_RX_DESC(rx_ring, ntc);
+
+		/* status_error_len will always be zero for unused descriptors
+		 * because it's cleared in cleanup, and overlaps with hdr_addr
+		 * which is always zero because packet split isn't used, if the
+		 * hardware wrote DD then the length will be non-zero
+		 */
+		qword = le64_to_cpu(rx_desc->wb.qword1.status_error_len);
+		if (!iavf_test_staterr(qword, IAVF_RX_DESC_STATUS_DD_SHIFT))
+			break;
+
+		/* This memory barrier is needed to keep us from reading
+		 * any other fields out of the rx_desc until we have
+		 * verified the descriptor has been written back.
+		 */
+		dma_rmb();
+
+		size = (qword & IAVF_RXD_QW1_LENGTH_PBUF_MASK) >>
+		       IAVF_RXD_QW1_LENGTH_PBUF_SHIFT;
+
+		xdp = *iavf_get_xdp_buff(rx_ring, ntc);
+		iavf_trace(clean_rx_irq_zc, rx_ring, rx_desc, NULL);
+
+		if (unlikely(!size)) {
+			xsk_buff_free(xdp);
+			goto next;
+		}
+
+		xsk_buff_set_size(xdp, size);
+		xsk_buff_dma_sync_for_cpu(xdp, rx_ring->xsk_pool);
+
+		iavf_run_xdp_zc(rx_ring, xdp, xdp_prog, xdp_ring,
+				&rxq_xdp_act);
+
+		if (unlikely(rxq_xdp_act & IAVF_RXQ_XDP_ACT_STOP_NOW)) {
+			failure = true;
+			break;
+		}
+
+		total_rx_bytes += size;
+		total_rx_packets++;
+
+next:
+		cleaned_count++;
+		if (unlikely(++ntc == ring_size))
+			ntc = 0;
+	}
+
+	rx_ring->next_to_clean = ntc;
+
+	iavf_finalize_xdp_rx(xdp_ring, rxq_xdp_act);
+
+	to_refill = IAVF_DESC_UNUSED(rx_ring);
+	if (to_refill > IAVF_RING_QUARTER(rx_ring))
+		failure |= !iavf_alloc_rx_buffers_zc(rx_ring, to_refill);
+
+	iavf_update_rx_ring_stats(rx_ring, total_rx_bytes, total_rx_packets);
+
+	if (xsk_uses_need_wakeup(rx_ring->xsk_pool)) {
+		if (failure || rx_ring->next_to_clean == rx_ring->next_to_use)
+			xsk_set_rx_need_wakeup(rx_ring->xsk_pool);
+		else
+			xsk_clear_rx_need_wakeup(rx_ring->xsk_pool);
+
+		return cleaned_count;
+	}
+
+	return unlikely(failure) ? budget : cleaned_count;
 }
