@@ -187,6 +187,18 @@ static inline unsigned int iavf_txd_use_count(unsigned int size)
 #define IAVF_TX_FLAGS_VLAN_PRIO_SHIFT		29
 #define IAVF_TX_FLAGS_VLAN_SHIFT		16
 
+/**
+ * enum iavf_xdp_buffer_type - type of &iavf_tx_buffer on XDP queue
+ * @IAVF_XDP_BUFFER_NONE: unused, no action required
+ * @IAVF_XDP_BUFFER_TX: free according to our memory model
+ * @IAVF_XDP_BUFFER_FRAME: use xdp_return_frame()
+ */
+enum iavf_xdp_buffer_type {
+	IAVF_XDP_BUFFER_NONE	= 0U,
+	IAVF_XDP_BUFFER_TX,
+	IAVF_XDP_BUFFER_FRAME,
+};
+
 struct iavf_tx_buffer {
 
 	/* Track the last frame in batch/packet */
@@ -195,11 +207,13 @@ struct iavf_tx_buffer {
 		u16 rs_desc_idx;			/* on XDP queue */
 	};
 	union {
-		struct sk_buff *skb;
-		struct page *page;
+		struct sk_buff *skb;		/* used for .ndo_start_xmit() */
+		struct page *page;		/* used for XDP_TX */
+		struct xdp_frame *xdpf;		/* used for .ndo_xdp_xmit() */
 	};
 	unsigned int bytecount;
 	unsigned short gso_segs;
+	unsigned short xdp_type;
 
 	DEFINE_DMA_UNMAP_ADDR(dma);
 	DEFINE_DMA_UNMAP_LEN(len);
@@ -326,6 +340,9 @@ void iavf_detect_recover_hung(struct iavf_vsi *vsi);
 int __iavf_maybe_stop_tx(struct iavf_ring *tx_ring, int size);
 bool __iavf_chk_linearize(struct sk_buff *skb);
 
+int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
+		  u32 flags);
+
 /**
  * iavf_xmit_descriptor_count - calculate number of Tx descriptors needed
  * @skb:     send buffer
@@ -432,6 +449,7 @@ __iavf_update_tx_ring_stats(struct iavf_ring *tx_ring,
 	__iavf_update_tx_ring_stats(r, &(r)->q_vector->tx, s)
 
 #define IAVF_RXQ_XDP_ACT_FINALIZE_TX	BIT(0)
+#define IAVF_RXQ_XDP_ACT_FINALIZE_REDIR	BIT(1)
 
 /**
  * iavf_set_rs_bit - set RS bit on last produced descriptor.
@@ -461,6 +479,8 @@ static inline u16 iavf_set_rs_bit(struct iavf_ring *xdp_ring)
 static inline void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring,
 					u32 rxq_xdp_act, u32 first_idx)
 {
+	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_REDIR)
+		xdp_do_flush_map();
 	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_TX) {
 		struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[first_idx];
 
