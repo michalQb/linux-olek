@@ -5167,6 +5167,7 @@ static const struct net_device_ops iavf_netdev_ops = {
 	.ndo_set_features	= iavf_set_features,
 	.ndo_setup_tc		= iavf_setup_tc,
 	.ndo_bpf		= iavf_xdp,
+	.ndo_xdp_xmit		= iavf_xdp_xmit,
 };
 
 /**
