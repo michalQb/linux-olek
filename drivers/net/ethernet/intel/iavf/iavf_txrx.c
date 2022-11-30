@@ -17,16 +17,6 @@ DEFINE_STATIC_KEY_FALSE(iavf_xdp_locking_key);
 static bool iavf_xdp_xmit_back(const struct xdp_buff *buff,
 			       struct iavf_ring *xdp_ring);
 
-static inline __le64 build_ctob(u32 td_cmd, u32 td_offset, unsigned int size,
-				u32 td_tag)
-{
-	return cpu_to_le64(IAVF_TX_DESC_DTYPE_DATA |
-			   ((u64)td_cmd  << IAVF_TXD_QW1_CMD_SHIFT) |
-			   ((u64)td_offset << IAVF_TXD_QW1_OFFSET_SHIFT) |
-			   ((u64)size  << IAVF_TXD_QW1_TX_BUF_SZ_SHIFT) |
-			   ((u64)td_tag  << IAVF_TXD_QW1_L2TAG1_SHIFT));
-}
-
 #define IAVF_TXD_CMD (IAVF_TX_DESC_CMD_EOP | IAVF_TX_DESC_CMD_RS)
 
 /**
@@ -69,15 +59,19 @@ static void iavf_unmap_and_free_tx_resource(struct iavf_ring *ring,
 void iavf_clean_tx_ring(struct iavf_ring *tx_ring)
 {
 	unsigned long bi_size;
-	u16 i;
 
 	/* ring already cleared, nothing to do */
 	if (!tx_ring->tx_bi)
 		return;
 
-	/* Free all the Tx ring sk_buffs */
-	for (i = 0; i < tx_ring->count; i++)
-		iavf_unmap_and_free_tx_resource(tx_ring, &tx_ring->tx_bi[i]);
+	if (tx_ring->flags & IAVF_TXRX_FLAGS_XSK) {
+		iavf_xsk_clean_xdp_ring(tx_ring);
+	} else {
+		/* Free all the Tx ring sk_buffs */
+		for (u32 i = 0; i < tx_ring->count; i++)
+			iavf_unmap_and_free_tx_resource(tx_ring,
+							&tx_ring->tx_bi[i]);
+	}
 
 	bi_size = sizeof(struct iavf_tx_buffer) * tx_ring->count;
 	memset(tx_ring->tx_bi, 0, bi_size);
@@ -693,6 +687,8 @@ int iavf_setup_tx_descriptors(struct iavf_ring *tx_ring)
 		tx_desc = IAVF_TX_DESC(tx_ring, j);
 		tx_desc->cmd_type_offset_bsz = 0;
 	}
+
+	iavf_xsk_setup_xdp_ring(tx_ring);
 
 	return 0;
 
@@ -1473,7 +1469,16 @@ int iavf_napi_poll(struct napi_struct *napi, int budget)
 	 * budget and be more aggressive about cleaning up the Tx descriptors.
 	 */
 	iavf_for_each_ring(ring, q_vector->tx) {
-		if (!iavf_clean_tx_irq(vsi, ring, budget)) {
+		bool wd;
+
+		if (ring->flags & IAVF_TXRX_FLAGS_XSK)
+			wd = iavf_xmit_zc(ring);
+		else if (ring->flags & IAVF_TXRX_FLAGS_XDP)
+			wd = true;
+		else
+			wd = iavf_clean_tx_irq(vsi, ring, budget);
+
+		if (!wd) {
 			clean_complete = false;
 			continue;
 		}
@@ -2052,8 +2057,8 @@ static inline void iavf_tx_map(struct iavf_ring *tx_ring, struct sk_buff *skb,
 
 		while (unlikely(size > IAVF_MAX_DATA_PER_TXD)) {
 			tx_desc->cmd_type_offset_bsz =
-				build_ctob(td_cmd, td_offset,
-					   max_data, td_tag);
+				iavf_build_ctob(td_cmd, td_offset,
+						max_data, td_tag);
 
 			tx_desc++;
 			i++;
@@ -2073,8 +2078,9 @@ static inline void iavf_tx_map(struct iavf_ring *tx_ring, struct sk_buff *skb,
 		if (likely(!data_len))
 			break;
 
-		tx_desc->cmd_type_offset_bsz = build_ctob(td_cmd, td_offset,
-							  size, td_tag);
+		tx_desc->cmd_type_offset_bsz = iavf_build_ctob(td_cmd,
+							       td_offset,
+							       size, td_tag);
 
 		tx_desc++;
 		i++;
@@ -2106,7 +2112,7 @@ static inline void iavf_tx_map(struct iavf_ring *tx_ring, struct sk_buff *skb,
 	/* write last descriptor with RS and EOP bits */
 	td_cmd |= IAVF_TXD_CMD;
 	tx_desc->cmd_type_offset_bsz =
-			build_ctob(td_cmd, td_offset, size, td_tag);
+			iavf_build_ctob(td_cmd, td_offset, size, td_tag);
 
 	skb_tx_timestamp(skb);
 
@@ -2377,8 +2383,8 @@ static int iavf_xmit_xdp_buff(const struct xdp_buff *xdp,
 
 	tx_desc = IAVF_TX_DESC(xdp_ring, ntu);
 	tx_desc->buffer_addr = cpu_to_le64(dma);
-	tx_desc->cmd_type_offset_bsz = build_ctob(IAVF_TX_DESC_CMD_EOP, 0,
-						  size, 0);
+	tx_desc->cmd_type_offset_bsz = iavf_build_ctob(IAVF_TX_DESC_CMD_EOP, 0,
+						       size, 0);
 
 	ntu++;
 	if (ntu > xdp_ring->next_rs) {

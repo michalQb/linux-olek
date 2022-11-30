@@ -79,6 +79,26 @@ iavf_qvec_toggle_napi(struct iavf_adapter *adapter,
 }
 
 /**
+ * iavf_trigger_sw_intr - trigger a software interrupt
+ * @adapter: adapter of interest
+ * @q_vector: interrupt vector to trigger the software interrupt for
+ */
+static void
+iavf_trigger_sw_intr(struct iavf_adapter *adapter,
+		     struct iavf_q_vector *q_vector)
+{
+        struct iavf_hw *hw = &adapter->hw;
+
+        wr32(hw, IAVF_VFINT_DYN_CTLN1(q_vector->reg_idx),
+             (IAVF_VFINT_DYN_CTLN1_INTENA_MASK |
+              IAVF_VFINT_DYN_CTLN1_ITR_INDX_MASK |
+              IAVF_VFINT_DYN_CTLN1_SWINT_TRIG_MASK |
+              IAVF_VFINT_DYN_CTLN1_SW_ITR_INDX_ENA_MASK));
+
+        iavf_flush(hw);
+}
+
+/**
  * iavf_qvec_dis_irq - Mask off queue interrupt generation on given ring
  * @adapter: the adapter that contains queue vector being un-configured
  * @q_vector: queue vector
@@ -362,4 +382,318 @@ failure:
 	}
 
 	return ret;
+}
+
+/**
+ * iavf_clean_xdp_tx_buf - Free and unmap XDP Tx buffer
+ * @xdp_ring: XDP Tx ring
+ * @tx_buf: Tx buffer to clean
+ */
+static void
+iavf_clean_xdp_tx_buf(struct iavf_ring *xdp_ring, struct iavf_tx_buffer *tx_buf)
+{
+	xdp_return_frame((struct xdp_frame *)tx_buf->raw_buf);
+	xdp_ring->xdp_tx_active--;
+	dma_unmap_single(xdp_ring->xsk_pool->dev, dma_unmap_addr(tx_buf, dma),
+			 dma_unmap_len(tx_buf, len), DMA_TO_DEVICE);
+	dma_unmap_len_set(tx_buf, len, 0);
+}
+
+/**
+ * iavf_clean_xdp_irq_zc - produce AF_XDP descriptors to CQ
+ * @xdp_ring: XDP Tx ring
+ */
+static void iavf_clean_xdp_irq_zc(struct iavf_ring *xdp_ring)
+{
+	u16 ntc = xdp_ring->next_to_clean;
+	struct iavf_tx_buffer *tx_buf;
+	struct iavf_tx_desc *tx_desc;
+	u16 cnt = xdp_ring->count;
+	u16 xsk_frames = 0;
+	u16 last_rs;
+	int i;
+
+	last_rs = xdp_ring->next_to_use ? xdp_ring->next_to_use - 1 : cnt - 1;
+	tx_desc = IAVF_TX_DESC(xdp_ring, last_rs);
+	if ((tx_desc->cmd_type_offset_bsz &
+	    cpu_to_le64(IAVF_TX_DESC_DTYPE_DESC_DONE))) {
+		if (last_rs >= ntc)
+			xsk_frames = last_rs - ntc + 1;
+		else
+			xsk_frames = last_rs + cnt - ntc + 1;
+	}
+
+	if (!xsk_frames)
+		return;
+
+	if (likely(!xdp_ring->xdp_tx_active))
+		goto skip;
+
+	ntc = xdp_ring->next_to_clean;
+	for (i = 0; i < xsk_frames; i++) {
+		tx_buf = &xdp_ring->tx_bi[ntc];
+
+		if (tx_buf->raw_buf) {
+			iavf_clean_xdp_tx_buf(xdp_ring, tx_buf);
+			tx_buf->raw_buf = NULL;
+		} else {
+			xsk_frames++;
+		}
+
+		ntc++;
+		if (ntc >= xdp_ring->count)
+			ntc = 0;
+	}
+skip:
+	tx_desc->cmd_type_offset_bsz = 0;
+	xdp_ring->next_to_clean += xsk_frames;
+	if (xdp_ring->next_to_clean >= cnt)
+		xdp_ring->next_to_clean -= cnt;
+	if (xsk_frames)
+		xsk_tx_completed(xdp_ring->xsk_pool, xsk_frames);
+}
+
+/**
+ * iavf_xmit_pkt - produce a single HW Tx descriptor out of AF_XDP descriptor
+ * @xdp_ring: XDP ring to produce the HW Tx descriptor on
+ * @desc: AF_XDP descriptor to pull the DMA address and length from
+ * @total_bytes: bytes accumulator that will be used for stats update
+ */
+static void iavf_xmit_pkt(struct iavf_ring *xdp_ring, struct xdp_desc *desc,
+			  unsigned int *total_bytes)
+{
+	struct iavf_tx_desc *tx_desc;
+	dma_addr_t dma;
+
+	dma = xsk_buff_raw_get_dma(xdp_ring->xsk_pool, desc->addr);
+	xsk_buff_raw_dma_sync_for_device(xdp_ring->xsk_pool, dma, desc->len);
+
+	tx_desc = IAVF_TX_DESC(xdp_ring, xdp_ring->next_to_use++);
+	tx_desc->buffer_addr = cpu_to_le64(dma);
+	tx_desc->cmd_type_offset_bsz = iavf_build_ctob(IAVF_TX_DESC_CMD_EOP,
+						       0, desc->len, 0);
+
+	*total_bytes += desc->len;
+}
+
+/**
+ * iavf_xmit_pkt_batch - produce a batch of HW Tx descriptors out
+ * 			 of AF_XDP descriptors
+ * @xdp_ring: XDP ring to produce the HW Tx descriptors on
+ * @descs: AF_XDP descriptors to pull the DMA addresses and lengths from
+ * @total_bytes: bytes accumulator that will be used for stats update
+ */
+static void iavf_xmit_pkt_batch(struct iavf_ring *xdp_ring,
+				struct xdp_desc *descs,
+				unsigned int *total_bytes)
+{
+	u16 ntu = xdp_ring->next_to_use;
+	struct iavf_tx_desc *tx_desc;
+	u32 i;
+
+	loop_unrolled_for(i = 0; i < PKTS_PER_BATCH; i++) {
+		dma_addr_t dma;
+
+		dma = xsk_buff_raw_get_dma(xdp_ring->xsk_pool, descs[i].addr);
+		xsk_buff_raw_dma_sync_for_device(xdp_ring->xsk_pool, dma,
+						 descs[i].len);
+
+		tx_desc = IAVF_TX_DESC(xdp_ring, ntu++);
+		tx_desc->buffer_addr = cpu_to_le64(dma);
+		tx_desc->cmd_type_offset_bsz =
+			iavf_build_ctob(IAVF_TX_DESC_CMD_EOP, 0,
+					descs[i].len, 0);
+
+		*total_bytes += descs[i].len;
+	}
+
+	xdp_ring->next_to_use = ntu;
+}
+
+/**
+ * iavf_set_rs_bit - set RS bit on last produced descriptor (one behind current NTU)
+ * @xdp_ring: XDP ring to produce the HW Tx descriptors on
+ */
+static void iavf_set_rs_bit(struct iavf_ring *xdp_ring)
+{
+	u16 ntu = xdp_ring->next_to_use ? xdp_ring->next_to_use - 1 :
+					  xdp_ring->count - 1;
+	struct iavf_tx_desc *tx_desc;
+
+	tx_desc = IAVF_TX_DESC(xdp_ring, ntu);
+	tx_desc->cmd_type_offset_bsz |=
+		cpu_to_le64(IAVF_TX_DESC_CMD_RS << IAVF_TXD_QW1_CMD_SHIFT);
+}
+
+/**
+ * iavf_fill_tx_hw_ring - produce the number of Tx descriptors onto ring
+ * @xdp_ring: XDP ring to produce the HW Tx descriptors on
+ * @descs: AF_XDP descriptors to pull the DMA addresses and lengths from
+ * @nb_pkts: count of packets to be send
+ * @total_bytes: bytes accumulator that will be used for stats update
+ */
+static void iavf_fill_tx_hw_ring(struct iavf_ring *xdp_ring,
+				 struct xdp_desc *descs, u32 nb_pkts,
+				 unsigned int *total_bytes)
+{
+	u16 tx_thresh = IAVF_RING_QUARTER(xdp_ring);
+	u32 batched, leftover, i;
+
+	batched = ALIGN_DOWN(nb_pkts, PKTS_PER_BATCH);
+	leftover = nb_pkts & (PKTS_PER_BATCH - 1);
+
+	for (i = 0; i < batched; i += PKTS_PER_BATCH)
+		iavf_xmit_pkt_batch(xdp_ring, &descs[i], total_bytes);
+	for (; i < batched + leftover; i++)
+		iavf_xmit_pkt(xdp_ring, &descs[i], total_bytes);
+
+	if (xdp_ring->next_to_use > xdp_ring->next_rs) {
+		struct iavf_tx_desc *tx_desc;
+
+		tx_desc = IAVF_TX_DESC(xdp_ring, xdp_ring->next_rs);
+		tx_desc->cmd_type_offset_bsz |=
+			cpu_to_le64(IAVF_TX_DESC_CMD_RS <<
+					IAVF_TXD_QW1_CMD_SHIFT);
+		xdp_ring->next_rs += tx_thresh;
+	}
+}
+
+/**
+ * iavf_xmit_zc - take entries from XSK Tx ring and place them onto HW Tx ring
+ * @xdp_ring: XDP ring to produce the HW Tx descriptors on
+ *
+ * Returns true if there is no more work that needs to be done, false otherwise
+ */
+bool iavf_xmit_zc(struct iavf_ring *xdp_ring)
+{
+	struct xdp_desc *descs = xdp_ring->xsk_pool->tx_descs;
+	u32 nb_pkts, nb_processed = 0;
+	unsigned int total_bytes = 0;
+	int budget;
+
+	iavf_clean_xdp_irq_zc(xdp_ring);
+
+	budget = IAVF_DESC_UNUSED(xdp_ring);
+	budget = min_t(u16, budget, IAVF_RING_QUARTER(xdp_ring));
+
+	nb_pkts = xsk_tx_peek_release_desc_batch(xdp_ring->xsk_pool, budget);
+	if (!nb_pkts)
+		return true;
+
+	if (xdp_ring->next_to_use + nb_pkts >= xdp_ring->count) {
+		nb_processed = xdp_ring->count - xdp_ring->next_to_use;
+		iavf_fill_tx_hw_ring(xdp_ring, descs, nb_processed,
+				     &total_bytes);
+		xdp_ring->next_to_use = 0;
+	}
+
+	iavf_fill_tx_hw_ring(xdp_ring, &descs[nb_processed],
+			     nb_pkts - nb_processed, &total_bytes);
+
+	iavf_set_rs_bit(xdp_ring);
+	iavf_xdp_ring_update_tail(xdp_ring);
+	iavf_update_tx_ring_stats(xdp_ring, nb_pkts, total_bytes);
+
+	if (xsk_uses_need_wakeup(xdp_ring->xsk_pool))
+		xsk_set_tx_need_wakeup(xdp_ring->xsk_pool);
+
+	return nb_pkts < budget;
+}
+
+/**
+ * iavf_xsk_wakeup - Implements ndo_xsk_wakeup
+ * @netdev: net_device
+ * @queue_id: queue to wake up
+ * @flags: ignored in our case, since we have Rx and Tx in the same NAPI
+ *
+ * Returns negative on error, zero otherwise.
+ */
+int iavf_xsk_wakeup(struct net_device *netdev, u32 queue_id, u32 flags)
+{
+	struct iavf_adapter *adapter = netdev_priv(netdev);
+	struct iavf_q_vector *q_vector;
+	struct iavf_ring *ring;
+
+	if (adapter->state == __IAVF_DOWN)
+		return -ENETDOWN;
+
+	if (!iavf_adapter_xdp_active(adapter))
+		return -EINVAL;
+
+	if (queue_id >= adapter->num_active_queues)
+		return -EINVAL;
+
+	ring = &adapter->rx_rings[queue_id];
+
+	if (!(ring->xdp_ring->flags & IAVF_TXRX_FLAGS_XSK))
+		return -EINVAL;
+
+	q_vector = ring->q_vector;
+	if (!napi_if_scheduled_mark_missed(&q_vector->napi))
+		iavf_trigger_sw_intr(adapter, q_vector);
+
+	return 0;
+}
+
+static u32 iavf_get_xdp_tx_qid(struct iavf_ring *ring)
+{
+	struct iavf_adapter *adapter = ring->vsi->back;
+
+	return ring->queue_index - adapter->num_active_queues;
+}
+
+static struct xsk_buff_pool *iavf_tx_xsk_pool(struct iavf_ring *ring)
+{
+	struct iavf_adapter *adapter = ring->vsi->back;
+	u32 qid;
+
+	if (!iavf_adapter_xdp_active(adapter) ||
+	    !(ring->flags & IAVF_TXRX_FLAGS_XDP))
+		return NULL;
+
+	qid = iavf_get_xdp_tx_qid(ring);
+	if (!test_bit(qid, adapter->af_xdp_zc_qps))
+		return NULL;
+
+	return xsk_get_pool_from_qid(adapter->netdev, qid);
+}
+
+void iavf_xsk_setup_xdp_ring(struct iavf_ring *xdp_ring)
+{
+	struct xsk_buff_pool *pool;
+
+	pool = iavf_tx_xsk_pool(xdp_ring);
+	if (!pool)
+		return;
+
+	xdp_ring->xsk_pool = pool;
+	xdp_ring->flags |= IAVF_TXRX_FLAGS_XSK;
+}
+
+/**
+ * iavf_xsk_clean_xdp_ring - Clean the XDP Tx ring and its buffer pool queues
+ * @xdp_ring: XDP_Tx ring
+ */
+void iavf_xsk_clean_xdp_ring(struct iavf_ring *xdp_ring)
+{
+	u16 ntc = xdp_ring->next_to_clean, ntu = xdp_ring->next_to_use;
+	u32 xsk_frames = 0;
+
+	while (ntc != ntu) {
+		struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[ntc];
+
+		if (tx_buf->raw_buf)
+			iavf_clean_xdp_tx_buf(xdp_ring, tx_buf);
+		else
+			xsk_frames++;
+
+		tx_buf->raw_buf = NULL;
+
+		ntc++;
+		if (ntc >= xdp_ring->count)
+			ntc = 0;
+	}
+
+	if (xsk_frames)
+		xsk_tx_completed(xdp_ring->xsk_pool, xsk_frames);
 }
