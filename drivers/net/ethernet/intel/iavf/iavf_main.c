@@ -780,14 +780,29 @@ void iavf_configure_rx_ring(struct iavf_adapter *adapter,
 				       rx_ring->queue_index,
 				       rx_ring->q_vector->napi.napi_id);
 
-	err = xdp_rxq_info_reg_mem_model(&rx_ring->xdp_rxq, MEM_TYPE_PAGE_POOL,
-					 rx_ring->pool);
-	if (err)
-		netdev_err(adapter->netdev, "Could not register XDP memory model for RX queue %u, error: %d\n",
-			   queue_idx, err);
+	if (rx_ring->flags & IAVF_TXRX_FLAGS_XSK) {
+		err = xdp_rxq_info_reg_mem_model(&rx_ring->xdp_rxq,
+						 MEM_TYPE_XSK_BUFF_POOL,
+						 NULL);
+		if (err)
+			netdev_err(adapter->netdev, "xdp_rxq_info_reg_mem_model returned %d\n",
+				   err);
+
+		xsk_pool_set_rxq_info(rx_ring->xsk_pool, &rx_ring->xdp_rxq);
+
+		iavf_check_alloc_rx_buffers_zc(adapter, rx_ring);
+	} else {
+		err = xdp_rxq_info_reg_mem_model(&rx_ring->xdp_rxq,
+						 MEM_TYPE_PAGE_POOL,
+						 rx_ring->pool);
+		if (err)
+			netdev_err(adapter->netdev, "Could not register XDP memory model for RX queue %u, error: %d\n",
+				   queue_idx, err);
+
+		iavf_alloc_rx_pages(rx_ring);
+	}
 
 	RCU_INIT_POINTER(rx_ring->xdp_prog, adapter->xdp_prog);
-	iavf_alloc_rx_pages(rx_ring);
 }
 
 /**
@@ -3657,10 +3672,13 @@ static int iavf_setup_all_tx_resources(struct iavf_adapter *adapter)
  **/
 static int iavf_setup_all_rx_resources(struct iavf_adapter *adapter)
 {
+	struct iavf_ring *rx_ring;
 	int i, err = 0;
 
 	for (i = 0; i < adapter->num_active_queues; i++) {
-		adapter->rx_rings[i].count = adapter->rx_desc_count;
+		rx_ring = &adapter->rx_rings[i];
+		rx_ring->count = adapter->rx_desc_count;
+
 		err = iavf_setup_rx_descriptors(&adapter->rx_rings[i]);
 		if (!err)
 			continue;

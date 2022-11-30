@@ -210,6 +210,7 @@ struct iavf_tx_buffer {
 		struct sk_buff *skb;		/* used for .ndo_start_xmit() */
 		struct page *page;		/* used for XDP_TX */
 		struct xdp_frame *xdpf;		/* used for .ndo_xdp_xmit() */
+		struct xdp_buff *xdp;		/* used for XDP_TX in ZC mode */
 	};
 	unsigned int bytecount;
 	unsigned short gso_segs;
@@ -243,6 +244,7 @@ struct iavf_ring {
 	struct net_device *netdev;	/* netdev ring maps to */
 	union {
 		struct iavf_tx_buffer *tx_bi;
+		struct xdp_buff **xdp_buff;
 		struct page **rx_pages;
 	};
 	u8 __iomem *tail;
@@ -370,7 +372,7 @@ static inline __le64 iavf_build_ctob(u32 td_cmd, u32 td_offset,
  * Returns number of data descriptors needed for this skb. Returns 0 to indicate
  * there is not enough descriptors available in this ring since we need at least
  * one descriptor.
- **/
+ */
 static inline int iavf_xmit_descriptor_count(struct sk_buff *skb)
 {
 	const skb_frag_t *frag = &skb_shinfo(skb)->frags[0];
@@ -395,7 +397,7 @@ static inline int iavf_xmit_descriptor_count(struct sk_buff *skb)
  * @size:    the size buffer we want to assure is available
  *
  * Returns 0 if stop is not needed
- **/
+ */
 static inline int iavf_maybe_stop_tx(struct iavf_ring *tx_ring, int size)
 {
 	if (likely(IAVF_DESC_UNUSED(tx_ring) >= size))
@@ -411,7 +413,7 @@ static inline int iavf_maybe_stop_tx(struct iavf_ring *tx_ring, int size)
  * Note: Our HW can't scatter-gather more than 8 fragments to build
  * a packet on the wire and so we need to figure out the cases where we
  * need to linearize the skb.
- **/
+ */
 static inline bool iavf_chk_linearize(struct sk_buff *skb, int count)
 {
 	/* Both TSO and single send will work if count is less than 8 */
@@ -427,7 +429,7 @@ static inline bool iavf_chk_linearize(struct sk_buff *skb, int count)
 /**
  * txring_txq - helper to convert from a ring to a queue
  * @ring: Tx ring to find the netdev equivalent of
- **/
+ */
 static inline struct netdev_queue *txring_txq(const struct iavf_ring *ring)
 {
 	return netdev_get_tx_queue(ring->netdev, ring->queue_index);
@@ -454,7 +456,7 @@ static inline void iavf_xdp_ring_update_tail(const struct iavf_ring *xdp_ring)
  * @tc: TODO
  * @total_pkts: Number of packets transmitted since the last update
  * @total_bytes: Number of bytes transmitted since the last update
- **/
+ */
 static inline void
 __iavf_update_tx_ring_stats(struct iavf_ring *tx_ring,
 			    struct iavf_ring_container *tc,
@@ -468,8 +470,47 @@ __iavf_update_tx_ring_stats(struct iavf_ring *tx_ring,
 #define iavf_update_tx_ring_stats(r, s) \
 	__iavf_update_tx_ring_stats(r, &(r)->q_vector->tx, s)
 
+/**
+ * iavf_update_rx_ring_stats - Update RX ring stats
+ * @rx_ring: ring to bump
+ * @rc: TODO
+ * @rx_bytes: number of bytes processed since last update
+ * @rx_packets: number of packets processed since last update
+ */
+static inline void
+__iavf_update_rx_ring_stats(struct iavf_ring *rx_ring,
+			    struct iavf_ring_container *rc,
+			    const struct libie_rq_onstack_stats *stats)
+{
+	libie_rq_napi_stats_add(&rx_ring->rq_stats, stats);
+	rc->total_packets += stats->packets;
+	rc->total_bytes += stats->bytes;
+}
+
+#define iavf_update_rx_ring_stats(r, s) \
+	__iavf_update_rx_ring_stats(r, &(r)->q_vector->rx, s)
+
+/**
+ * iavf_release_rx_desc - Store the new tail and head values
+ * @rx_ring: ring to bump
+ * @val: new head index
+ */
+static inline void iavf_release_rx_desc(struct iavf_ring *rx_ring, u32 val)
+{
+	rx_ring->next_to_use = val;
+
+	/* Force memory writes to complete before letting h/w
+	 * know there are new descriptors to fetch.  (Only
+	 * applicable for weak-ordered memory model archs,
+	 * such as IA-64).
+	 */
+	wmb();
+	writel(val, rx_ring->tail);
+}
+
 #define IAVF_RXQ_XDP_ACT_FINALIZE_TX	BIT(0)
 #define IAVF_RXQ_XDP_ACT_FINALIZE_REDIR	BIT(1)
+#define IAVF_RXQ_XDP_ACT_STOP_NOW	BIT(2)
 
 /**
  * iavf_set_rs_bit - set RS bit on last produced descriptor.
@@ -495,7 +536,7 @@ static inline u16 iavf_set_rs_bit(struct iavf_ring *xdp_ring)
  * @xdp_ring: XDP TX queue assigned to a given RX ring
  * @rxq_xdp_act: Logical OR of flags of XDP actions that require finalization
  * @first_idx: index of the first frame in the transmitted batch on XDP queue
- **/
+ */
 static inline void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring,
 					u32 rxq_xdp_act, u32 first_idx)
 {

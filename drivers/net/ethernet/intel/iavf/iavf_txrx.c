@@ -134,6 +134,11 @@ void iavf_free_tx_resources(struct iavf_ring *tx_ring)
 	kfree(tx_ring->tx_bi);
 	tx_ring->tx_bi = NULL;
 
+	if (tx_ring->flags & IAVF_TXRX_FLAGS_XSK) {
+		tx_ring->dev = tx_ring->xsk_pool->dev;
+		tx_ring->flags &= ~IAVF_TXRX_FLAGS_XSK;
+	}
+
 	if (tx_ring->desc) {
 		dma_free_coherent(tx_ring->dev, tx_ring->size,
 				  tx_ring->desc, tx_ring->dma);
@@ -734,6 +739,22 @@ err:
 	return -ENOMEM;
 }
 
+static void iavf_clean_rx_pages(struct iavf_ring *rx_ring)
+{
+	for (u32 i = 0; i < rx_ring->count; i++) {
+		struct page *page = rx_ring->rx_pages[i];
+
+		if (!page)
+			continue;
+
+		/* Invalidate cache lines that may have been written to by
+		 * device so that we avoid corrupting memory.
+		 */
+		page_pool_dma_sync_full_for_cpu(rx_ring->pool, page);
+		page_pool_put_full_page(rx_ring->pool, page, false);
+	}
+}
+
 /**
  * iavf_clean_rx_ring - Free Rx buffers
  * @rx_ring: ring to be cleaned
@@ -749,19 +770,10 @@ void iavf_clean_rx_ring(struct iavf_ring *rx_ring)
 		rx_ring->skb = NULL;
 	}
 
-	/* Free all the Rx ring sk_buffs */
-	for (u32 i = 0; i < rx_ring->count; i++) {
-		struct page *page = rx_ring->rx_pages[i];
-
-		if (!page)
-			continue;
-
-		/* Invalidate cache lines that may have been written to by
-		 * device so that we avoid corrupting memory.
-		 */
-		page_pool_dma_sync_full_for_cpu(rx_ring->pool, page);
-		page_pool_put_full_page(rx_ring->pool, page, false);
-	}
+	if (rx_ring->flags & IAVF_TXRX_FLAGS_XSK)
+		iavf_xsk_clean_rx_ring(rx_ring);
+	else
+		iavf_clean_rx_pages(rx_ring);
 
 	rx_ring->next_to_clean = 0;
 	rx_ring->next_to_use = 0;
@@ -775,7 +787,7 @@ void iavf_clean_rx_ring(struct iavf_ring *rx_ring)
  **/
 void iavf_free_rx_resources(struct iavf_ring *rx_ring)
 {
-	struct device *dev = rx_ring->pool->p.dev;
+	struct device *dev;
 
 	iavf_clean_rx_ring(rx_ring);
 	kfree(rx_ring->rx_pages);
@@ -785,7 +797,14 @@ void iavf_free_rx_resources(struct iavf_ring *rx_ring)
 	if (xdp_rxq_info_is_reg(&rx_ring->xdp_rxq))
 		xdp_rxq_info_unreg(&rx_ring->xdp_rxq);
 
-	libie_rx_page_pool_destroy(rx_ring->pool, &rx_ring->rq_stats);
+	if (rx_ring->flags & IAVF_TXRX_FLAGS_XSK) {
+		dev = rx_ring->xsk_pool->dev;
+		rx_ring->flags &= ~IAVF_TXRX_FLAGS_XSK;
+	} else {
+		dev = rx_ring->pool->p.dev;
+		libie_rx_page_pool_destroy(rx_ring->pool, &rx_ring->rq_stats);
+	}
+
 	rx_ring->dev = dev;
 
 	if (rx_ring->desc) {
@@ -820,6 +839,8 @@ int iavf_setup_rx_descriptors(struct iavf_ring *rx_ring)
 
 	/* warn if we are about to overwrite the pointer */
 	WARN_ON(rx_ring->rx_pages);
+
+	/* Both iavf_ring::rx_pages and ::xdp_buff are arrays of pointers */
 	rx_ring->rx_pages = kcalloc(rx_ring->count, sizeof(*rx_ring->rx_pages),
 				    GFP_KERNEL);
 	if (!rx_ring->rx_pages)
@@ -837,6 +858,10 @@ int iavf_setup_rx_descriptors(struct iavf_ring *rx_ring)
 		goto err;
 	}
 
+	iavf_xsk_setup_rx_ring(rx_ring);
+	if (rx_ring->flags & IAVF_TXRX_FLAGS_XSK)
+		goto finish;
+
 	pool = libie_rx_page_pool_create(rx_ring->netdev, rx_ring->count,
 					 iavf_is_xdp_enabled(rx_ring));
 	if (IS_ERR(pool)) {
@@ -846,6 +871,7 @@ int iavf_setup_rx_descriptors(struct iavf_ring *rx_ring)
 
 	rx_ring->pool = pool;
 
+finish:
 	rx_ring->next_to_clean = 0;
 	rx_ring->next_to_use = 0;
 
@@ -858,24 +884,6 @@ err:
 	rx_ring->rx_pages = NULL;
 
 	return ret;
-}
-
-/**
- * iavf_release_rx_desc - Store the new tail and head values
- * @rx_ring: ring to bump
- * @val: new head index
- **/
-static inline void iavf_release_rx_desc(struct iavf_ring *rx_ring, u32 val)
-{
-	rx_ring->next_to_use = val;
-
-	/* Force memory writes to complete before letting h/w
-	 * know there are new descriptors to fetch.  (Only
-	 * applicable for weak-ordered memory model archs,
-	 * such as IA-64).
-	 */
-	wmb();
-	writel(val, rx_ring->tail);
 }
 
 /**
@@ -1372,9 +1380,7 @@ no_skb:
 		}
 	}
 
-	libie_rq_napi_stats_add(&rx_ring->rq_stats, &stats);
-	rx_ring->q_vector->rx.total_packets += stats.packets;
-	rx_ring->q_vector->rx.total_bytes += stats.bytes;
+	iavf_update_rx_ring_stats(rx_ring, &stats);
 
 	return cleaned_count;
 }
@@ -1534,7 +1540,9 @@ int iavf_napi_poll(struct napi_struct *napi, int budget)
 	rcu_read_lock();
 
 	iavf_for_each_ring(ring, q_vector->rx) {
-		int cleaned = iavf_clean_rx_irq(ring, budget_per_ring);
+		int cleaned = !!(ring->flags & IAVF_TXRX_FLAGS_XSK) ?
+			      iavf_clean_rx_irq_zc(ring, budget_per_ring) :
+			      iavf_clean_rx_irq(ring, budget_per_ring);
 
 		work_done += cleaned;
 		/* if we clean as many as budgeted, we must not be done */

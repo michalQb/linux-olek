@@ -529,6 +529,19 @@ static inline bool iavf_adapter_xdp_active(struct iavf_adapter *adapter)
 	return !!READ_ONCE(adapter->xdp_prog);
 }
 
+static inline struct xsk_buff_pool *iavf_xsk_pool(struct iavf_ring *ring)
+{
+	struct iavf_adapter *adapter = ring->vsi->back;
+	struct iavf_vsi *vsi = ring->vsi;
+	u16 qid = ring->queue_index;
+
+	if (!iavf_adapter_xdp_active(adapter) ||
+	    !test_bit(qid, adapter->af_xdp_zc_qps))
+		return NULL;
+
+	return xsk_get_pool_from_qid(vsi->netdev, qid);
+}
+
 int iavf_up(struct iavf_adapter *adapter);
 void iavf_down(struct iavf_adapter *adapter);
 int iavf_process_config(struct iavf_adapter *adapter);

@@ -415,8 +415,8 @@ static void iavf_set_qp_config_info(struct virtchnl_queue_pair_info *vqpi,
 				    bool xdp_pair)
 {
 	struct iavf_ring *rxq = &adapter->rx_rings[queue_index];
-	const struct page_pool_params *pp = &rxq->pool->p;
 	struct iavf_ring *txq;
+	u32 hr, max_len;
 	int xdpq_idx;
 
 	if (xdp_pair) {
@@ -437,12 +437,20 @@ static void iavf_set_qp_config_info(struct virtchnl_queue_pair_info *vqpi,
 		return;
 	}
 
-	max_frame = min_not_zero(max_frame, LIBIE_MAX_RX_FRM_LEN(pp->offset));
+	if (rxq->flags & IAVF_TXRX_FLAGS_XSK) {
+		hr = xsk_pool_get_headroom(rxq->xsk_pool);
+		max_len = xsk_pool_get_rx_frame_size(rxq->xsk_pool);
+	} else {
+		hr = rxq->pool->p.offset;
+		max_len = rxq->pool->p.max_len;
+	}
+
+	max_frame = min_not_zero(max_frame, LIBIE_MAX_RX_FRM_LEN(hr));
 
 	vqpi->rxq.ring_len = rxq->count;
 	vqpi->rxq.dma_ring_addr = rxq->dma;
 	vqpi->rxq.max_pkt_size = max_frame;
-	vqpi->rxq.databuffer_size = pp->max_len;
+	vqpi->rxq.databuffer_size = max_len;
 }
 
 /**
