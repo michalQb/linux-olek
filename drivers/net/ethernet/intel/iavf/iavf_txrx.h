@@ -356,6 +356,10 @@ struct iavf_ring {
 	u8 atr_sample_rate;
 	u8 atr_count;
 
+	/* used for XDP rings only */
+	u16 next_dd;
+	u16 next_rs;
+
 	bool ring_active;		/* is ring online or not */
 	bool arm_wb;		/* do something to arm write back */
 	u8 packet_stride;
@@ -411,6 +415,8 @@ static inline void clear_ring_build_skb_enabled(struct iavf_ring *ring)
 	ring->flags &= ~IAVF_RXR_FLAGS_BUILD_SKB_ENABLED;
 }
 
+#define IAVF_RING_QUARTER(R)	((R)->count >> 2)
+
 #define IAVF_ITR_ADAPTIVE_MIN_INC	0x0002
 #define IAVF_ITR_ADAPTIVE_MIN_USECS	0x0002
 #define IAVF_ITR_ADAPTIVE_MAX_USECS	0x007e
@@ -457,6 +463,7 @@ u32 iavf_get_tx_pending(struct iavf_ring *ring, bool in_sw);
 void iavf_detect_recover_hung(struct iavf_vsi *vsi);
 int __iavf_maybe_stop_tx(struct iavf_ring *tx_ring, int size);
 bool __iavf_chk_linearize(struct sk_buff *skb);
+int iavf_xmit_xdp_buff(struct xdp_buff *xdp, struct iavf_ring *xdp_ring);
 
 /**
  * iavf_xmit_descriptor_count - calculate number of Tx descriptors needed
@@ -526,5 +533,22 @@ static inline bool iavf_chk_linearize(struct sk_buff *skb, int count)
 static inline struct netdev_queue *txring_txq(const struct iavf_ring *ring)
 {
 	return netdev_get_tx_queue(ring->netdev, ring->queue_index);
+}
+
+#define IAVF_RXQ_XDP_ACT_FINALIZE_TX	BIT(0)
+
+/**
+ * iavf_xdp_ring_update_tail - Updates the XDP Tx ring tail register
+ * @xdp_ring: XDP Tx ring
+ *
+ * Notify hardware the new descriptor is ready to be transmitted
+ */
+static inline void iavf_xdp_ring_update_tail(struct iavf_ring *xdp_ring)
+{
+	/* Force memory writes to complete before letting h/w
+	 * know there are new descriptors to fetch.
+	 */
+	wmb();
+	writel_relaxed(xdp_ring->next_to_use, xdp_ring->tail);
 }
 #endif /* _IAVF_TXRX_H_ */

@@ -79,6 +79,8 @@ void iavf_clean_tx_ring(struct iavf_ring *tx_ring)
 
 	tx_ring->next_to_use = 0;
 	tx_ring->next_to_clean = 0;
+	tx_ring->next_rs = IAVF_RING_QUARTER(tx_ring) - 1;
+	tx_ring->next_dd = IAVF_RING_QUARTER(tx_ring) - 1;
 
 	if (!tx_ring->netdev)
 		return;
@@ -286,12 +288,7 @@ static bool iavf_clean_tx_irq(struct iavf_vsi *vsi,
 
 	i += tx_ring->count;
 	tx_ring->next_to_clean = i;
-	u64_stats_update_begin(&tx_ring->syncp);
-	tx_ring->stats.bytes += total_bytes;
-	tx_ring->stats.packets += total_packets;
-	u64_stats_update_end(&tx_ring->syncp);
-	tx_ring->q_vector->tx.total_bytes += total_bytes;
-	tx_ring->q_vector->tx.total_packets += total_packets;
+	iavf_update_tx_ring_stats(tx_ring, total_packets, total_bytes);
 
 	if (tx_ring->flags & IAVF_TXR_FLAGS_WB_ON_ITR) {
 		/* check to see if there are < 4 descriptors
@@ -681,6 +678,8 @@ int iavf_setup_tx_descriptors(struct iavf_ring *tx_ring)
 
 	tx_ring->next_to_use = 0;
 	tx_ring->next_to_clean = 0;
+	tx_ring->next_rs = IAVF_RING_QUARTER(tx_ring) - 1;
+	tx_ring->next_dd = IAVF_RING_QUARTER(tx_ring) - 1;
 	tx_ring->tx_stats.prev_pkt_ctr = -1;
 	for (j = 0; j < tx_ring->count; j++) {
 		tx_desc = IAVF_TX_DESC(tx_ring, j);
@@ -1595,21 +1594,32 @@ static void iavf_init_xdp_buff(struct xdp_buff *xdp, struct iavf_ring *rx_ring)
  * @rx_ring: RX descriptor ring to transact packets on
  * @xdp: a prepared XDP buffer
  * @xdp_prog: an XDP program assigned to the interface
+ * @xdp_ring: XDP TX queue assigned to the RX ring
  * @rx_buffer: RX buffer with a packet
+ * @rxq_xdp_act: Logical OR of flags of XDP actions that require finalization
  *
  * Returns resulting XDP action.
  **/
 static unsigned int
 iavf_run_xdp(struct iavf_ring *rx_ring, struct xdp_buff *xdp,
-	     struct bpf_prog *xdp_prog, struct iavf_rx_buffer *rx_buffer)
+	     struct bpf_prog *xdp_prog, struct iavf_ring *xdp_ring,
+	     struct iavf_rx_buffer *rx_buffer, u16 *rxq_xdp_act)
 {
 	unsigned int xdp_act;
+	int err;
 
 	xdp_act = bpf_prog_run_xdp(xdp_prog, xdp);
 
 	switch (xdp_act) {
 	case XDP_PASS:
 		return XDP_PASS;
+	case XDP_TX:
+		err = iavf_xmit_xdp_buff(xdp, xdp_ring);
+		if (unlikely(err))
+			goto xdp_err;
+		iavf_rx_buf_adjust_pg_offset(rx_buffer, xdp->frame_sz);
+		*rxq_xdp_act |= IAVF_RXQ_XDP_ACT_FINALIZE_TX;
+		break;
 	case XDP_DROP:
 		rx_buffer->pagecnt_bias++;
 		break;
@@ -1629,6 +1639,17 @@ xdp_err:
 }
 
 /**
+ * iavf_finalize_xdp_rx - Finalize XDP actions once per RX ring clean
+ * @xdp_ring: XDP TX queue assigned to a given RX ring
+ * @rxq_xdp_act: Logical OR of flags of XDP actions that require finalization
+ **/
+void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring, u16 rxq_xdp_act)
+{
+	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_TX)
+		iavf_xdp_ring_update_tail(xdp_ring);
+}
+
+/**
  * iavf_clean_rx_irq - Clean completed descriptors from Rx ring - bounce buf
  * @rx_ring: rx descriptor ring to transact packets on
  * @budget: Total limit on number of packets to process
@@ -1645,13 +1666,17 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 	unsigned int total_rx_bytes = 0, total_rx_packets = 0;
 	u16 cleaned_count = IAVF_DESC_UNUSED(rx_ring);
 	struct sk_buff *skb = rx_ring->skb;
+	struct iavf_ring *xdp_ring;
 	struct bpf_prog *xdp_prog;
 	bool failure = false;
 	unsigned int xdp_act;
 	struct xdp_buff xdp;
+	u16 rxq_xdp_act = 0;
 
 	iavf_init_xdp_buff(&xdp, rx_ring);
 	xdp_prog = rcu_dereference(rx_ring->xdp_prog);
+	if (xdp_prog)
+		xdp_ring = iavf_get_xdp_ring(rx_ring);
 
 	while (likely(total_rx_packets < (unsigned int)budget)) {
 		struct iavf_rx_buffer *rx_buffer;
@@ -1699,7 +1724,8 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 		if (!xdp_prog)
 			goto construct_skb;
 
-		xdp_act = iavf_run_xdp(rx_ring, &xdp, xdp_prog, rx_buffer);
+		xdp_act = iavf_run_xdp(rx_ring, &xdp, xdp_prog, xdp_ring,
+				       rx_buffer, &rxq_xdp_act);
 		if (xdp_act == XDP_PASS)
 			goto construct_skb;
 
@@ -1784,6 +1810,8 @@ skip_skb:
 	u64_stats_update_end(&rx_ring->syncp);
 	rx_ring->q_vector->rx.total_packets += total_rx_packets;
 	rx_ring->q_vector->rx.total_bytes += total_rx_bytes;
+	if (xdp_prog && rxq_xdp_act)
+		iavf_finalize_xdp_rx(xdp_ring, rxq_xdp_act);
 
 	/* guarantee a trip back through this routine if there was a failure */
 	return failure ? budget : (int)total_rx_packets;
@@ -2707,4 +2735,128 @@ netdev_tx_t iavf_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 	}
 
 	return iavf_xmit_frame_ring(skb, tx_ring);
+}
+
+/**
+ * iavf_clean_xdp_irq - Reclaim a batch of TX resources from completed XDP_TX
+ * @xdp_ring: XDP Tx ring
+ *
+ * Returns number of cleaned descriptors.
+ */
+static u16 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
+{
+	unsigned int total_bytes = 0, total_pkts = 0;
+	u16 batch_sz = IAVF_RING_QUARTER(xdp_ring);
+	u16 next_dd = xdp_ring->next_dd;
+	u16 ntc = xdp_ring->next_to_clean;
+	struct iavf_tx_desc *next_dd_desc;
+	u16 i;
+
+	next_dd_desc = IAVF_TX_DESC(xdp_ring, next_dd);
+	if (!(next_dd_desc->cmd_type_offset_bsz &
+	      cpu_to_le64(IAVF_TX_DESC_DTYPE_DESC_DONE)))
+		return 0;
+
+	for (i = 0; i < batch_sz; i++) {
+		struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[ntc];
+
+		total_bytes += tx_buf->bytecount;
+		/* normally tx_buf->gso_segs was taken but at this point
+		 * it's always 1 for us
+		 */
+		total_pkts++;
+
+		dma_unmap_single(xdp_ring->dev, dma_unmap_addr(tx_buf, dma),
+				 dma_unmap_len(tx_buf, len), DMA_TO_DEVICE);
+		dma_unmap_len_set(tx_buf, len, 0);
+		page_frag_free(tx_buf->raw_buf);
+		tx_buf->raw_buf = NULL;
+
+		ntc++;
+		if (ntc >= xdp_ring->count)
+			ntc = 0;
+	}
+
+	next_dd_desc->cmd_type_offset_bsz = 0;
+	xdp_ring->next_dd = xdp_ring->next_dd + batch_sz;
+	if (xdp_ring->next_dd > xdp_ring->count)
+		xdp_ring->next_dd = batch_sz - 1;
+
+	xdp_ring->next_to_clean = ntc;
+	iavf_update_tx_ring_stats(xdp_ring, total_pkts, total_bytes);
+	return i;
+}
+
+/**
+ * iavf_xmit_xdp_pkt - submit single packet to XDP ring for transmission
+ * @data: packet data pointer
+ * @size: packet data size
+ * @xdp_ring: XDP ring for transmission
+ */
+static int iavf_xmit_xdp_pkt(void *data, u16 size, struct iavf_ring *xdp_ring)
+{
+	u16 batch_sz = IAVF_RING_QUARTER(xdp_ring);
+	u16 ntu = xdp_ring->next_to_use;
+	struct iavf_tx_buffer *tx_buff;
+	struct iavf_tx_desc *tx_desc;
+	dma_addr_t dma;
+
+	if (unlikely(IAVF_DESC_UNUSED(xdp_ring) < batch_sz))
+		iavf_clean_xdp_irq(xdp_ring);
+
+	if (unlikely(!IAVF_DESC_UNUSED(xdp_ring))) {
+		xdp_ring->tx_stats.tx_busy++;
+		return -EBUSY;
+	}
+
+	dma = dma_map_single(xdp_ring->dev, data, size, DMA_TO_DEVICE);
+	if (dma_mapping_error(xdp_ring->dev, dma))
+		return dma;
+
+	tx_buff = &xdp_ring->tx_bi[ntu];
+	tx_buff->bytecount = size;
+	tx_buff->gso_segs = 1;
+	tx_buff->raw_buf = data;
+
+	/* record length, and DMA address */
+	dma_unmap_len_set(tx_buff, len, size);
+	dma_unmap_addr_set(tx_buff, dma, dma);
+
+	tx_desc = IAVF_TX_DESC(xdp_ring, ntu);
+	tx_desc->buffer_addr = cpu_to_le64(dma);
+	tx_desc->cmd_type_offset_bsz = build_ctob(IAVF_TX_DESC_CMD_EOP, 0, size, 0);
+
+	ntu++;
+	if (ntu > xdp_ring->next_rs) {
+		tx_desc = IAVF_TX_DESC(xdp_ring, xdp_ring->next_rs);
+		tx_desc->cmd_type_offset_bsz |=
+			cpu_to_le64(IAVF_TX_DESC_CMD_RS <<
+				    IAVF_TXD_QW1_CMD_SHIFT);
+		xdp_ring->next_rs += batch_sz;
+	}
+
+	if (ntu == xdp_ring->count) {
+		ntu = 0;
+		xdp_ring->next_rs = batch_sz - 1;
+	}
+
+	xdp_ring->next_to_use = ntu;
+	return 0;
+}
+
+/**
+ * iavf_xmit_xdp_buff - convert an XDP buffer to an XDP frame and send it
+ * @xdp: XDP buffer
+ * @xdp_ring: XDP Tx ring
+ *
+ * Returns negative on failure, 0 on success.
+ */
+int iavf_xmit_xdp_buff(struct xdp_buff *xdp, struct iavf_ring *xdp_ring)
+{
+	struct xdp_frame *xdpf = xdp_convert_buff_to_frame(xdp);
+
+	if (unlikely(!xdpf))
+		return -ENOSPC;
+
+	return iavf_xmit_xdp_pkt(xdpf->data, xdpf->len, xdp_ring);
 }

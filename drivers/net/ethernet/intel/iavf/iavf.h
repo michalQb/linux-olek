@@ -527,6 +527,29 @@ static inline bool iavf_adapter_xdp_active(struct iavf_adapter *adapter)
 	return !!READ_ONCE(adapter->xdp_prog);
 }
 
+static inline struct iavf_ring *iavf_get_xdp_ring(struct iavf_ring *rx_ring)
+{
+	return rx_ring->q_vector->adapter->xdp_rings + rx_ring->queue_index;
+}
+
+/**
+ * iavf_update_tx_ring_stats - Update TX ring stats after transmit completes
+ * @tx_ring: TX descriptor ring
+ * @total_pkts: Number of packets transmitted since the last update
+ * @total_bytes: Number of bytes transmitted since the last update
+ **/
+static inline void iavf_update_tx_ring_stats(struct iavf_ring *tx_ring,
+				      unsigned int total_pkts,
+				      unsigned int total_bytes)
+{
+	u64_stats_update_begin(&tx_ring->syncp);
+	tx_ring->stats.bytes += total_bytes;
+	tx_ring->stats.packets += total_pkts;
+	u64_stats_update_end(&tx_ring->syncp);
+	tx_ring->q_vector->tx.total_bytes += total_bytes;
+	tx_ring->q_vector->tx.total_packets += total_pkts;
+}
+
 int iavf_up(struct iavf_adapter *adapter);
 void iavf_down(struct iavf_adapter *adapter);
 int iavf_process_config(struct iavf_adapter *adapter);
