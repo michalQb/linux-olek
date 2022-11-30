@@ -243,6 +243,10 @@ struct iavf_ring {
 	u16 next_to_use;
 	u16 next_to_clean;
 
+	/* used for XDP rings only */
+	u16 next_dd;
+	u16 next_rs;
+
 	u16 flags;
 #define IAVF_TXR_FLAGS_WB_ON_ITR		BIT(0)
 #define IAVF_TXRX_FLAGS_ARM_WB			BIT(1)
@@ -278,6 +282,8 @@ struct iavf_ring {
 	struct rcu_head rcu;		/* to avoid race on free */
 	struct xdp_rxq_info xdp_rxq;
 } ____cacheline_internodealigned_in_smp;
+
+#define IAVF_RING_QUARTER(R)		((R)->count >> 2)
 
 #define IAVF_ITR_ADAPTIVE_MIN_INC	0x0002
 #define IAVF_ITR_ADAPTIVE_MIN_USECS	0x0002
@@ -384,4 +390,54 @@ static inline struct netdev_queue *txring_txq(const struct iavf_ring *ring)
 {
 	return netdev_get_tx_queue(ring->netdev, ring->queue_index);
 }
+
+/**
+ * iavf_xdp_ring_update_tail - Updates the XDP Tx ring tail register
+ * @xdp_ring: XDP Tx ring
+ *
+ * Notify hardware the new descriptor is ready to be transmitted
+ */
+static inline void iavf_xdp_ring_update_tail(const struct iavf_ring *xdp_ring)
+{
+	/* Force memory writes to complete before letting h/w
+	 * know there are new descriptors to fetch.
+	 */
+	wmb();
+	writel_relaxed(xdp_ring->next_to_use, xdp_ring->tail);
+}
+
+/**
+ * iavf_update_tx_ring_stats - Update TX ring stats after transmit completes
+ * @tx_ring: TX descriptor ring
+ * @tc: TODO
+ * @total_pkts: Number of packets transmitted since the last update
+ * @total_bytes: Number of bytes transmitted since the last update
+ **/
+static inline void
+__iavf_update_tx_ring_stats(struct iavf_ring *tx_ring,
+			    struct iavf_ring_container *tc,
+			    const struct libie_sq_onstack_stats *stats)
+{
+	libie_sq_napi_stats_add(&tx_ring->sq_stats, stats);
+	tc->total_bytes += stats->bytes;
+	tc->total_packets += stats->packets;
+}
+
+#define iavf_update_tx_ring_stats(r, s) \
+	__iavf_update_tx_ring_stats(r, &(r)->q_vector->tx, s)
+
+#define IAVF_RXQ_XDP_ACT_FINALIZE_TX	BIT(0)
+
+/**
+ * iavf_finalize_xdp_rx - Finalize XDP actions once per RX ring clean
+ * @xdp_ring: XDP TX queue assigned to a given RX ring
+ * @rxq_xdp_act: Logical OR of flags of XDP actions that require finalization
+ **/
+static inline void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring,
+					u32 rxq_xdp_act)
+{
+	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_TX)
+		iavf_xdp_ring_update_tail(xdp_ring);
+}
+
 #endif /* _IAVF_TXRX_H_ */
