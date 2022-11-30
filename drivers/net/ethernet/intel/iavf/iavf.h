@@ -36,7 +36,9 @@
 #include <net/tc_act/tc_gact.h>
 #include <net/tc_act/tc_mirred.h>
 #include <net/xdp.h>
+#include <net/xdp_sock_drv.h>
 
+#include "iavf_xsk.h"
 #include "iavf_type.h"
 #include <linux/avf/virtchnl.h>
 #include "iavf_txrx.h"
@@ -270,6 +272,7 @@ struct iavf_adapter {
 	u32 num_xdp_tx_queues;
 	u32 num_req_queues;
 	struct bpf_prog *xdp_prog;
+	unsigned long *af_xdp_zc_qps;
 
 	/* TX */
 	struct iavf_ring *tx_rings;
@@ -532,6 +535,43 @@ static inline bool iavf_adapter_xdp_active(struct iavf_adapter *adapter)
 static inline struct iavf_ring *iavf_get_xdp_ring(struct iavf_ring *rx_ring)
 {
 	return rx_ring->q_vector->adapter->xdp_rings + rx_ring->queue_index;
+}
+
+static inline u16 iavf_get_xdp_tx_qid(struct iavf_ring *ring)
+{
+	struct iavf_adapter *adapter = ring->vsi->back;
+
+	return ring->queue_index - adapter->num_active_queues;
+}
+
+static inline struct xsk_buff_pool *iavf_xsk_pool(struct iavf_ring *ring)
+{
+	struct iavf_adapter *adapter = ring->vsi->back;
+	struct iavf_vsi *vsi = ring->vsi;
+	u16 qid = ring->queue_index;
+
+	if (!iavf_adapter_xdp_active(adapter) ||
+	    !test_bit(qid, adapter->af_xdp_zc_qps))
+		return NULL;
+
+	return xsk_get_pool_from_qid(vsi->netdev, qid);
+}
+
+static inline struct xsk_buff_pool *iavf_tx_xsk_pool(struct iavf_ring *ring)
+{
+	struct iavf_adapter *adapter = ring->vsi->back;
+	u16 qid = iavf_get_xdp_tx_qid(ring);
+
+	if (!iavf_adapter_xdp_active(adapter) ||
+	    !test_bit(qid, adapter->af_xdp_zc_qps))
+		return NULL;
+
+	return xsk_get_pool_from_qid(adapter->netdev, qid);
+}
+
+static inline void iavf_set_ring_xdp(struct iavf_ring *ring)
+{
+	ring->flags |= IAVF_TXRX_FLAGS_XDP;
 }
 
 /**

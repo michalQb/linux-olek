@@ -63,6 +63,10 @@ void iavf_clean_tx_ring(struct iavf_ring *tx_ring)
 	unsigned long bi_size;
 	u16 i;
 
+	if ((tx_ring->flags & IAVF_TXRX_FLAGS_XDP) && tx_ring->xsk_pool) {
+		goto tx_skip_free;
+	}
+
 	/* ring already cleared, nothing to do */
 	if (!tx_ring->tx_bi)
 		return;
@@ -71,6 +75,7 @@ void iavf_clean_tx_ring(struct iavf_ring *tx_ring)
 	for (i = 0; i < tx_ring->count; i++)
 		iavf_unmap_and_free_tx_resource(tx_ring, &tx_ring->tx_bi[i]);
 
+tx_skip_free:
 	bi_size = sizeof(struct iavf_tx_buffer) * tx_ring->count;
 	memset(tx_ring->tx_bi, 0, bi_size);
 
