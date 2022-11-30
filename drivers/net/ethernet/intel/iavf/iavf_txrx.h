@@ -188,10 +188,15 @@ static inline unsigned int iavf_txd_use_count(unsigned int size)
 #define IAVF_TX_FLAGS_VLAN_SHIFT		16
 
 struct iavf_tx_buffer {
-	struct iavf_tx_desc *next_to_watch;
+
+	/* Track the last frame in batch/packet */
+	union {
+		struct iavf_tx_desc *next_to_watch;	/* on skb TX queue */
+		u16 rs_desc_idx;			/* on XDP queue */
+	};
 	union {
 		struct sk_buff *skb;
-		void *raw_buf;
+		struct page *page;
 	};
 	unsigned int bytecount;
 	unsigned short gso_segs;
@@ -278,6 +283,12 @@ struct iavf_ring {
 	struct rcu_head rcu;		/* to avoid race on free */
 	struct xdp_rxq_info xdp_rxq;
 } ____cacheline_internodealigned_in_smp;
+
+#define IAVF_RING_QUARTER(R)		((R)->count >> 2)
+#define IAVF_RX_DESC(R, i) (&(((union iavf_32byte_rx_desc *)((R)->desc))[i]))
+#define IAVF_TX_DESC(R, i) (&(((struct iavf_tx_desc *)((R)->desc))[i]))
+#define IAVF_TX_CTXTDESC(R, i) \
+	(&(((struct iavf_tx_context_desc *)((R)->desc))[i]))
 
 #define IAVF_ITR_ADAPTIVE_MIN_INC	0x0002
 #define IAVF_ITR_ADAPTIVE_MIN_USECS	0x0002
@@ -384,4 +395,83 @@ static inline struct netdev_queue *txring_txq(const struct iavf_ring *ring)
 {
 	return netdev_get_tx_queue(ring->netdev, ring->queue_index);
 }
+
+/**
+ * iavf_xdp_ring_update_tail - Updates the XDP Tx ring tail register
+ * @xdp_ring: XDP Tx ring
+ *
+ * Notify hardware the new descriptor is ready to be transmitted
+ */
+static inline void iavf_xdp_ring_update_tail(const struct iavf_ring *xdp_ring)
+{
+	/* Force memory writes to complete before letting h/w
+	 * know there are new descriptors to fetch.
+	 */
+	wmb();
+	writel_relaxed(xdp_ring->next_to_use, xdp_ring->tail);
+}
+
+/**
+ * iavf_update_tx_ring_stats - Update TX ring stats after transmit completes
+ * @tx_ring: TX descriptor ring
+ * @tc: TODO
+ * @total_pkts: Number of packets transmitted since the last update
+ * @total_bytes: Number of bytes transmitted since the last update
+ **/
+static inline void
+__iavf_update_tx_ring_stats(struct iavf_ring *tx_ring,
+			    struct iavf_ring_container *tc,
+			    const struct libie_sq_onstack_stats *stats)
+{
+	libie_sq_napi_stats_add(&tx_ring->sq_stats, stats);
+	tc->total_bytes += stats->bytes;
+	tc->total_packets += stats->packets;
+}
+
+#define iavf_update_tx_ring_stats(r, s) \
+	__iavf_update_tx_ring_stats(r, &(r)->q_vector->tx, s)
+
+#define IAVF_RXQ_XDP_ACT_FINALIZE_TX	BIT(0)
+
+/**
+ * iavf_set_rs_bit - set RS bit on last produced descriptor.
+ * @xdp_ring: XDP ring to produce the HW Tx descriptors on
+ *
+ * Returns the index of descriptor RS bit was set on (one behind current NTU).
+ */
+static inline u16 iavf_set_rs_bit(struct iavf_ring *xdp_ring)
+{
+	u16 rs_idx = xdp_ring->next_to_use ? xdp_ring->next_to_use - 1 :
+					     xdp_ring->count - 1;
+	struct iavf_tx_desc *tx_desc;
+
+	tx_desc = IAVF_TX_DESC(xdp_ring, rs_idx);
+	tx_desc->cmd_type_offset_bsz |=
+		cpu_to_le64(IAVF_TX_DESC_CMD_RS << IAVF_TXD_QW1_CMD_SHIFT);
+
+	return rs_idx;
+}
+
+/**
+ * iavf_finalize_xdp_rx - Finalize XDP actions once per RX ring clean
+ * @xdp_ring: XDP TX queue assigned to a given RX ring
+ * @rxq_xdp_act: Logical OR of flags of XDP actions that require finalization
+ * @first_idx: index of the first frame in the transmitted batch on XDP queue
+ **/
+static inline void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring,
+					u32 rxq_xdp_act, u32 first_idx)
+{
+	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_TX) {
+		struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[first_idx];
+
+		tx_buf->rs_desc_idx = iavf_set_rs_bit(xdp_ring);
+		iavf_xdp_ring_update_tail(xdp_ring);
+	}
+}
+
+static inline bool iavf_ring_is_xdp(struct iavf_ring *ring)
+{
+	return !!(ring->flags & IAVF_TXRX_FLAGS_XDP);
+}
+
 #endif /* _IAVF_TXRX_H_ */
