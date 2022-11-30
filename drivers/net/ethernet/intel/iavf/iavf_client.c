@@ -5,7 +5,6 @@
 #include <linux/errno.h>
 
 #include "iavf.h"
-#include "iavf_prototype.h"
 #include "iavf_client.h"
 
 static

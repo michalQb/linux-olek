@@ -606,6 +606,90 @@ static inline void iavf_update_rx_ring_stats(struct iavf_ring *rx_ring,
 	u64_stats_update_end(&rx_ring->syncp);
 }
 
+/**
+ * iavf_ptype_to_htype - get a hash type
+ * @ptype: the ptype value from the descriptor
+ *
+ * Returns a hash type to be used by skb_set_hash
+ **/
+static inline int iavf_ptype_to_htype(u8 ptype)
+{
+	struct iavf_rx_ptype_decoded decoded = decode_rx_desc_ptype(ptype);
+
+	if (!decoded.known)
+		return PKT_HASH_TYPE_NONE;
+
+	if (decoded.outer_ip == IAVF_RX_PTYPE_OUTER_IP &&
+	    decoded.payload_layer == IAVF_RX_PTYPE_PAYLOAD_LAYER_PAY4)
+		return PKT_HASH_TYPE_L4;
+	else if (decoded.outer_ip == IAVF_RX_PTYPE_OUTER_IP &&
+		 decoded.payload_layer == IAVF_RX_PTYPE_PAYLOAD_LAYER_PAY3)
+		return PKT_HASH_TYPE_L3;
+	else
+		return PKT_HASH_TYPE_L2;
+}
+
+/**
+ * iavf_rx_hash - set the hash value in the skb
+ * @ring: descriptor ring
+ * @rx_desc: specific descriptor
+ * @skb: skb currently being received and modified
+ * @rx_ptype: Rx packet type
+ **/
+static inline void iavf_rx_hash(struct iavf_ring *ring,
+				union iavf_rx_desc *rx_desc,
+				struct sk_buff *skb,
+				u8 rx_ptype)
+{
+	u32 hash;
+	const __le64 rss_mask =
+		cpu_to_le64((u64)IAVF_RX_DESC_FLTSTAT_RSS_HASH <<
+			    IAVF_RX_DESC_STATUS_FLTSTAT_SHIFT);
+
+	if (!(ring->netdev->features & NETIF_F_RXHASH))
+		return;
+
+	if ((rx_desc->wb.qword1.status_error_len & rss_mask) == rss_mask) {
+		hash = le32_to_cpu(rx_desc->wb.qword0.hi_dword.rss);
+		skb_set_hash(skb, hash, iavf_ptype_to_htype(rx_ptype));
+	}
+}
+
+/**
+ * iavf_get_vlan_tag_from_rx_desc - get VLAN from Rx descriptor
+ * @rx_desc: Rx descriptor
+ */
+static inline u16
+iavf_get_vlan_tag_from_rx_desc(struct iavf_ring *rx_ring,
+			       union iavf_rx_desc *rx_desc)
+{
+	u16 vlan_tag = 0;
+
+	if (rx_desc->wb.qword1.status_error_len &
+	    cpu_to_le64(BIT(IAVF_RX_DESC_STATUS_L2TAG1P_SHIFT)) &&
+	    rx_ring->flags & IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1)
+		vlan_tag = le16_to_cpu(rx_desc->wb.qword0.lo_dword.l2tag1);
+	if (rx_desc->wb.qword2.ext_status &
+	    cpu_to_le16(BIT(IAVF_RX_DESC_EXT_STATUS_L2TAG2P_SHIFT)) &&
+	    rx_ring->flags & IAVF_RXR_FLAGS_VLAN_TAG_LOC_L2TAG2_2)
+		vlan_tag = le16_to_cpu(rx_desc->wb.qword2.l2tag2_2);
+
+	return vlan_tag;
+}
+
+/**
+ * iavf_get_vlan_tag_from_rx_desc - get ptype value from Rx descriptor
+ * @rx_desc: Rx descriptor
+ */
+static inline u8
+iavf_get_ptype_from_rx_desc(union iavf_rx_desc *rx_desc)
+{
+	u64 qword = le64_to_cpu(rx_desc->wb.qword1.status_error_len);
+
+	return (qword & IAVF_RXD_QW1_PTYPE_MASK) >>
+	       IAVF_RXD_QW1_PTYPE_SHIFT;
+}
+
 void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring, u16 rxq_xdp_act);
 
 static inline bool iavf_ring_is_xdp(struct iavf_ring *ring)
