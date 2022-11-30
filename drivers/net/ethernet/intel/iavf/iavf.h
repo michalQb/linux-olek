@@ -467,6 +467,8 @@ struct iavf_device {
 /* needed by iavf_ethtool.c */
 extern char iavf_driver_name[];
 
+DECLARE_STATIC_KEY_FALSE(iavf_xdp_locking_key);
+
 static inline const char *iavf_state_str(enum iavf_state_t state)
 {
 	switch (state) {

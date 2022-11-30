@@ -398,6 +398,7 @@ struct iavf_ring {
 					 */
 	struct bpf_prog __rcu *xdp_prog;
 	struct xdp_rxq_info xdp_rxq;
+	spinlock_t tx_lock;		/* Protect XDP TX ring, when shared */
 } ____cacheline_internodealigned_in_smp;
 
 static inline bool ring_uses_build_skb(struct iavf_ring *ring)

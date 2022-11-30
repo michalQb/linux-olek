@@ -1654,9 +1654,13 @@ void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring, u16 rxq_xdp_act)
 {
 	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_REDIR)
 		xdp_do_flush_map();
-	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_TX)
+	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_TX) {
+		if (static_branch_unlikely(&iavf_xdp_locking_key))
+			spin_lock(&xdp_ring->tx_lock);
 		iavf_xdp_ring_update_tail(xdp_ring);
-
+		if (static_branch_unlikely(&iavf_xdp_locking_key))
+			spin_unlock(&xdp_ring->tx_lock);
+	}
 }
 
 /**
@@ -2864,11 +2868,20 @@ static int iavf_xmit_xdp_pkt(void *data, u16 size, struct iavf_ring *xdp_ring)
 int iavf_xmit_xdp_buff(struct xdp_buff *xdp, struct iavf_ring *xdp_ring)
 {
 	struct xdp_frame *xdpf = xdp_convert_buff_to_frame(xdp);
+	int ret;
 
 	if (unlikely(!xdpf))
 		return -ENOSPC;
 
-	return iavf_xmit_xdp_pkt(xdpf->data, xdpf->len, xdp_ring);
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_lock(&xdp_ring->tx_lock);
+
+	ret = iavf_xmit_xdp_pkt(xdpf->data, xdpf->len, xdp_ring);
+
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_unlock(&xdp_ring->tx_lock);
+
+	return ret;
 }
 
 int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
@@ -2889,11 +2902,16 @@ int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 	if (unlikely(flags & ~XDP_XMIT_FLAGS_MASK))
 		return -EINVAL;
 
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		queue_index %= adapter->num_xdp_tx_queues;
+
 	if (queue_index >= adapter->num_active_queues)
 		return -ENXIO;
 
 	rx_ring = &adapter->rx_rings[queue_index];
 	xdp_ring = iavf_get_xdp_ring(rx_ring);
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_lock(&xdp_ring->tx_lock);
 
 	for (i = 0; i < n; i++) {
 		struct xdp_frame *xdpf = frames[i];
@@ -2910,6 +2928,9 @@ int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 
 	if (flags & XDP_XMIT_FLUSH)
 		iavf_xdp_ring_update_tail(xdp_ring);
+
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_unlock(&xdp_ring->tx_lock);
 
 	return nxmit;
 }
