@@ -9,16 +9,6 @@
 #include "iavf_trace.h"
 #include "iavf_prototype.h"
 
-static inline __le64 build_ctob(u32 td_cmd, u32 td_offset, unsigned int size,
-				u32 td_tag)
-{
-	return cpu_to_le64(IAVF_TX_DESC_DTYPE_DATA |
-			   ((u64)td_cmd  << IAVF_TXD_QW1_CMD_SHIFT) |
-			   ((u64)td_offset << IAVF_TXD_QW1_OFFSET_SHIFT) |
-			   ((u64)size  << IAVF_TXD_QW1_TX_BUF_SZ_SHIFT) |
-			   ((u64)td_tag  << IAVF_TXD_QW1_L2TAG1_SHIFT));
-}
-
 #define IAVF_TXD_CMD (IAVF_TX_DESC_CMD_EOP | IAVF_TX_DESC_CMD_RS)
 
 /**
@@ -64,6 +54,7 @@ void iavf_clean_tx_ring(struct iavf_ring *tx_ring)
 	u16 i;
 
 	if ((tx_ring->flags & IAVF_TXRX_FLAGS_XDP) && tx_ring->xsk_pool) {
+		iavf_xsk_clean_xdp_ring(tx_ring);
 		goto tx_skip_free;
 	}
 
@@ -1962,7 +1953,16 @@ int iavf_napi_poll(struct napi_struct *napi, int budget)
 	 * budget and be more aggressive about cleaning up the Tx descriptors.
 	 */
 	iavf_for_each_ring(ring, q_vector->tx) {
-		if (!iavf_clean_tx_irq(vsi, ring, budget)) {
+		bool wd;
+
+		if (ring->xsk_pool)
+			wd = iavf_xmit_zc(ring);
+		else if (iavf_ring_is_xdp(ring))
+			wd = true;
+		else
+			wd = iavf_clean_tx_irq(vsi, ring, budget);
+
+		if (!wd) {
 			clean_complete = false;
 			continue;
 		}
@@ -2537,8 +2537,8 @@ static inline void iavf_tx_map(struct iavf_ring *tx_ring, struct sk_buff *skb,
 
 		while (unlikely(size > IAVF_MAX_DATA_PER_TXD)) {
 			tx_desc->cmd_type_offset_bsz =
-				build_ctob(td_cmd, td_offset,
-					   max_data, td_tag);
+				iavf_build_ctob(td_cmd, td_offset,
+						max_data, td_tag);
 
 			tx_desc++;
 			i++;
@@ -2558,8 +2558,9 @@ static inline void iavf_tx_map(struct iavf_ring *tx_ring, struct sk_buff *skb,
 		if (likely(!data_len))
 			break;
 
-		tx_desc->cmd_type_offset_bsz = build_ctob(td_cmd, td_offset,
-							  size, td_tag);
+		tx_desc->cmd_type_offset_bsz = iavf_build_ctob(td_cmd,
+							       td_offset,
+							       size, td_tag);
 
 		tx_desc++;
 		i++;
@@ -2591,7 +2592,7 @@ static inline void iavf_tx_map(struct iavf_ring *tx_ring, struct sk_buff *skb,
 	/* write last descriptor with RS and EOP bits */
 	td_cmd |= IAVF_TXD_CMD;
 	tx_desc->cmd_type_offset_bsz =
-			build_ctob(td_cmd, td_offset, size, td_tag);
+			iavf_build_ctob(td_cmd, td_offset, size, td_tag);
 
 	skb_tx_timestamp(skb);
 
@@ -2843,7 +2844,7 @@ static int iavf_xmit_xdp_pkt(void *data, u16 size, struct iavf_ring *xdp_ring)
 
 	tx_desc = IAVF_TX_DESC(xdp_ring, ntu);
 	tx_desc->buffer_addr = cpu_to_le64(dma);
-	tx_desc->cmd_type_offset_bsz = build_ctob(IAVF_TX_DESC_CMD_EOP, 0, size, 0);
+	tx_desc->cmd_type_offset_bsz = iavf_build_ctob(IAVF_TX_DESC_CMD_EOP, 0, size, 0);
 
 	ntu++;
 	if (ntu > xdp_ring->next_rs) {

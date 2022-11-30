@@ -400,6 +400,7 @@ struct iavf_ring {
 	struct xdp_rxq_info xdp_rxq;
 	spinlock_t tx_lock;		/* Protect XDP TX ring, when shared */
 	struct xsk_buff_pool *xsk_pool;
+	u16 xdp_tx_active;
 } ____cacheline_internodealigned_in_smp;
 
 static inline bool ring_uses_build_skb(struct iavf_ring *ring)
@@ -466,6 +467,16 @@ void iavf_detect_recover_hung(struct iavf_vsi *vsi);
 int __iavf_maybe_stop_tx(struct iavf_ring *tx_ring, int size);
 bool __iavf_chk_linearize(struct sk_buff *skb);
 int iavf_xmit_xdp_buff(struct xdp_buff *xdp, struct iavf_ring *xdp_ring);
+
+static inline __le64 iavf_build_ctob(u32 td_cmd, u32 td_offset,
+				     unsigned int size, u32 td_tag)
+{
+	return cpu_to_le64(IAVF_TX_DESC_DTYPE_DATA |
+			   ((u64)td_cmd  << IAVF_TXD_QW1_CMD_SHIFT) |
+			   ((u64)td_offset << IAVF_TXD_QW1_OFFSET_SHIFT) |
+			   ((u64)size  << IAVF_TXD_QW1_TX_BUF_SZ_SHIFT) |
+			   ((u64)td_tag  << IAVF_TXD_QW1_L2TAG1_SHIFT));
+}
 
 /**
  * iavf_xmit_descriptor_count - calculate number of Tx descriptors needed
@@ -553,5 +564,10 @@ static inline void iavf_xdp_ring_update_tail(struct iavf_ring *xdp_ring)
 	 */
 	wmb();
 	writel_relaxed(xdp_ring->next_to_use, xdp_ring->tail);
+}
+
+static inline bool iavf_ring_is_xdp(struct iavf_ring *ring)
+{
+	return !!(ring->flags & IAVF_TXRX_FLAGS_XDP);
 }
 #endif /* _IAVF_TXRX_H_ */

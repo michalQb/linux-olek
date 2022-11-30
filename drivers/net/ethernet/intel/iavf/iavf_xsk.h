@@ -4,9 +4,24 @@
 #ifndef _IAVF_XSK_H_
 #define _IAVF_XSK_H_
 
+#define PKTS_PER_BATCH 8
+
+#ifdef __clang__
+#define loop_unrolled_for _Pragma("clang loop unroll_count(8)") for
+#elif __GNUC__ >= 8
+#define loop_unrolled_for _Pragma("GCC unroll 8") for
+#else
+#define loop_unrolled_for for
+#endif
+
 struct iavf_adapter;
+struct iavf_ring;
 
 int iavf_xsk_pool_setup(struct iavf_adapter *adapter,
 			struct xsk_buff_pool *pool, u16 qid);
 
+int iavf_xsk_wakeup(struct net_device *netdev, u32 queue_id,
+		    u32 __always_unused flags);
+bool iavf_xmit_zc(struct iavf_ring *xdp_ring);
+void iavf_xsk_clean_xdp_ring(struct iavf_ring *xdp_ring);
 #endif /* !_IAVF_XSK_H_ */

@@ -1729,6 +1729,7 @@ static void iavf_init_tx_ring(struct iavf_adapter *adapter,
 	tx_ring->itr_setting = IAVF_ITR_TX_DEF;
 
 	tx_ring->flags = 0;
+	tx_ring->xsk_pool = NULL;
 
 	if (adapter->flags & IAVF_FLAG_WB_ON_ITR_CAPABLE)
 		tx_ring->flags |= IAVF_TXR_FLAGS_WB_ON_ITR;
@@ -1736,6 +1737,7 @@ static void iavf_init_tx_ring(struct iavf_adapter *adapter,
 	if (xdp_ring) {
 		tx_ring->queue_index += adapter->num_active_queues;
 		tx_ring->flags |= IAVF_TXRX_FLAGS_XDP;
+		tx_ring->xsk_pool = iavf_tx_xsk_pool(tx_ring);
 		spin_lock_init(&tx_ring->tx_lock);
 	}
 }
@@ -3648,6 +3650,7 @@ static int iavf_setup_all_tx_resources(struct iavf_adapter *adapter)
 	for (i = 0; i < adapter->num_xdp_tx_queues; i++) {
 		ring = &adapter->xdp_rings[i];
 		ring->count = adapter->tx_desc_count;
+		ring->xsk_pool = iavf_tx_xsk_pool(ring);
 		err = iavf_setup_tx_descriptors(ring);
 		if (!err)
 			continue;
@@ -5254,6 +5257,7 @@ static const struct net_device_ops iavf_netdev_ops = {
 	.ndo_setup_tc		= iavf_setup_tc,
 	.ndo_bpf		= iavf_xdp,
 	.ndo_xdp_xmit		= iavf_xdp_xmit,
+	.ndo_xsk_wakeup		= iavf_xsk_wakeup
 };
 
 /**
