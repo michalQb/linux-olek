@@ -332,6 +332,7 @@ struct iavf_ring {
 	union {
 		struct iavf_tx_buffer *tx_bi;
 		struct iavf_rx_buffer *rx_bi;
+		struct xdp_buff **xdp_buff;
 	};
 	DECLARE_BITMAP(state, __IAVF_RING_STATE_NBITS);
 	u16 queue_index;		/* Queue number of ring */
@@ -539,6 +540,7 @@ static inline bool iavf_chk_linearize(struct sk_buff *skb, int count)
 	/* we can support up to 8 data buffers for a single send */
 	return count != IAVF_MAX_BUFFER_TXD;
 }
+
 /**
  * txring_txq - helper to convert from a ring to a queue
  * @ring: Tx ring to find the netdev equivalent of
@@ -550,6 +552,7 @@ static inline struct netdev_queue *txring_txq(const struct iavf_ring *ring)
 
 #define IAVF_RXQ_XDP_ACT_FINALIZE_TX	BIT(0)
 #define IAVF_RXQ_XDP_ACT_FINALIZE_REDIR	BIT(1)
+#define IAVF_RXQ_XDP_ACT_STOP_NOW	BIT(2)
 
 /**
  * iavf_xdp_ring_update_tail - Updates the XDP Tx ring tail register
@@ -565,6 +568,45 @@ static inline void iavf_xdp_ring_update_tail(struct iavf_ring *xdp_ring)
 	wmb();
 	writel_relaxed(xdp_ring->next_to_use, xdp_ring->tail);
 }
+
+/**
+ * iavf_release_rx_desc - Store the new tail and head values
+ * @rx_ring: ring to bump
+ * @val: new head index
+ **/
+static inline void iavf_release_rx_desc(struct iavf_ring *rx_ring, u32 val)
+{
+	rx_ring->next_to_use = val;
+
+	/* update next to alloc since we have filled the ring */
+	rx_ring->next_to_alloc = val;
+
+	/* Force memory writes to complete before letting h/w
+	 * know there are new descriptors to fetch.  (Only
+	 * applicable for weak-ordered memory model archs,
+	 * such as IA-64).
+	 */
+	wmb();
+	writel(val, rx_ring->tail);
+}
+
+/**
+ * iavf_update_rx_ring_stats - Update RX ring stats
+ * @rx_ring: ring to bump
+ * @rx_bytes: number of bytes processed since last update
+ * @rx_packets: number of packets processed since last update
+ **/
+static inline void iavf_update_rx_ring_stats(struct iavf_ring *rx_ring,
+					     unsigned int rx_bytes,
+					     unsigned int rx_packets)
+{
+	u64_stats_update_begin(&rx_ring->syncp);
+	rx_ring->stats.packets += rx_packets;
+	rx_ring->stats.bytes += rx_bytes;
+	u64_stats_update_end(&rx_ring->syncp);
+}
+
+void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring, u16 rxq_xdp_act);
 
 static inline bool iavf_ring_is_xdp(struct iavf_ring *ring)
 {

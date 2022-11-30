@@ -708,6 +708,13 @@ void iavf_clean_rx_ring(struct iavf_ring *rx_ring)
 		rx_ring->skb = NULL;
 	}
 
+	if (rx_ring->xsk_pool) {
+		iavf_xsk_clean_rx_ring(rx_ring);
+		bi_size = array_size(rx_ring->count, sizeof(*rx_ring->xdp_buff));
+		memset(rx_ring->xdp_buff, 0, bi_size);
+		goto skip;
+	}
+
 	/* Free all the Rx ring sk_buffs */
 	for (i = 0; i < rx_ring->count; i++) {
 		struct iavf_rx_buffer *rx_bi = &rx_ring->rx_bi[i];
@@ -736,9 +743,10 @@ void iavf_clean_rx_ring(struct iavf_ring *rx_ring)
 		rx_bi->page_offset = 0;
 	}
 
-	bi_size = sizeof(struct iavf_rx_buffer) * rx_ring->count;
+	bi_size = array_size(rx_ring->count, sizeof(struct iavf_rx_buffer));
 	memset(rx_ring->rx_bi, 0, bi_size);
 
+skip:
 	/* Zero out the descriptor ring */
 	memset(rx_ring->desc, 0, rx_ring->size);
 
@@ -759,8 +767,14 @@ void iavf_free_rx_resources(struct iavf_ring *rx_ring)
 	/* This also unregisters memory model */
 	if (xdp_rxq_info_is_reg(&rx_ring->xdp_rxq))
 		xdp_rxq_info_unreg(&rx_ring->xdp_rxq);
-	kfree(rx_ring->rx_bi);
-	rx_ring->rx_bi = NULL;
+
+	if (rx_ring->xsk_pool) {
+		kfree(rx_ring->xdp_buff);
+		rx_ring->xdp_buff = NULL;
+	} else {
+		kfree(rx_ring->rx_bi);
+		rx_ring->rx_bi = NULL;
+	}
 
 	if (rx_ring->desc) {
 		dma_free_coherent(rx_ring->dev, rx_ring->size,
@@ -782,10 +796,17 @@ int iavf_setup_rx_descriptors(struct iavf_ring *rx_ring)
 
 	/* warn if we are about to overwrite the pointer */
 	WARN_ON(rx_ring->rx_bi);
-	bi_size = sizeof(struct iavf_rx_buffer) * rx_ring->count;
-	rx_ring->rx_bi = kzalloc(bi_size, GFP_KERNEL);
-	if (!rx_ring->rx_bi)
-		goto err;
+	if (rx_ring->xsk_pool) {
+		bi_size = sizeof(struct xdp_buff *) * rx_ring->count;
+		rx_ring->xdp_buff = kzalloc(bi_size, GFP_KERNEL);
+		if (!rx_ring->xdp_buff)
+			goto err;
+	} else {
+		bi_size = sizeof(struct iavf_rx_buffer) * rx_ring->count;
+		rx_ring->rx_bi = kzalloc(bi_size, GFP_KERNEL);
+		if (!rx_ring->rx_bi)
+			goto err;
+	}
 
 	u64_stats_init(&rx_ring->syncp);
 
@@ -810,27 +831,6 @@ err:
 	kfree(rx_ring->rx_bi);
 	rx_ring->rx_bi = NULL;
 	return -ENOMEM;
-}
-
-/**
- * iavf_release_rx_desc - Store the new tail and head values
- * @rx_ring: ring to bump
- * @val: new head index
- **/
-static inline void iavf_release_rx_desc(struct iavf_ring *rx_ring, u32 val)
-{
-	rx_ring->next_to_use = val;
-
-	/* update next to alloc since we have filled the ring */
-	rx_ring->next_to_alloc = val;
-
-	/* Force memory writes to complete before letting h/w
-	 * know there are new descriptors to fetch.  (Only
-	 * applicable for weak-ordered memory model archs,
-	 * such as IA-64).
-	 */
-	wmb();
-	writel(val, rx_ring->tail);
 }
 
 /**
@@ -1814,10 +1814,7 @@ skip_skb:
 
 	rx_ring->skb = skb;
 
-	u64_stats_update_begin(&rx_ring->syncp);
-	rx_ring->stats.packets += total_rx_packets;
-	rx_ring->stats.bytes += total_rx_bytes;
-	u64_stats_update_end(&rx_ring->syncp);
+	iavf_update_rx_ring_stats(rx_ring, total_rx_bytes, total_rx_packets);
 	rx_ring->q_vector->rx.total_packets += total_rx_packets;
 	rx_ring->q_vector->rx.total_bytes += total_rx_bytes;
 	if (xdp_prog && rxq_xdp_act)
@@ -1980,7 +1977,9 @@ int iavf_napi_poll(struct napi_struct *napi, int budget)
 	budget_per_ring = max(budget/q_vector->num_ringpairs, 1);
 
 	iavf_for_each_ring(ring, q_vector->rx) {
-		int cleaned = iavf_clean_rx_irq(ring, budget_per_ring);
+		int cleaned = ring->xsk_pool ?
+			      iavf_clean_rx_irq_zc(ring, budget_per_ring) :
+			      iavf_clean_rx_irq(ring, budget_per_ring);
 
 		work_done += cleaned;
 		/* if we clean as many as budgeted, we must not be done */

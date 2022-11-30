@@ -791,6 +791,22 @@ unsigned int iavf_get_rx_buf_len(struct iavf_adapter *adapter)
 }
 
 /**
+ * iavf_rx_xsk_pool - Get a valid xsk pool for RX ring
+ * @rx_ring: Rx ring being configured
+ *
+ * Do not return a xsk pool, if socket is TX-only
+ **/
+static struct xsk_buff_pool *iavf_rx_xsk_pool(struct iavf_ring *rx_ring)
+{
+	struct xsk_buff_pool *xsk_pool = iavf_xsk_pool(rx_ring);
+
+	if (xsk_pool && xsk_buff_can_alloc(xsk_pool, 1))
+		return xsk_pool;
+
+	return NULL;
+}
+
+/**
  * iavf_configure_rx_ring - Configure a single Rx ring
  * @adapter: board private structure
  * @rx_ring: Rx ring to be configured
@@ -807,11 +823,33 @@ void iavf_configure_rx_ring(struct iavf_adapter *adapter,
 	int err;
 
 	rx_ring->tail = hw->hw_addr + IAVF_QRX_TAIL1(queue_idx);
+	rx_ring->xsk_pool = iavf_rx_xsk_pool(rx_ring);
 
 	if (!xdp_rxq_info_is_reg(&rx_ring->xdp_rxq))
 		err = xdp_rxq_info_reg(&rx_ring->xdp_rxq, rx_ring->netdev,
 				       rx_ring->queue_index,
 				       rx_ring->q_vector->napi.napi_id);
+
+
+	if (rx_ring->xsk_pool) {
+		xdp_rxq_info_unreg_mem_model(&rx_ring->xdp_rxq);
+		rx_ring->rx_buf_len =
+			xsk_pool_get_rx_frame_size(rx_ring->xsk_pool);
+		err = xdp_rxq_info_reg_mem_model(&rx_ring->xdp_rxq,
+						 MEM_TYPE_XSK_BUFF_POOL,
+						 NULL);
+		if (err)
+			netdev_err(adapter->netdev, "xdp_rxq_info_reg_mem_model returned %d\n",
+				   err);
+
+		xsk_pool_set_rxq_info(rx_ring->xsk_pool, &rx_ring->xdp_rxq);
+		netdev_info(adapter->netdev,
+			    "Registered XDP mem model MEM_TYPE_XSK_BUFF_POOL on Rx ring %d\n",
+			 rx_ring->queue_index);
+		iavf_check_alloc_rx_buffers_zc(adapter, rx_ring, num_buffs);
+		RCU_INIT_POINTER(rx_ring->xdp_prog, adapter->xdp_prog);
+		return;
+	}
 
 	rx_ring->rx_buf_len = rx_buf_len;
 
