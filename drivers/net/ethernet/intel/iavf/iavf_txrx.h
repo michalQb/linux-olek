@@ -236,6 +236,7 @@ struct iavf_ring {
 	struct iavf_ring *next;		/* pointer to next ring in q_vector */
 	void *desc;			/* Descriptor ring memory */
 	union {
+		struct xsk_buff_pool *xsk_pool; /* Used on XSk queue pairs */
 		struct page_pool *pool;	/* Used for Rx page management */
 		struct device *dev;	/* Used for DMA mapping on Tx */
 	};
@@ -269,8 +270,12 @@ struct iavf_ring {
 #define IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1	BIT(3)
 #define IAVF_TXR_FLAGS_VLAN_TAG_LOC_L2TAG2	BIT(4)
 #define IAVF_RXR_FLAGS_VLAN_TAG_LOC_L2TAG2_2	BIT(5)
+#define IAVF_TXRX_FLAGS_XSK			BIT(6)
 
-	struct bpf_prog __rcu *xdp_prog;
+	union {
+		struct bpf_prog __rcu *xdp_prog;
+		u32 xdp_tx_active;		/* TODO: comment */
+	};
 	struct iavf_ring *xdp_ring;
 	union {
 		struct sk_buff *skb;	/* When iavf_clean_rx_ring_irq() must
@@ -347,6 +352,16 @@ DECLARE_STATIC_KEY_FALSE(iavf_xdp_locking_key);
 
 int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 		  u32 flags);
+
+static inline __le64 iavf_build_ctob(u32 td_cmd, u32 td_offset,
+				     unsigned int size, u32 td_tag)
+{
+	return cpu_to_le64(IAVF_TX_DESC_DTYPE_DATA |
+			   ((u64)td_cmd  << IAVF_TXD_QW1_CMD_SHIFT) |
+			   ((u64)td_offset << IAVF_TXD_QW1_OFFSET_SHIFT) |
+			   ((u64)size  << IAVF_TXD_QW1_TX_BUF_SZ_SHIFT) |
+			   ((u64)td_tag  << IAVF_TXD_QW1_L2TAG1_SHIFT));
+}
 
 /**
  * iavf_xmit_descriptor_count - calculate number of Tx descriptors needed
