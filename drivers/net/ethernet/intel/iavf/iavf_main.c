@@ -2824,6 +2824,11 @@ static void iavf_init_config_adapter(struct iavf_adapter *adapter)
 	set_bit(__IAVF_VSI_DOWN, adapter->vsi.state);
 	rtnl_unlock();
 
+	adapter->af_xdp_zc_qps = bitmap_zalloc(adapter->num_active_queues,
+					       GFP_KERNEL);
+	if (!adapter->af_xdp_zc_qps)
+		goto err_zc_qps;
+
 	iavf_misc_irq_enable(adapter);
 	wake_up(&adapter->down_waitqueue);
 
@@ -2845,6 +2850,8 @@ static void iavf_init_config_adapter(struct iavf_adapter *adapter)
 	return;
 err_mem:
 	iavf_free_rss(adapter);
+err_zc_qps:
+	bitmap_free(adapter->af_xdp_zc_qps);
 err_register:
 	iavf_free_misc_irq(adapter);
 err_sw_init:
@@ -3105,6 +3112,7 @@ static void iavf_disable_vf(struct iavf_adapter *adapter)
 	}
 
 	iavf_free_xdp_prog(adapter);
+	bitmap_free(adapter->af_xdp_zc_qps);
 
 	spin_lock_bh(&adapter->mac_vlan_list_lock);
 
@@ -5036,7 +5044,7 @@ err_setup_tx_resources:
 static int iavf_prepare_xdp_rings(struct iavf_adapter *adapter,
 				  struct bpf_prog *prog)
 {
-	int err;
+	int i, err;
 
 	iavf_unmap_rings_from_vectors(adapter);
 	iavf_free_xdp_queues(adapter);
@@ -5053,6 +5061,9 @@ static int iavf_prepare_xdp_rings(struct iavf_adapter *adapter,
 	iavf_set_xdp_queue_vlan_tag_loc(adapter);
 
 	iavf_map_rings_to_vectors(adapter);
+
+	for_each_set_bit(i, adapter->af_xdp_zc_qps, adapter->num_active_queues)
+		napi_schedule(&adapter->rx_rings[i].q_vector->napi);
 
 	return 0;
 
@@ -5173,6 +5184,9 @@ static int iavf_xdp(struct net_device *netdev, struct netdev_bpf *xdp)
 	switch (xdp->command) {
 	case XDP_SETUP_PROG:
 		return iavf_setup_xdp(adapter, xdp->prog, xdp->extack);
+	case XDP_SETUP_XSK_POOL:
+		return iavf_xsk_pool_setup(adapter, xdp->xsk.pool,
+					   xdp->xsk.queue_id);
 	default:
 		return -EINVAL;
 	}

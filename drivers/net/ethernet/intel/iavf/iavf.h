@@ -36,7 +36,9 @@
 #include <net/tc_act/tc_gact.h>
 #include <net/tc_act/tc_mirred.h>
 #include <net/xdp.h>
+#include <net/xdp_sock_drv.h>
 
+#include "iavf_xsk.h"
 #include "iavf_type.h"
 #include <linux/avf/virtchnl.h>
 #include "iavf_txrx.h"
@@ -270,6 +272,7 @@ struct iavf_adapter {
 	u32 num_xdp_tx_queues;
 	u32 num_req_queues;
 	struct bpf_prog *xdp_prog;
+	unsigned long *af_xdp_zc_qps;
 
 	/* TX */
 	struct iavf_ring *tx_rings;
