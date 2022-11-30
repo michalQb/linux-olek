@@ -347,6 +347,9 @@ void iavf_detect_recover_hung(struct iavf_vsi *vsi);
 int __iavf_maybe_stop_tx(struct iavf_ring *tx_ring, int size);
 bool __iavf_chk_linearize(struct sk_buff *skb);
 
+int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
+		  u32 flags);
+
 /**
  * iavf_xmit_descriptor_count - calculate number of Tx descriptors needed
  * @skb:     send buffer
@@ -455,6 +458,7 @@ static inline void __iavf_update_tx_ring_stats(struct iavf_ring *tx_ring,
 	__iavf_update_tx_ring_stats(r, &(r)->q_vector->tx, p, b)
 
 #define IAVF_RXQ_XDP_ACT_FINALIZE_TX	BIT(0)
+#define IAVF_RXQ_XDP_ACT_FINALIZE_REDIR	BIT(1)
 
 /**
  * iavf_finalize_xdp_rx - Finalize XDP actions once per RX ring clean
@@ -464,6 +468,8 @@ static inline void __iavf_update_tx_ring_stats(struct iavf_ring *tx_ring,
 static inline void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring,
 					u32 rxq_xdp_act)
 {
+	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_REDIR)
+		xdp_do_flush();
 	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_TX)
 		iavf_xdp_ring_update_tail(xdp_ring);
 }
