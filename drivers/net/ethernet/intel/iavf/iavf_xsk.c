@@ -949,6 +949,41 @@ static void iavf_bump_ntc(struct iavf_ring *rx_ring)
 }
 
 /**
+ * iavf_construct_skb_zc - Create an sk_buff from zero-copy buffer
+ * @rx_ring: Rx ring
+ * @xdp: Pointer to XDP buffer
+ *
+ * This function allocates a new skb from a zero-copy Rx buffer.
+ *
+ * Returns the skb on success, NULL on failure.
+ */
+static struct sk_buff *
+iavf_construct_skb_zc(struct iavf_ring *rx_ring, struct xdp_buff *xdp)
+{
+	unsigned int totalsize = xdp->data_end - xdp->data_meta;
+	unsigned int metasize = xdp->data - xdp->data_meta;
+	struct sk_buff *skb;
+
+	net_prefetch(xdp->data_meta);
+
+	skb = __napi_alloc_skb(&rx_ring->q_vector->napi, totalsize,
+			       GFP_ATOMIC | __GFP_NOWARN);
+	if (unlikely(!skb))
+		return NULL;
+
+	memcpy(__skb_put(skb, totalsize), xdp->data_meta,
+	       ALIGN(totalsize, sizeof(long)));
+
+	if (metasize) {
+		skb_metadata_set(skb, metasize);
+		__skb_pull(skb, metasize);
+	}
+
+	xsk_buff_free(xdp);
+	return skb;
+}
+
+/**
  * iavf_clean_rx_irq_zc - consumes packets from the hardware ring
  * @rx_ring: AF_XDP Rx ring
  * @budget: NAPI budget
@@ -977,6 +1012,8 @@ int iavf_clean_rx_irq_zc(struct iavf_ring *rx_ring, int budget)
 		struct xdp_buff *xdp;
 		unsigned int xdp_act;
 		unsigned int size;
+		u16 vlan_tag = 0;
+		u8 rx_ptype;
 		u64 qword;
 
 		rx_desc = IAVF_RX_DESC(rx_ring, rx_ring->next_to_clean);
@@ -1034,8 +1071,31 @@ int iavf_clean_rx_irq_zc(struct iavf_ring *rx_ring, int budget)
 		continue;
 
 construct_skb:
-		/* XDP_PASS path */
-		trace_printk("XDP_PASS not supported for AF_XDP ZC\n");
+		skb = iavf_construct_skb_zc(rx_ring, xdp);
+		if (!skb) {
+			rx_ring->rx_stats.alloc_buff_failed++;
+			break;
+		}
+
+		iavf_bump_ntc(rx_ring);
+
+		if (eth_skb_pad(skb)) {
+			skb = NULL;
+			continue;
+		}
+
+		/* probably a little skewed due to removing CRC */
+		total_rx_bytes += skb->len;
+
+		rx_ptype = iavf_get_ptype_from_rx_desc(rx_desc);
+		iavf_process_skb_fields(rx_ring, rx_desc, skb, rx_ptype);
+		vlan_tag = iavf_get_vlan_tag_from_rx_desc(rx_ring, rx_desc);
+
+		iavf_trace(clean_rx_irq_zc_rx, rx_ring, rx_desc, skb);
+		iavf_receive_skb(rx_ring, skb, vlan_tag);
+		skb = NULL;
+
+		total_rx_packets++;
 	}
 
 	entries_to_alloc = IAVF_DESC_UNUSED(rx_ring);
