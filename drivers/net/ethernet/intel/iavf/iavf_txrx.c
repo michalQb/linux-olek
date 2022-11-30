@@ -1620,6 +1620,13 @@ iavf_run_xdp(struct iavf_ring *rx_ring, struct xdp_buff *xdp,
 		iavf_rx_buf_adjust_pg_offset(rx_buffer, xdp->frame_sz);
 		*rxq_xdp_act |= IAVF_RXQ_XDP_ACT_FINALIZE_TX;
 		break;
+	case XDP_REDIRECT:
+		err = xdp_do_redirect(rx_ring->netdev, xdp, xdp_prog);
+		if (unlikely(err))
+			goto xdp_err;
+		iavf_rx_buf_adjust_pg_offset(rx_buffer, xdp->frame_sz);
+		*rxq_xdp_act |= IAVF_RXQ_XDP_ACT_FINALIZE_REDIR;
+		break;
 	case XDP_DROP:
 		rx_buffer->pagecnt_bias++;
 		break;
@@ -1645,8 +1652,11 @@ xdp_err:
  **/
 void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring, u16 rxq_xdp_act)
 {
+	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_REDIR)
+		xdp_do_flush_map();
 	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_TX)
 		iavf_xdp_ring_update_tail(xdp_ring);
+
 }
 
 /**
@@ -2859,4 +2869,47 @@ int iavf_xmit_xdp_buff(struct xdp_buff *xdp, struct iavf_ring *xdp_ring)
 		return -ENOSPC;
 
 	return iavf_xmit_xdp_pkt(xdpf->data, xdpf->len, xdp_ring);
+}
+
+int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
+		  u32 flags)
+{
+	struct iavf_adapter *adapter = netdev_priv(dev);
+	struct iavf_ring *rx_ring, *xdp_ring;
+	unsigned int queue_index;
+	int nxmit = 0, i;
+
+	queue_index = smp_processor_id();
+	if (adapter->state == __IAVF_DOWN)
+		return -ENETDOWN;
+
+	if (!iavf_adapter_xdp_active(adapter))
+		return -ENXIO;
+
+	if (unlikely(flags & ~XDP_XMIT_FLAGS_MASK))
+		return -EINVAL;
+
+	if (queue_index >= adapter->num_active_queues)
+		return -ENXIO;
+
+	rx_ring = &adapter->rx_rings[queue_index];
+	xdp_ring = iavf_get_xdp_ring(rx_ring);
+
+	for (i = 0; i < n; i++) {
+		struct xdp_frame *xdpf = frames[i];
+		int err;
+
+		err = iavf_xmit_xdp_pkt(xdpf->data, xdpf->len, xdp_ring);
+		if (err) {
+			netdev_err(dev, "XDP frame TX failed, error: %d\n",
+				   err);
+			break;
+		}
+		nxmit++;
+	}
+
+	if (flags & XDP_XMIT_FLUSH)
+		iavf_xdp_ring_update_tail(xdp_ring);
+
+	return nxmit;
 }

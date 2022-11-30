@@ -536,6 +536,7 @@ static inline struct netdev_queue *txring_txq(const struct iavf_ring *ring)
 }
 
 #define IAVF_RXQ_XDP_ACT_FINALIZE_TX	BIT(0)
+#define IAVF_RXQ_XDP_ACT_FINALIZE_REDIR	BIT(1)
 
 /**
  * iavf_xdp_ring_update_tail - Updates the XDP Tx ring tail register
