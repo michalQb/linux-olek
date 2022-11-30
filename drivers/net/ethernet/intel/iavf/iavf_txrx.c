@@ -11,9 +11,10 @@
 #include "iavf_trace.h"
 #include "iavf_prototype.h"
 
-static int iavf_xmit_xdp_buff(const struct xdp_buff *xdp,
-			      struct iavf_ring *xdp_ring,
-			      bool map);
+DEFINE_STATIC_KEY_FALSE(iavf_xdp_locking_key);
+
+static bool iavf_xdp_xmit_back(const struct xdp_buff *buff,
+			       struct iavf_ring *xdp_ring);
 
 static inline __le64 build_ctob(u32 td_cmd, u32 td_offset, unsigned int size,
 				u32 td_tag)
@@ -1139,7 +1140,7 @@ iavf_run_xdp(struct iavf_ring *rx_ring, struct xdp_buff *xdp,
 	case XDP_DROP:
 		break;
 	case XDP_TX:
-		if (unlikely(iavf_xmit_xdp_buff(xdp, xdp_ring, false)))
+		if (unlikely(!iavf_xdp_xmit_back(xdp, xdp_ring)))
 			goto xdp_err;
 
 		*rxq_xdp_act |= IAVF_RXQ_XDP_ACT_FINALIZE_TX;
@@ -2407,6 +2408,23 @@ static int iavf_xmit_xdp_buff(const struct xdp_buff *xdp,
 	return 0;
 }
 
+static bool iavf_xdp_xmit_back(const struct xdp_buff *buff,
+			       struct iavf_ring *xdp_ring)
+{
+	bool ret;
+
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_lock(&xdp_ring->tx_lock);
+
+	/* TODO: improve XDP_TX by batching */
+	ret = !iavf_xmit_xdp_buff(buff, xdp_ring, false);
+
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_unlock(&xdp_ring->tx_lock);
+
+	return ret;
+}
+
 int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 		  u32 flags)
 {
@@ -2425,10 +2443,15 @@ int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 		return -ENXIO;
 
 	queue_index = smp_processor_id();
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		queue_index %= adapter->num_xdp_tx_queues;
 	if (queue_index >= adapter->num_active_queues)
 		return -ENXIO;
 
 	xdp_ring = &adapter->xdp_rings[queue_index];
+
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_lock(&xdp_ring->tx_lock);
 
 	for (u32 i = 0; i < n; i++) {
 		struct xdp_frame *xdpf = frames[i];
@@ -2444,6 +2467,9 @@ int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 
 	if (flags & XDP_XMIT_FLUSH)
 		iavf_xdp_ring_update_tail(xdp_ring);
+
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_unlock(&xdp_ring->tx_lock);
 
 	return nxmit;
 }
