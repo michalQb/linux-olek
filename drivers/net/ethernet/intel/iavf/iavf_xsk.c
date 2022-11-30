@@ -941,6 +941,8 @@ iavf_run_xdp_zc(struct iavf_ring *rx_ring, struct xdp_buff *xdp,
 	}
 
 	switch (xdp_act) {
+	case XDP_PASS:
+		break;
 	case XDP_TX:
 		err = iavf_xmit_xdp_tx_zc(xdp, xdp_ring);
 		if (unlikely(err))
@@ -964,6 +966,42 @@ xdp_err:
 	}
 
 	return xdp_act;
+}
+
+/**
+ * iavf_construct_skb_zc - Create an sk_buff from zero-copy buffer
+ * @rx_ring: Rx ring
+ * @xdp: Pointer to XDP buffer
+ *
+ * This function allocates a new skb from a zero-copy Rx buffer.
+ *
+ * Returns the skb on success, NULL on failure.
+ */
+static struct sk_buff *
+iavf_construct_skb_zc(struct iavf_ring *rx_ring, struct xdp_buff *xdp)
+{
+	unsigned int totalsize = xdp->data_end - xdp->data_meta;
+	unsigned int metasize = xdp->data - xdp->data_meta;
+	struct sk_buff *skb;
+
+	net_prefetch(xdp->data_meta);
+
+	skb = __napi_alloc_skb(&rx_ring->q_vector->napi, totalsize,
+			       GFP_ATOMIC | __GFP_NOWARN);
+	if (unlikely(!skb))
+		return NULL;
+
+	memcpy(__skb_put(skb, totalsize), xdp->data_meta,
+	       ALIGN(totalsize, sizeof(long)));
+
+	if (metasize) {
+		skb_metadata_set(skb, metasize);
+		__skb_pull(skb, metasize);
+	}
+
+	xsk_buff_free(xdp);
+
+	return skb;
 }
 
 /**
@@ -991,6 +1029,8 @@ int iavf_clean_rx_irq_zc(struct iavf_ring *rx_ring, int budget)
 	while (likely(cleaned_count < budget)) {
 		union iavf_rx_desc *rx_desc;
 		struct xdp_buff *xdp;
+		unsigned int xdp_act;
+		struct sk_buff *skb;
 		unsigned int size;
 		u64 qword;
 
@@ -1025,8 +1065,10 @@ int iavf_clean_rx_irq_zc(struct iavf_ring *rx_ring, int budget)
 		xsk_buff_set_size(xdp, size);
 		xsk_buff_dma_sync_for_cpu(xdp, rx_ring->xsk_pool);
 
-		iavf_run_xdp_zc(rx_ring, xdp, xdp_prog, xdp_ring,
-				&rxq_xdp_act);
+		xdp_act = iavf_run_xdp_zc(rx_ring, xdp, xdp_prog, xdp_ring,
+					  &rxq_xdp_act);
+		if (xdp_act == XDP_PASS)
+			goto construct_skb;
 
 		if (unlikely(rxq_xdp_act & IAVF_RXQ_XDP_ACT_STOP_NOW)) {
 			failure = true;
@@ -1040,6 +1082,34 @@ next:
 		cleaned_count++;
 		if (unlikely(++ntc == ring_size))
 			ntc = 0;
+
+		continue;
+
+construct_skb:
+		skb = iavf_construct_skb_zc(rx_ring, xdp);
+		if (!skb) {
+			libie_stats_inc_one(&rx_ring->rq_stats,
+					    build_skb_fail);
+			break;
+		}
+
+		cleaned_count++;
+		if (unlikely(++ntc == ring_size))
+			ntc = 0;
+
+		prefetch(rx_desc);
+
+		/* probably a little skewed due to removing CRC */
+		stats.bytes += skb->len;
+
+		/* populate checksum, VLAN, and protocol */
+		iavf_process_skb_fields(rx_ring, rx_desc, skb, qword);
+
+		iavf_trace(clean_rx_irq_zc_rx, rx_ring, rx_desc, skb);
+		skb->protocol = eth_type_trans(skb, rx_ring->netdev);
+		napi_gro_receive(&rx_ring->q_vector->napi, skb);
+
+		stats.packets++;
 	}
 
 	rx_ring->next_to_clean = ntc;
