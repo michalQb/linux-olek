@@ -36,7 +36,9 @@
 #include <net/tc_act/tc_gact.h>
 #include <net/tc_act/tc_mirred.h>
 #include <net/xdp.h>
+#include <net/xdp_sock_drv.h>
 
+#include "iavf_xsk.h"
 #include "iavf_type.h"
 #include <linux/avf/virtchnl.h>
 #include "iavf_txrx.h"
@@ -243,6 +245,8 @@ struct iavf_cloud_filter {
 	bool add;		/* filter needs to be added */
 };
 
+#define IAVF_XDP_LINK_TIMEOUT_MS 1000
+
 #define IAVF_RESET_WAIT_MS 10
 #define IAVF_RESET_WAIT_DETECTED_COUNT 500
 #define IAVF_RESET_WAIT_COMPLETE_COUNT 2000
@@ -267,6 +271,7 @@ struct iavf_adapter {
 	u32 num_xdp_tx_queues;
 	u32 num_req_queues;
 	struct bpf_prog *xdp_prog;
+	unsigned long *af_xdp_zc_qps;
 
 	/* TX */
 	struct iavf_ring *tx_rings;
