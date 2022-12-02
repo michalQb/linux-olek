@@ -6,6 +6,7 @@
 
 #include <linux/if_vlan.h>
 #include <linux/netdevice.h>
+#include <uapi/linux/bpf.h>
 
 /* O(1) converting i40e/ice/iavf's 8/10-bit hardware packet type to a parsed
  * bitfield struct.
@@ -132,8 +133,10 @@ static inline void libie_skb_set_hash(struct sk_buff *skb, u32 hash,
 
 /* Space reserved in front of each frame */
 #define LIBIE_SKB_HEADROOM	(NET_SKB_PAD + NET_IP_ALIGN)
+#define LIBIE_XDP_HEADROOM	(max(XDP_PACKET_HEADROOM, NET_SKB_PAD) +    \
+				 NET_IP_ALIGN)
 /* Maximum headroom to calculate max MTU below */
-#define LIBIE_MAX_HEADROOM	LIBIE_SKB_HEADROOM
+#define LIBIE_MAX_HEADROOM	LIBIE_XDP_HEADROOM
 /* Link layer / L2 overhead: Ethernet, 2 VLAN tags (C + S), FCS */
 #define LIBIE_RX_LL_LEN		(ETH_HLEN + 2 * VLAN_HLEN + ETH_FCS_LEN)
 
