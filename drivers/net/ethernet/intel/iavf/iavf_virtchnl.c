@@ -400,17 +400,30 @@ int iavf_get_vf_vlan_v2_caps(struct iavf_adapter *adapter)
  * @adapter: adapter structure
  * @queue_index: index of queue pair in the adapter structure
  * @max_frame: maximal frame size supported by the adapter
+ * @xdp_pair: true if the queue pair is assigned to XDP queues
  *
  * Fill virtchannel queue pair configuration structure
  * with data for the Rx and Tx queues of a given index.
- **/
+ * To handle XDP queues, only Tx part of vqpi structure is filled
+ * with data. Because of virtchnl protocol can operate on queue pairs only,
+ * associate each extra Tx queue with an empty Rx queue
+ * (with zero length).
+ */
 static void iavf_set_qp_config_info(struct virtchnl_queue_pair_info *vqpi,
 				    struct iavf_adapter *adapter,
-				    int queue_index, int max_frame)
+				    int queue_index, int max_frame,
+				    bool xdp_pair)
 {
-	struct iavf_ring *txq = &adapter->tx_rings[queue_index];
 	struct iavf_ring *rxq = &adapter->rx_rings[queue_index];
+	struct iavf_ring *txq;
+	int xdpq_idx;
 
+	if (xdp_pair) {
+		xdpq_idx = queue_index - adapter->num_xdp_tx_queues;
+		txq = &adapter->xdp_rings[xdpq_idx];
+	} else {
+		txq = &adapter->tx_rings[queue_index];
+	}
 	vqpi->txq.vsi_id = adapter->vsi_res->vsi_id;
 	vqpi->txq.queue_id = queue_index;
 	vqpi->txq.ring_len = txq->count;
@@ -418,6 +431,11 @@ static void iavf_set_qp_config_info(struct virtchnl_queue_pair_info *vqpi,
 
 	vqpi->rxq.vsi_id = adapter->vsi_res->vsi_id;
 	vqpi->rxq.queue_id = queue_index;
+	if (xdp_pair) {
+		vqpi->rxq.ring_len = 0;
+		return;
+	}
+
 	vqpi->rxq.ring_len = rxq->count;
 	vqpi->rxq.dma_ring_addr = rxq->dma;
 	vqpi->rxq.max_pkt_size = max_frame;
@@ -439,6 +457,7 @@ static void iavf_set_qp_config_info(struct virtchnl_queue_pair_info *vqpi,
 int iavf_configure_selected_queues(struct iavf_adapter *adapter, u32 qp_mask,
 				   bool wait)
 {
+	int pairs = adapter->num_active_queues + adapter->num_xdp_tx_queues;
 	unsigned long num_qps_to_config, mask = qp_mask;
 	u32 idx, max_frame = adapter->vf_res->max_mtu;
 	struct virtchnl_vsi_queue_config_info *vqci;
@@ -468,7 +487,13 @@ int iavf_configure_selected_queues(struct iavf_adapter *adapter, u32 qp_mask,
 	 * can fit info for 31 of them into the AQ buffer before it overflows.
 	 */
 	for_each_set_bit(idx, &mask, adapter->num_active_queues) {
-		iavf_set_qp_config_info(vqpi, adapter, idx, max_frame);
+		iavf_set_qp_config_info(vqpi, adapter, idx, max_frame, false);
+		vqpi++;
+	}
+
+	/* Set configuration info for XDP Tx queues. */
+	for_each_set_bit_from(idx, &mask, pairs) {
+		iavf_set_qp_config_info(vqpi, adapter, idx, max_frame, true);
 		vqpi++;
 	}
 
@@ -497,7 +522,7 @@ int iavf_configure_selected_queues(struct iavf_adapter *adapter, u32 qp_mask,
  */
 int iavf_configure_queues(struct iavf_adapter *adapter, bool wait)
 {
-	int pairs = adapter->num_active_queues;
+	int pairs = adapter->num_active_queues + adapter->num_xdp_tx_queues;
 	u32 qpair_mask = BIT(pairs) - 1;
 
 	return iavf_configure_selected_queues(adapter, qpair_mask, wait);
@@ -595,7 +620,9 @@ int iavf_disable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
  */
 int iavf_enable_queues(struct iavf_adapter *adapter, bool wait)
 {
-	u32 num_tx_queues = adapter->num_active_queues;
+	u32 num_tx_queues = adapter->num_active_queues +
+			    adapter->num_xdp_tx_queues;
+
 	u32 rx_queues = BIT(adapter->num_active_queues) - 1;
 	u32 tx_queues = BIT(num_tx_queues) - 1;
 
@@ -615,7 +642,9 @@ int iavf_enable_queues(struct iavf_adapter *adapter, bool wait)
  */
 int iavf_disable_queues(struct iavf_adapter *adapter, bool wait)
 {
-	u32 num_tx_queues = adapter->num_active_queues;
+	u32 num_tx_queues = adapter->num_active_queues +
+			    adapter->num_xdp_tx_queues;
+
 	u32 rx_queues = BIT(adapter->num_active_queues) - 1;
 	u32 tx_queues = BIT(num_tx_queues) - 1;
 

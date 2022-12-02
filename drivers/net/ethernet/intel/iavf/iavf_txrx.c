@@ -45,21 +45,31 @@ static void iavf_unmap_and_free_tx_resource(struct iavf_ring *ring,
 }
 
 /**
+ * iavf_release_tx_resources - Release all Tx buffers on ring
+ * @ring: TX or XDP ring
+ */
+static void iavf_release_tx_resources(struct iavf_ring *ring)
+{
+	u32 i;
+
+	for (i = 0; i < ring->count; i++)
+		iavf_unmap_and_free_tx_resource(ring, &ring->tx_bi[i]);
+}
+
+/**
  * iavf_clean_tx_ring - Free any empty Tx buffers
  * @tx_ring: ring to be cleaned
  **/
 void iavf_clean_tx_ring(struct iavf_ring *tx_ring)
 {
 	unsigned long bi_size;
-	u16 i;
 
 	/* ring already cleared, nothing to do */
 	if (!tx_ring->tx_bi)
 		return;
 
 	/* Free all the Tx ring sk_buffs */
-	for (i = 0; i < tx_ring->count; i++)
-		iavf_unmap_and_free_tx_resource(tx_ring, &tx_ring->tx_bi[i]);
+	iavf_release_tx_resources(tx_ring);
 
 	bi_size = sizeof(struct iavf_tx_buffer) * tx_ring->count;
 	memset(tx_ring->tx_bi, 0, bi_size);
@@ -74,7 +84,8 @@ void iavf_clean_tx_ring(struct iavf_ring *tx_ring)
 		return;
 
 	/* cleanup Tx queue statistics */
-	netdev_tx_reset_queue(txring_txq(tx_ring));
+	if (!(tx_ring->flags & IAVF_TXRX_FLAGS_XDP))
+		netdev_tx_reset_queue(txring_txq(tx_ring));
 }
 
 /**
@@ -303,8 +314,9 @@ static bool iavf_clean_tx_irq(struct iavf_vsi *vsi,
 	}
 
 	/* notify netdev of completed buffers */
-	netdev_tx_completed_queue(txring_txq(tx_ring),
-				  stats.packets, stats.bytes);
+	if (!(tx_ring->flags & IAVF_TXRX_FLAGS_XDP))
+		netdev_tx_completed_queue(txring_txq(tx_ring),
+					  stats.packets, stats.bytes);
 
 #define TX_WAKE_THRESHOLD ((s16)(DESC_NEEDED * 2))
 	if (unlikely(stats.packets && netif_carrier_ok(tx_ring->netdev) &&
@@ -734,6 +746,10 @@ void iavf_free_rx_resources(struct iavf_ring *rx_ring)
 	iavf_clean_rx_ring(rx_ring);
 	kfree(rx_ring->rx_pages);
 	rx_ring->rx_pages = NULL;
+
+	/* This also unregisters memory model */
+	if (xdp_rxq_info_is_reg(&rx_ring->xdp_rxq))
+		xdp_rxq_info_unreg(&rx_ring->xdp_rxq);
 
 	libie_rx_page_pool_destroy(rx_ring->pool, &rx_ring->rq_stats);
 	rx_ring->dev = dev;

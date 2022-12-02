@@ -246,14 +246,13 @@ struct iavf_ring {
 	u16 flags;
 #define IAVF_TXR_FLAGS_WB_ON_ITR		BIT(0)
 #define IAVF_TXRX_FLAGS_ARM_WB			BIT(1)
-/* BIT(2) is free */
+#define IAVF_TXRX_FLAGS_XDP			BIT(2)
 #define IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1	BIT(3)
 #define IAVF_TXR_FLAGS_VLAN_TAG_LOC_L2TAG2	BIT(4)
 #define IAVF_RXR_FLAGS_VLAN_TAG_LOC_L2TAG2_2	BIT(5)
 
-	struct iavf_vsi *vsi;		/* Backreference to associated VSI */
-	struct iavf_q_vector *q_vector;	/* Backreference to associated vector */
-
+	struct bpf_prog __rcu *xdp_prog;
+	struct iavf_ring *xdp_ring;
 	struct sk_buff *skb;		/* When iavf_clean_rx_ring_irq() must
 					 * return before it sees the EOP for
 					 * the current packet, we save that skb
@@ -269,11 +268,15 @@ struct iavf_ring {
 		struct libie_rq_stats rq_stats;
 	};
 
+	struct iavf_vsi *vsi;		/* Backreference to associated VSI */
+	struct iavf_q_vector *q_vector;	/* Backreference to associated vector */
+
 	int prev_pkt_ctr;		/* For stall detection */
 	unsigned int size;		/* length of descriptor ring in bytes */
 	dma_addr_t dma;			/* physical address of ring */
 
 	struct rcu_head rcu;		/* to avoid race on free */
+	struct xdp_rxq_info xdp_rxq;
 } ____cacheline_internodealigned_in_smp;
 
 #define IAVF_ITR_ADAPTIVE_MIN_INC	0x0002

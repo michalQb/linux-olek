@@ -4,6 +4,7 @@
 #ifndef _IAVF_H_
 #define _IAVF_H_
 
+#include <linux/bpf.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/netdevice.h>
@@ -33,6 +34,7 @@
 #include <net/udp.h>
 #include <net/tc_act/tc_gact.h>
 #include <net/tc_act/tc_mirred.h>
+#include <net/xdp.h>
 
 #include "iavf_type.h"
 #include <linux/avf/virtchnl.h>
@@ -265,10 +267,13 @@ struct iavf_adapter {
 	spinlock_t mac_vlan_list_lock;
 	char misc_vector_name[IFNAMSIZ + 9];
 	u32 num_active_queues;
+	u32 num_xdp_tx_queues;
 	u32 num_req_queues;
+	struct bpf_prog *xdp_prog;
 
 	/* TX */
 	struct iavf_ring *tx_rings;
+	struct iavf_ring *xdp_rings;
 	u32 tx_timeout_count;
 	u32 tx_desc_count;
 
@@ -509,6 +514,17 @@ static inline void iavf_change_state(struct iavf_adapter *adapter,
 		"state transition from:%s to:%s\n",
 		iavf_state_str(adapter->last_state),
 		iavf_state_str(adapter->state));
+}
+
+/**
+ * iavf_adapter_xdp_active - Determine if XDP program is loaded
+ * @adapter: board private structure
+ *
+ * Returns true if XDP program is loaded on a given adapter.
+ */
+static inline bool iavf_adapter_xdp_active(struct iavf_adapter *adapter)
+{
+	return !!READ_ONCE(adapter->xdp_prog);
 }
 
 int iavf_up(struct iavf_adapter *adapter);
