@@ -463,12 +463,15 @@ iavf_map_vector_to_rxq(struct iavf_adapter *adapter, int v_idx, int r_idx)
  * @adapter: board private structure
  * @v_idx: interrupt number
  * @t_idx: queue number
+ * @xdpq: set to true if Tx queue is XDP Tx queue
  **/
 static void
-iavf_map_vector_to_txq(struct iavf_adapter *adapter, int v_idx, int t_idx)
+iavf_map_vector_to_txq(struct iavf_adapter *adapter, int v_idx, int t_idx,
+		       bool xdpq)
 {
+	struct iavf_ring *tx_ring =  xdpq ? &adapter->xdp_rings[t_idx]
+					  : &adapter->tx_rings[t_idx];
 	struct iavf_q_vector *q_vector = &adapter->q_vectors[v_idx];
-	struct iavf_ring *tx_ring = &adapter->tx_rings[t_idx];
 	struct iavf_hw *hw = &adapter->hw;
 
 	tx_ring->q_vector = q_vector;
@@ -504,7 +507,9 @@ static void iavf_map_rings_to_vectors(struct iavf_adapter *adapter)
 
 	for (; ridx < rings_remaining; ridx++) {
 		iavf_map_vector_to_rxq(adapter, vidx, ridx);
-		iavf_map_vector_to_txq(adapter, vidx, ridx);
+		iavf_map_vector_to_txq(adapter, vidx, ridx, false);
+		if (iavf_adapter_xdp_active(adapter))
+			iavf_map_vector_to_txq(adapter, vidx, ridx, true);
 
 		/* In the case where we have more queues than vectors, continue
 		 * round-robin on vectors until all queues are mapped.
@@ -694,10 +699,13 @@ static void iavf_free_misc_irq(struct iavf_adapter *adapter)
 static void iavf_configure_tx(struct iavf_adapter *adapter)
 {
 	struct iavf_hw *hw = &adapter->hw;
-	int i;
+	int i, j;
 
-	for (i = 0; i < adapter->num_active_queues; i++)
-		adapter->tx_rings[i].tail = hw->hw_addr + IAVF_QTX_TAIL1(i);
+	for (i = 0, j = 0; i < adapter->num_active_queues; i++, j++)
+		adapter->tx_rings[i].tail = hw->hw_addr + IAVF_QTX_TAIL1(j);
+
+	for (i = 0; i < adapter->num_xdp_tx_queues; i++, j++)
+		adapter->xdp_rings[i].tail = hw->hw_addr + IAVF_QTX_TAIL1(j);
 }
 
 /**
@@ -747,8 +755,15 @@ void iavf_configure_rx_ring(struct iavf_adapter *adapter,
 	unsigned int queue_idx = rx_ring->queue_index;
 	u16 num_buffs = IAVF_DESC_UNUSED(rx_ring);
 	struct iavf_hw *hw = &adapter->hw;
+	int err;
 
 	rx_ring->tail = hw->hw_addr + IAVF_QRX_TAIL1(queue_idx);
+
+	if (!xdp_rxq_info_is_reg(&rx_ring->xdp_rxq))
+		err = xdp_rxq_info_reg(&rx_ring->xdp_rxq, rx_ring->netdev,
+				       rx_ring->queue_index,
+				       rx_ring->q_vector->napi.napi_id);
+
 	rx_ring->rx_buf_len = rx_buf_len;
 
 	if (adapter->flags & IAVF_FLAG_LEGACY_RX)
@@ -756,6 +771,13 @@ void iavf_configure_rx_ring(struct iavf_adapter *adapter,
 	else
 		set_ring_build_skb_enabled(rx_ring);
 
+	err = xdp_rxq_info_reg_mem_model(&rx_ring->xdp_rxq,
+					 MEM_TYPE_PAGE_SHARED, NULL);
+	if (err)
+		netdev_err(adapter->netdev, "Could not register XDP memory model for RX queue %u, error: %d\n",
+			   queue_idx, err);
+
+	RCU_INIT_POINTER(rx_ring->xdp_prog, adapter->xdp_prog);
 	iavf_alloc_rx_buffers(rx_ring, num_buffs);
 }
 
@@ -1486,6 +1508,19 @@ iavf_acquire_msix_vectors(struct iavf_adapter *adapter, int vectors)
 }
 
 /**
+ * iavf_free_xdp_queues - Free memory for XDP rings
+ * @adapter: board private structure to update
+ *
+ * Free all of the memory associated with XDP queues.
+ **/
+static void iavf_free_xdp_queues(struct iavf_adapter *adapter)
+{
+	adapter->num_xdp_tx_queues = 0;
+	kfree(adapter->xdp_rings);
+	adapter->xdp_rings = NULL;
+}
+
+/**
  * iavf_free_queues - Free memory for all rings
  * @adapter: board private structure to initialize
  *
@@ -1493,13 +1528,12 @@ iavf_acquire_msix_vectors(struct iavf_adapter *adapter, int vectors)
  **/
 static void iavf_free_queues(struct iavf_adapter *adapter)
 {
-	if (!adapter->vsi_res)
-		return;
 	adapter->num_active_queues = 0;
 	kfree(adapter->tx_rings);
 	adapter->tx_rings = NULL;
 	kfree(adapter->rx_rings);
 	adapter->rx_rings = NULL;
+	iavf_free_xdp_queues(adapter);
 }
 
 /**
@@ -1569,6 +1603,20 @@ static void iavf_set_tx_queue_vlan_tag_loc(struct iavf_adapter *adapter,
 }
 
 /**
+ * iavf_set_xdp_queue_vlan_tag_loc - set location for VLAN tag on XDP ring
+ * @adapter: board private structure
+ *
+ * Variation of iavf_set_queue_vlan_tag_loc, which configures XDP rings only.
+ */
+void iavf_set_xdp_queue_vlan_tag_loc(struct iavf_adapter *adapter)
+{
+	int i;
+
+	for (i = 0; i < adapter->num_xdp_tx_queues; i++)
+		iavf_set_tx_queue_vlan_tag_loc(adapter, &adapter->xdp_rings[i]);
+}
+
+/**
  * iavf_set_queue_vlan_tag_loc - set location for VLAN tag offload
  * @adapter: board private structure
  *
@@ -1585,6 +1633,8 @@ void iavf_set_queue_vlan_tag_loc(struct iavf_adapter *adapter)
 		iavf_set_rx_queue_vlan_tag_loc(adapter, &adapter->rx_rings[i]);
 		iavf_set_tx_queue_vlan_tag_loc(adapter, &adapter->tx_rings[i]);
 	}
+
+	iavf_set_xdp_queue_vlan_tag_loc(adapter);
 }
 
 /**
@@ -1615,9 +1665,12 @@ static void iavf_init_rx_ring(struct iavf_adapter *adapter,
  *
  * Init all basic pointers and flags in a newly allocated Tx ring.
  **/
-static void iavf_init_tx_ring(struct iavf_adapter *adapter, int ring_index)
+static void iavf_init_tx_ring(struct iavf_adapter *adapter,
+			      int ring_index,
+			      bool xdp_ring)
 {
-	struct iavf_ring *tx_ring = &adapter->tx_rings[ring_index];
+	struct iavf_ring *tx_ring = xdp_ring ? &adapter->xdp_rings[ring_index]
+					     : &adapter->tx_rings[ring_index];
 
 	tx_ring->vsi = &adapter->vsi;
 	tx_ring->queue_index = ring_index;
@@ -1630,6 +1683,40 @@ static void iavf_init_tx_ring(struct iavf_adapter *adapter, int ring_index)
 
 	if (adapter->flags & IAVF_FLAG_WB_ON_ITR_CAPABLE)
 		tx_ring->flags |= IAVF_TXR_FLAGS_WB_ON_ITR;
+
+	if (xdp_ring) {
+		tx_ring->queue_index += adapter->num_active_queues;
+		tx_ring->flags |= IAVF_TXRX_FLAGS_XDP;
+	}
+}
+
+/**
+ * iavf_alloc_xdp_queues - Allocate memory for XDP rings
+ * @adapter: board private structure to initialize
+ *
+ * Variation of iavf_alloc_queues(), which configures XDP queues only.
+ **/
+static int iavf_alloc_xdp_queues(struct iavf_adapter *adapter, u32 num_active_queues)
+{
+	int i;
+
+	adapter->num_xdp_tx_queues = iavf_adapter_xdp_active(adapter) ?
+				     num_active_queues : 0;
+
+	adapter->xdp_rings = kcalloc(adapter->num_xdp_tx_queues,
+				     sizeof(struct iavf_ring), GFP_KERNEL);
+	if (!adapter->xdp_rings)
+		goto err_out;
+
+	/* Setup extra XDP Tx queues if there are any */
+	for (i = 0; i < adapter->num_xdp_tx_queues; i++)
+		iavf_init_tx_ring(adapter, i, true);
+
+	return 0;
+
+err_out:
+	iavf_free_xdp_queues(adapter);
+	return -ENOMEM;
 }
 
 /**
@@ -1672,9 +1759,12 @@ static int iavf_alloc_queues(struct iavf_adapter *adapter)
 	adapter->num_active_queues = num_active_queues;
 
 	for (i = 0; i < num_active_queues; i++) {
-		iavf_init_tx_ring(adapter, i);
+		iavf_init_tx_ring(adapter, i, false);
 		iavf_init_rx_ring(adapter, i);
 	}
+
+	if (iavf_alloc_xdp_queues(adapter, num_active_queues))
+		goto err_out;
 
 	iavf_set_queue_vlan_tag_loc(adapter);
 
@@ -3408,6 +3498,10 @@ void iavf_free_all_tx_resources(struct iavf_adapter *adapter)
 	for (i = 0; i < adapter->num_active_queues; i++)
 		if (adapter->tx_rings[i].desc)
 			iavf_free_tx_resources(&adapter->tx_rings[i]);
+
+	for (i = 0; i < adapter->num_xdp_tx_queues; i++)
+		if (adapter->xdp_rings[i].desc)
+			iavf_free_tx_resources(&adapter->xdp_rings[i]);
 }
 
 /**
@@ -3422,15 +3516,28 @@ void iavf_free_all_tx_resources(struct iavf_adapter *adapter)
  **/
 static int iavf_setup_all_tx_resources(struct iavf_adapter *adapter)
 {
+	struct iavf_ring *ring;
 	int i, err = 0;
 
 	for (i = 0; i < adapter->num_active_queues; i++) {
-		adapter->tx_rings[i].count = adapter->tx_desc_count;
-		err = iavf_setup_tx_descriptors(&adapter->tx_rings[i]);
+		ring = &adapter->tx_rings[i];
+		ring->count = adapter->tx_desc_count;
+		err = iavf_setup_tx_descriptors(ring);
 		if (!err)
 			continue;
 		dev_err(&adapter->pdev->dev,
 			"Allocation for Tx Queue %u failed\n", i);
+		break;
+	}
+
+	for (i = 0; i < adapter->num_xdp_tx_queues; i++) {
+		ring = &adapter->xdp_rings[i];
+		ring->count = adapter->tx_desc_count;
+		err = iavf_setup_tx_descriptors(ring);
+		if (!err)
+			continue;
+		dev_err(&adapter->pdev->dev,
+			"Allocation for XDP Queue %u failed\n", i);
 		break;
 	}
 
