@@ -712,6 +712,7 @@ static int iavf_request_misc_irq(struct iavf_adapter *adapter)
  **/
 static void iavf_free_traffic_irqs(struct iavf_adapter *adapter)
 {
+	struct iavf_q_vector *q_vector;
 	int vector, irq_num, q_vectors;
 
 	if (!adapter->msix_entries)
@@ -720,10 +721,14 @@ static void iavf_free_traffic_irqs(struct iavf_adapter *adapter)
 	q_vectors = adapter->num_msix_vectors - NONQ_VECS;
 
 	for (vector = 0; vector < q_vectors; vector++) {
+		q_vector = &adapter->q_vectors[vector];
+		if (!q_vector->tx.ring && !q_vector->rx.ring)
+			continue;
+
 		irq_num = adapter->msix_entries[vector + NONQ_VECS].vector;
 		irq_set_affinity_notifier(irq_num, NULL);
 		irq_update_affinity_hint(irq_num, NULL);
-		free_irq(irq_num, &adapter->q_vectors[vector]);
+		free_irq(irq_num, q_vector);
 	}
 }
 
