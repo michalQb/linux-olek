@@ -48,8 +48,7 @@
 extern char _head[], _end[];
 
 /* misc.c */
-extern memptr free_mem_ptr;
-extern memptr free_mem_end_ptr;
+void init_malloc(void *start, size_t len);
 void *malloc(int size);
 void free(void *where);
 extern struct boot_params *boot_params;
@@ -78,6 +77,35 @@ static inline void debug_puthex(unsigned long value)
 
 #endif
 
+enum {
+	BOOT_LAYOUT_STATIC,
+	BOOT_LAYOUT_KASLR,
+	BOOT_LAYOUT_FGKASLR,
+
+	__BOOT_LAYOUT_NUM,
+};
+
+#define __BOOT_LAYOUT_MIN	BOOT_LAYOUT_STATIC
+
+#define __BOOT_LAYOUT_MAX						\
+	(IS_ENABLED(CONFIG_FG_KASLR) ? BOOT_LAYOUT_FGKASLR :		\
+	 IS_ENABLED(CONFIG_RANDOMIZE_BASE) ? BOOT_LAYOUT_KASLR :	\
+	 BOOT_LAYOUT_STATIC)
+
+extern u32 __boot_layout_mode;
+
+static __always_inline u32 get_boot_layout_mode(void)
+{
+	return clamp_t(u32, __boot_layout_mode, __BOOT_LAYOUT_MIN,
+		       __BOOT_LAYOUT_MAX);
+}
+
+static __always_inline void set_boot_layout_mode(u32 mode)
+{
+	__boot_layout_mode = clamp_t(u32, mode, __BOOT_LAYOUT_MIN,
+				     __BOOT_LAYOUT_MAX);
+}
+
 /* cmdline.c */
 int cmdline_find_option(const char *option, char *buffer, int bufsize);
 int cmdline_find_option_bool(const char *option);
@@ -87,47 +115,36 @@ struct mem_vector {
 	u64 size;
 };
 
-#ifdef CONFIG_X86_64
-#define Elf_Ehdr Elf64_Ehdr
-#define Elf_Phdr Elf64_Phdr
-#define Elf_Shdr Elf64_Shdr
-#else
-#define Elf_Ehdr Elf32_Ehdr
-#define Elf_Phdr Elf32_Phdr
-#define Elf_Shdr Elf32_Shdr
-#endif
+struct apply_relocs_params {
+	const int	*reloc;
+	unsigned long	map;
+	unsigned long	delta;
+	unsigned long	min_addr;
+	unsigned long	max_addr;
+};
 
+/* fgkaslr.c */
 #ifdef CONFIG_FG_KASLR
-void layout_randomized_image(void *output, Elf_Ehdr *ehdr, Elf_Phdr *phdrs);
-void pre_relocations_cleanup(unsigned long map);
-void post_relocations_cleanup(unsigned long map);
-Elf_Shdr *adjust_address(long *address);
-void adjust_relative_offset(long pc, long *value, Elf_Shdr *section);
-bool is_percpu_addr(long pc, long offset);
+void choose_random_location(unsigned long input, unsigned long input_size,
+			    unsigned long *output, unsigned long output_size,
+			    unsigned long *virt_addr);
+void layout_image(void *output, Elf_Ehdr *ehdr, Elf_Phdr *phdrs);
+void apply_relocs(const struct apply_relocs_params *params);
 #else
-static inline void layout_randomized_image(void *output, Elf_Ehdr *ehdr,
-					   Elf_Phdr *phdrs) { }
-static inline void pre_relocations_cleanup(unsigned long map) { }
-static inline void post_relocations_cleanup(unsigned long map) { }
-static inline Elf_Shdr *adjust_address(long *address) { return NULL; }
-static inline void adjust_relative_offset(long pc, long *value,
-					  Elf_Shdr *section) { }
-static inline bool is_percpu_addr(long pc, long offset) { return true; }
+#define choose_random_location	__choose_random_location
 #endif
 
 #ifdef CONFIG_RANDOMIZE_BASE
 /* kaslr.c */
-void choose_random_location(unsigned long input,
-			    unsigned long input_size,
-			    unsigned long *output,
-			    unsigned long output_size,
-			    unsigned long *virt_addr);
+void __choose_random_location(unsigned long input, unsigned long input_size,
+			      unsigned long *output, unsigned long output_size,
+			      unsigned long *virt_addr);
 #else
-static inline void choose_random_location(unsigned long input,
-					  unsigned long input_size,
-					  unsigned long *output,
-					  unsigned long output_size,
-					  unsigned long *virt_addr)
+static inline void __choose_random_location(unsigned long input,
+					    unsigned long input_size,
+					    unsigned long *output,
+					    unsigned long output_size,
+					    unsigned long *virt_addr)
 {
 }
 #endif

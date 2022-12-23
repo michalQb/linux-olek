@@ -59,7 +59,6 @@ KBUILD_CFLAGS += -include $(srctree)/include/linux/hidden.h
 CFLAGS_sev.o += -I$(objtree)/arch/x86/lib/
 
 KBUILD_AFLAGS  := $(KBUILD_CFLAGS) -D__ASSEMBLY__
-KBUILD_AFLAGS += $(SECSUBST_AFLAGS)
 GCOV_PROFILE := n
 UBSAN_SANITIZE :=n
 
@@ -80,17 +79,25 @@ LDFLAGS_vmlinux += -T
 hostprogs	:= mkpiggy
 HOST_EXTRACFLAGS += -I$(srctree)/tools/include
 
-sed-voffset := -e 's/^\([0-9a-fA-F]*\) [ABCDGRSTVW] \(_text\|__bss_start\|_end\)$$/\#define VO_\2 _AC(0x\1,UL)/p'
+# Files which list vmlinux symbols whose addresses the compressed environment
+# code needs at compile-time, one per each source file (and named after it).
+sym-files-y			:= $(src)/misc.symbols
+sym-files-$(CONFIG_FG_KASLR)	+= $(src)/fgkaslr.symbols
 
+# Reads every file from $(sym-files-y) and replaces spaces to '\|', so that
+# the list of symbols can then be passed as a part of sed expression.
+sed-syms = $(subst $(space),\|,$(foreach file,$(sym-files-y),$(call read-file,$(file))))
+
+sed-voffset = -e 's/^\([0-9a-fA-F]*\) [ABCDGRSTVW] \($(sed-syms)\)$$/\#define VO_\2 _AC(0x\1,UL)/p'
 quiet_cmd_voffset = VOFFSET $@
-      cmd_voffset = $(NM) $< | sed -n $(sed-voffset) > $@
+      cmd_voffset = sed -n $(sed-voffset) < $< > $@
 
 targets += ../voffset.h
 
-$(obj)/../voffset.h: vmlinux FORCE
+$(obj)/../voffset.h: System.map $(sym-files-y) FORCE
 	$(call if_changed,voffset)
 
-$(obj)/misc.o: $(obj)/../voffset.h
+$(patsubst %.symbols,%.o,$(sym-files-y)): $(obj)/../voffset.h
 
 vmlinux-objs-y := $(obj)/vmlinux.lds $(obj)/kernel_info.o $(obj)/head_$(BITS).o \
 	$(obj)/misc.o $(obj)/string.o $(obj)/cmdline.o $(obj)/error.o \
@@ -98,7 +105,9 @@ vmlinux-objs-y := $(obj)/vmlinux.lds $(obj)/kernel_info.o $(obj)/head_$(BITS).o 
 
 vmlinux-objs-$(CONFIG_EARLY_PRINTK) += $(obj)/early_serial_console.o
 vmlinux-objs-$(CONFIG_RANDOMIZE_BASE) += $(obj)/kaslr.o
-vmlinux-objs-$(CONFIG_FG_KASLR) += $(obj)/fgkaslr.o $(obj)/utils.o
+vmlinux-objs-$(CONFIG_FG_KASLR)	+= $(obj)/fgkaslr.o $(obj)/utils.o
+relocs-args-$(CONFIG_FG_KASLR)	+= --text-pcrel
+
 ifdef CONFIG_X86_64
 	vmlinux-objs-y += $(obj)/ident_map_64.o
 	vmlinux-objs-y += $(obj)/idt_64.o $(obj)/idt_handlers_64.o
@@ -118,29 +127,15 @@ $(obj)/vmlinux: $(vmlinux-objs-y) $(efi-obj-y) FORCE
 	$(call if_changed,ld)
 
 OBJCOPYFLAGS_vmlinux.bin :=  -R .comment -S
-
-targets += vmlinux.symbols
-
-ifdef CONFIG_FG_KASLR
-quiet_cmd_vmlinux_symbols = GEN     $@
-      cmd_vmlinux_symbols = $(CPP) $(cpp_flags) -P -D"GEN(s)"=s -o $@ $<
-
-VMLINUX_SYMBOLS = $(obj)/vmlinux.symbols
-$(VMLINUX_SYMBOLS): $(src)/gen-symbols.h FORCE
-	$(call if_changed_dep,vmlinux_symbols)
-
-OBJCOPYFLAGS += --keep-symbols=$(VMLINUX_SYMBOLS)
-RELOCS_ARGS += --fg-kaslr
-endif # CONFIG_FG_KASLR
-
-$(obj)/vmlinux.bin: vmlinux $(VMLINUX_SYMBOLS) FORCE
+$(obj)/vmlinux.bin: vmlinux FORCE
 	$(call if_changed,objcopy)
 
 targets += $(patsubst $(obj)/%,%,$(vmlinux-objs-y)) vmlinux.bin.all vmlinux.relocs
 
 CMD_RELOCS = arch/x86/tools/relocs
 quiet_cmd_relocs = RELOCS  $@
-      cmd_relocs = $(CMD_RELOCS) $(RELOCS_ARGS) $< > $@;$(CMD_RELOCS) $(RELOCS_ARGS) --abs-relocs $<
+      cmd_relocs = $(CMD_RELOCS) $(relocs-args-y) $< > $@; \
+		   $(CMD_RELOCS) $(relocs-args-y) --abs-relocs $<
 $(obj)/vmlinux.relocs: vmlinux FORCE
 	$(call if_changed,relocs)
 

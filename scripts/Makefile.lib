@@ -267,6 +267,9 @@ objtool-args-$(CONFIG_HAVE_STATIC_CALL_INLINE)		+= --static-call
 objtool-args-$(CONFIG_HAVE_UACCESS_VALIDATION)		+= --uaccess
 objtool-args-$(CONFIG_GCOV_KERNEL)			+= --no-unreachable
 objtool-args-$(CONFIG_PREFIX_SYMBOLS)			+= --prefix=$(CONFIG_FUNCTION_PADDING_BYTES)
+ifneq ($(part-of-module),y)
+objtool-args-$(CONFIG_FG_KASLR_OBJTOOL)			+= --entry
+endif
 
 objtool-args = $(objtool-args-y)					\
 	$(if $(delay-objtool), --link)					\

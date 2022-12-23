@@ -84,25 +84,23 @@ static struct desc_ptr startup_gdt_descr = {
 	.address = 0,
 };
 
-#define __head	__section(".head.text")
-
-static void __head *fixup_pointer(void *ptr, unsigned long physaddr)
+static void __init *fixup_pointer(void *ptr, unsigned long physaddr)
 {
 	return ptr - (void *)_text + (void *)physaddr;
 }
 
-static unsigned long __head *fixup_long(void *ptr, unsigned long physaddr)
+static unsigned long __init *fixup_long(void *ptr, unsigned long physaddr)
 {
 	return fixup_pointer(ptr, physaddr);
 }
 
 #ifdef CONFIG_X86_5LEVEL
-static unsigned int __head *fixup_int(void *ptr, unsigned long physaddr)
+static unsigned int __init *fixup_int(void *ptr, unsigned long physaddr)
 {
 	return fixup_pointer(ptr, physaddr);
 }
 
-static bool __head check_la57_support(unsigned long physaddr)
+static bool __init check_la57_support(unsigned long physaddr)
 {
 	/*
 	 * 5-level paging is detected and enabled at kernel decompression
@@ -121,13 +119,13 @@ static bool __head check_la57_support(unsigned long physaddr)
 	return true;
 }
 #else
-static bool __head check_la57_support(unsigned long physaddr)
+static bool __init check_la57_support(unsigned long physaddr)
 {
 	return false;
 }
 #endif
 
-static unsigned long __head sme_postprocess_startup(struct boot_params *bp, pmdval_t *pmd)
+static unsigned long __init sme_postprocess_startup(struct boot_params *bp, pmdval_t *pmd)
 {
 	unsigned long vaddr, vaddr_end;
 	int i;
@@ -176,7 +174,7 @@ static unsigned long __head sme_postprocess_startup(struct boot_params *bp, pmdv
  * boot-time crashes. To work around this problem, every global pointer must
  * be adjusted using fixup_pointer().
  */
-unsigned long __head __startup_64(unsigned long physaddr,
+unsigned long __init __startup_64(unsigned long physaddr,
 				  struct boot_params *bp)
 {
 	unsigned long load_delta, *p;
@@ -424,7 +422,7 @@ void __init do_early_exception(struct pt_regs *regs, int trapnr)
 	early_fixup_exception(regs, trapnr);
 }
 
-/* Don't add a printk in there. printk relies on the PDA which is not initialized 
+/* Don't add a printk in there. printk relies on the PDA which is not initialized
    yet. */
 void __init clear_bss(void)
 {
@@ -622,7 +620,7 @@ void early_setup_idt(void)
 /*
  * Setup boot CPU state needed before kernel switches to virtual addresses.
  */
-void __head startup_64_setup_env(unsigned long physbase)
+void __init startup_64_setup_env(unsigned long physbase)
 {
 	/* Load GDT */
 	startup_gdt_descr.address = (unsigned long)fixup_pointer(startup_gdt, physbase);

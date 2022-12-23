@@ -43,19 +43,20 @@ info()
 	printf "  %-7s %s\n" "${1}" "${2}"
 }
 
-# If CONFIG_FG_KASLR is selected, generate a linker script which will
+# If CONFIG_FG_KASLR_SECT is selected, generate a linker script which will
 # declare all custom text sections for future boottime shuffling
 gen_text_sections()
 {
 	local shift=$(sed -n 's/^CONFIG_FG_KASLR_SHIFT=\(.*\)$/\1/p' include/config/auto.conf)
 	local assert=""
 
-	is_enabled CONFIG_HAVE_ASM_FUNCTION_SECTIONS && assert="-a"
+	is_enabled CONFIG_ASM_FUNCTION_SECTIONS && assert="-a"
 
-	info GEN .tmp_vmlinux.lds
+	info LDS .tmp_vmlinux.lds
 
 	${PERL} ${srctree}/scripts/generate_text_sections.pl	\
-		${assert} -s "${shift}" vmlinux.o		\
+		${assert} -s "${shift}" -e vmlinux.o		\
+		-r scripts/basic/randstruct.seed		\
 		< "${objtree}/${KBUILD_LDS}"			\
 		> .tmp_vmlinux.lds
 }
@@ -78,7 +79,7 @@ vmlinux_link()
 	# skip output file argument
 	shift
 
-	if is_enabled CONFIG_FG_KASLR; then
+	if is_enabled CONFIG_FG_KASLR_SECT; then
 		lds=".tmp_vmlinux.lds"
 	else
 		lds="${objtree}/${KBUILD_LDS}"
@@ -239,7 +240,7 @@ fi
 
 ${MAKE} -f "${srctree}/scripts/Makefile.build" obj=init init/version-timestamp.o
 
-if is_enabled CONFIG_FG_KASLR; then
+if is_enabled CONFIG_FG_KASLR_SECT; then
 	gen_text_sections
 fi
 

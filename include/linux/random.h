@@ -111,20 +111,55 @@ static inline unsigned long get_random_canary(void)
 }
 
 /**
- * shuffle_array - use a Fisher-Yates algorithm to shuffle an array.
+ * __shuffle_do - use Fisher-Yates algorithm to shuffle an arbitrary object.
+ * @_op: operation to perform on each iteration
+ * @priv: pointer to the object, will be passed to @_op
+ * @nents: the number of elements in the array
+ * @...: prefixes for the local variables generated via __UNIQUE_ID()
+ *
+ * Performs one Fisher-Yates loop over the passed entity and calls @_op once
+ * per each iterations. @_op takes 3 arguments: @priv, i and j, where i goes
+ * during the loop from `nents - 1` to 1 and j is random [0, j] each time.
+ * The most common operation to perform is to swap elements i and j in @priv.
+ * Does compile-time check for the @nents type to use the more optimized
+ * random function if suitable, which is most of cases. Consumes one
+ * `get_random_typeof_nents()` per iteration.
+ * Does nothing when @nents is not positive.
+ */
+#define __shuffle_do(_op, priv, nents, __priv, __nents, __i, __j) ({	     \
+	typeof(*(priv)) *__priv = (priv);				     \
+	typeof(nents) __nents = (nents);				     \
+									     \
+	if (unlikely(__nents <= 0))					     \
+		/* Don't enter the loop */				     \
+		__nents = 1;						     \
+									     \
+	for (typeof(__nents) __i = __nents - 1; __i > 0; __i--) {	     \
+		typeof(__nents) __j;					     \
+									     \
+		if ((__builtin_constant_p(__nents) && __nents <= U32_MAX) || \
+		    type_max(typeof(__nents)) <= U32_MAX)		     \
+			__j = get_random_u32_below(__i + 1);		     \
+		else							     \
+			div64_u64_rem(get_random_u64(), __i + 1,	     \
+				      (u64 *)&__j);			     \
+									     \
+		_op(__priv, __i, __j);					     \
+	}								     \
+})
+
+#define _shuffle_swap_arr(arr, i, j)	swap(arr[i], arr[j])
+
+/**
+ * shuffle_array - use Fisher-Yates algorithm to shuffle an array.
  * @arr: pointer to the array
  * @nents: the number of elements in the array
+ *
+ * Convenient wrapper for __shuffle_do() to shuffle an array of arbitrary type.
  */
-#define shuffle_array(arr, nents) ({				\
-	typeof(&(arr)[0]) __arr = &(arr)[0];			\
-	size_t __i;						\
-								\
-	for (__i = (nents) - 1; __i > 0; __i--) {		\
-		size_t __j = get_random_long() % (__i + 1);	\
-								\
-		swap(__arr[__i], __arr[__j]);			\
-	}							\
-})
+#define shuffle_array(arr, nents)					     \
+	__shuffle_do(_shuffle_swap_arr, arr, nents, __UNIQUE_ID(priv_),	     \
+		     __UNIQUE_ID(nents_), __UNIQUE_ID(i_), __UNIQUE_ID(j_))
 
 void __init random_init_early(const char *command_line);
 void __init random_init(void);

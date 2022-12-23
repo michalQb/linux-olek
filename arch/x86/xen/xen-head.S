@@ -21,7 +21,9 @@
 #include <asm/xen/interface.h>
 
 .pushsection .noinstr.text, "ax"
+SYM_PUSH_SECTION(hypercall_page)
 	.balign PAGE_SIZE
+SYM_POP_SECTION()
 SYM_CODE_START(hypercall_page)
 	.rept (PAGE_SIZE / 32)
 		UNWIND_HINT_FUNC

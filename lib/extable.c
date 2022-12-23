@@ -13,15 +13,6 @@
 #include <linux/extable.h>
 
 #ifndef ARCH_HAS_RELATIVE_EXTABLE
-#define ex_to_insn(x)	((x)->insn)
-#else
-static inline unsigned long ex_to_insn(const struct exception_table_entry *x)
-{
-	return (unsigned long)&x->insn + x->insn;
-}
-#endif
-
-#ifndef ARCH_HAS_RELATIVE_EXTABLE
 #define swap_ex		NULL
 #else
 static void swap_ex(void *a, void *b, int size)

@@ -554,20 +554,21 @@ int sprint_backtrace_build_id(char *buffer, unsigned long address)
 
 /* To avoid using get_symbol_offset for every symbol, we carry prefix along. */
 struct kallsym_iter {
+	struct_group(bounds,
+		loff_t pos_arch_end;
+		loff_t pos_mod_end;
+		loff_t pos_ftrace_mod_end;
+		loff_t pos_bpf_end;
+		loff_t pos_end;
+	);
 	loff_t pos;
-	loff_t pos_arch_end;
-	loff_t pos_mod_end;
-	loff_t pos_ftrace_mod_end;
-	loff_t pos_bpf_end;
-	loff_t pos_end;
 	unsigned long value;
-	unsigned int nameoff; /* If iterating in core kernel symbols. */
-	char type;
+	u32 *shuffled_pos;
 	char name[KSYM_NAME_LEN];
 	char module_name[MODULE_NAME_LEN];
-	int exported;
-	int show_layout:1;
-	loff_t shuffled_pos[];
+	unsigned int nameoff; /* If iterating in core kernel symbols. */
+	char type;
+	u32 exported:1;
 };
 
 int __weak arch_get_kallsym(unsigned int symnum, unsigned long *value,
@@ -592,10 +593,12 @@ static int get_ksymbol_arch(struct kallsym_iter *iter)
 
 static int get_ksymbol_mod(struct kallsym_iter *iter)
 {
-	int ret = module_get_kallsym(iter->pos - iter->pos_arch_end,
-				     &iter->value, &iter->type,
-				     iter->name, iter->module_name,
-				     &iter->exported);
+	int ret, exported = iter->exported;
+
+	ret = module_get_kallsym(iter->pos - iter->pos_arch_end, &iter->value,
+				 &iter->type, iter->name, iter->module_name,
+				 &exported);
+	iter->exported = exported;
 	if (ret < 0) {
 		iter->pos_mod_end = iter->pos;
 		return 0;
@@ -611,10 +614,12 @@ static int get_ksymbol_mod(struct kallsym_iter *iter)
  */
 static int get_ksymbol_ftrace_mod(struct kallsym_iter *iter)
 {
-	int ret = ftrace_mod_get_kallsym(iter->pos - iter->pos_mod_end,
-					 &iter->value, &iter->type,
-					 iter->name, iter->module_name,
-					 &iter->exported);
+	int ret, exported = iter->exported;
+
+	ret = ftrace_mod_get_kallsym(iter->pos - iter->pos_mod_end,
+				     &iter->value, &iter->type, iter->name,
+				     iter->module_name, &exported);
+	iter->exported = exported;
 	if (ret < 0) {
 		iter->pos_ftrace_mod_end = iter->pos;
 		return 0;
@@ -683,16 +688,8 @@ static void reset_iter(struct kallsym_iter *iter, loff_t new_pos)
 	iter->nameoff = get_symbol_offset(new_pos);
 	iter->pos = new_pos;
 
-	if (!iter->show_layout)
-		return;
-
-	if (new_pos == 0) {
-		iter->pos_arch_end = 0;
-		iter->pos_mod_end = 0;
-		iter->pos_ftrace_mod_end = 0;
-		iter->pos_bpf_end = 0;
-		iter->pos_end = 0;
-	}
+	if (!iter->shuffled_pos && !new_pos)
+		memset(&iter->bounds, 0, sizeof(iter->bounds));
 }
 
 /*
@@ -730,8 +727,8 @@ static int update_iter_mod(struct kallsym_iter *iter, loff_t pos)
 /* Returns false if pos at or past end of file. */
 static int update_iter(struct kallsym_iter *iter, loff_t pos)
 {
-	if (!iter->show_layout) {
-		if (pos > iter->pos_end)
+	if (iter->shuffled_pos) {
+		if (pos >= iter->pos_end)
 			return 0;
 
 		pos = iter->shuffled_pos[pos];
@@ -779,7 +776,7 @@ static int s_show(struct seq_file *m, void *p)
 	if (!iter->name[0])
 		return 0;
 
-	value = iter->show_layout ? (void *)iter->value : NULL;
+	value = iter->shuffled_pos ? NULL : (void *)iter->value;
 
 	if (iter->module_name[0]) {
 		char type;
@@ -804,6 +801,46 @@ static const struct seq_operations kallsyms_op = {
 	.stop = s_stop,
 	.show = s_show
 };
+
+static int kallsym_iter_init(struct kallsym_iter *iter,
+			     const struct cred *cred)
+{
+	u32 num, *shuf_pos;
+
+	reset_iter(iter, 0);
+
+	if (kallsyms_show_value(cred))
+		return 0;
+
+	/*
+	 * Discover all the bounds and get the total number of the kallsyms
+	 * to be able to display them in a random order.
+	 */
+	num = kallsyms_num_syms;
+	while (update_iter_mod(iter, num))
+		num++;
+
+	num = iter->pos_end;
+
+	shuf_pos = kvmalloc_array(num, sizeof(*shuf_pos), GFP_KERNEL_ACCOUNT);
+	if (!shuf_pos)
+		return -ENOMEM;
+
+	for (u32 i = 0; i < num; i++)
+		shuf_pos[i] = i;
+
+	shuffle_array(shuf_pos, num);
+	iter->shuffled_pos = shuf_pos;
+
+	reset_iter(iter, 0);
+
+	return 0;
+}
+
+static void kallsym_iter_fini(struct kallsym_iter *iter)
+{
+	kvfree(iter->shuffled_pos);
+}
 
 #ifdef CONFIG_BPF_SYSCALL
 
@@ -850,16 +887,15 @@ static const struct seq_operations bpf_iter_ksym_ops = {
 
 static int bpf_iter_ksym_init(void *priv_data, struct bpf_iter_aux_info *aux)
 {
-	struct kallsym_iter *iter = priv_data;
-
-	reset_iter(iter, 0);
-
 	/* cache here as in kallsyms_open() case; use current process
 	 * credentials to tell BPF iterators if values should be shown.
 	 */
-	iter->show_value = kallsyms_show_value(current_cred());
+	return kallsym_iter_init(priv_data, current_cred());
+}
 
-	return 0;
+static void bpf_iter_ksym_fini(void *priv_data)
+{
+	kallsym_iter_fini(priv_data);
 }
 
 DEFINE_BPF_ITER_FUNC(ksym, struct bpf_iter_meta *meta, struct kallsym_iter *ksym)
@@ -867,7 +903,7 @@ DEFINE_BPF_ITER_FUNC(ksym, struct bpf_iter_meta *meta, struct kallsym_iter *ksym
 static const struct bpf_iter_seq_info ksym_iter_seq_info = {
 	.seq_ops		= &bpf_iter_ksym_ops,
 	.init_seq_private	= bpf_iter_ksym_init,
-	.fini_seq_private	= NULL,
+	.fini_seq_private	= bpf_iter_ksym_fini,
 	.seq_priv_size		= sizeof(struct kallsym_iter),
 };
 
@@ -939,54 +975,26 @@ static int kallsyms_open(struct inode *inode, struct file *file)
 	 * using get_symbol_offset for every symbol.
 	 */
 	struct kallsym_iter *iter;
-	/*
-	 * This fake iter is needed for the cases with unprivileged
-	 * access. We need to know the exact number of symbols to
-	 * randomize the display layout.
-	 */
-	struct kallsym_iter fake;
-	size_t size = sizeof(*iter);
-	loff_t pos;
+	int ret;
 
-	fake.show_layout = true;
-	reset_iter(&fake, 0);
-
-	/*
-	 * Instead of checking this on every s_show() call, cache
-	 * the result here at open time.
-	 */
-	fake.show_layout = kallsyms_show_value(file->f_cred);
-	if (!fake.show_layout) {
-		pos = kallsyms_num_syms;
-		while (update_iter_mod(&fake, pos))
-			pos++;
-
-		size = struct_size(iter, shuffled_pos, fake.pos_end + 1);
-	}
-
-	iter = __seq_open_private(file, &kallsyms_op, size);
+	iter = __seq_open_private(file, &kallsyms_op, sizeof(*iter));
 	if (!iter)
 		return -ENOMEM;
 
-	iter->show_layout = fake.show_layout;
-	reset_iter(iter, 0);
+	ret = kallsym_iter_init(iter, file->f_cred);
+	if (ret)
+		seq_release_private(inode, file);
 
-	if (iter->show_layout)
-		return 0;
+	return ret;
+}
 
-	/* Copy the bounds since they were already discovered above */
-	iter->pos_arch_end = fake.pos_arch_end;
-	iter->pos_mod_end = fake.pos_mod_end;
-	iter->pos_ftrace_mod_end = fake.pos_ftrace_mod_end;
-	iter->pos_bpf_end = fake.pos_bpf_end;
-	iter->pos_end = fake.pos_end;
+static int kallsyms_release(struct inode *inode, struct file *file)
+{
+	const struct seq_file *seq = file->private_data;
 
-	for (pos = 0; pos <= iter->pos_end; pos++)
-		iter->shuffled_pos[pos] = pos;
+	kallsym_iter_fini(seq->private);
 
-	shuffle_array(iter->shuffled_pos, iter->pos_end + 1);
-
-	return 0;
+	return seq_release_private(inode, file);
 }
 
 #ifdef	CONFIG_KGDB_KDB
@@ -996,7 +1004,6 @@ const char *kdb_walk_kallsyms(loff_t *pos)
 	if (*pos == 0) {
 		memset(&kdb_walk_kallsyms_iter, 0,
 		       sizeof(kdb_walk_kallsyms_iter));
-		kdb_walk_kallsyms_iter.show_layout = true;
 		reset_iter(&kdb_walk_kallsyms_iter, 0);
 	}
 	while (1) {
@@ -1014,7 +1021,7 @@ static const struct proc_ops kallsyms_proc_ops = {
 	.proc_open	= kallsyms_open,
 	.proc_read	= seq_read,
 	.proc_lseek	= seq_lseek,
-	.proc_release	= seq_release_private,
+	.proc_release	= kallsyms_release,
 };
 
 static int __init kallsyms_init(void)

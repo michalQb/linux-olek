@@ -99,38 +99,62 @@
 
 /* SYM_TYPED_FUNC_START -- use for indirectly called globals, w/ CFI type */
 #define SYM_TYPED_FUNC_START(name)				\
+	SYM_PUSH_SECTION(name) ASM_NL				\
 	SYM_TYPED_START(name, SYM_L_GLOBAL, SYM_A_ALIGN)	\
 	ENDBR
 
 /* SYM_FUNC_START -- use for global functions */
 #define SYM_FUNC_START(name)				\
+	SYM_PUSH_SECTION(name) ASM_NL			\
+	SYM_START(name, SYM_L_GLOBAL, SYM_F_ALIGN)	\
+	ENDBR
+
+/*
+ * SYM_FUNC_START_SECT -- use for global functions, will be conditionally
+ * placed into a section specified in the second argument
+ */
+#define SYM_FUNC_START_SECT(name, sect)			\
+	SYM_PUSH_SECTION(sect) ASM_NL			\
 	SYM_START(name, SYM_L_GLOBAL, SYM_F_ALIGN)	\
 	ENDBR
 
 /* SYM_FUNC_START_NOALIGN -- use for global functions, w/o alignment */
 #define SYM_FUNC_START_NOALIGN(name)			\
+	SYM_PUSH_SECTION(name) ASM_NL			\
 	SYM_START(name, SYM_L_GLOBAL, SYM_A_NONE)	\
 	ENDBR
 
 /* SYM_FUNC_START_LOCAL -- use for local functions */
 #define SYM_FUNC_START_LOCAL(name)			\
+	SYM_PUSH_SECTION(name) ASM_NL			\
 	SYM_START(name, SYM_L_LOCAL, SYM_F_ALIGN)	\
 	ENDBR
 
 /* SYM_FUNC_START_LOCAL_NOALIGN -- use for local functions, w/o alignment */
 #define SYM_FUNC_START_LOCAL_NOALIGN(name)		\
+	SYM_PUSH_SECTION(name) ASM_NL			\
+	SYM_START(name, SYM_L_LOCAL, SYM_A_NONE)	\
+	ENDBR
+
+/*
+ * SYM_FUNC_START_LOCAL_NOALIGN_SECT -- use for local functions, w/o alignment,
+ * will be conditionally placed into a section specified in the second argument
+ */
+#define SYM_FUNC_START_LOCAL_NOALIGN_SECT(name, sect)	\
+	SYM_PUSH_SECTION(sect) ASM_NL			\
 	SYM_START(name, SYM_L_LOCAL, SYM_A_NONE)	\
 	ENDBR
 
 /* SYM_FUNC_START_WEAK -- use for weak functions */
 #define SYM_FUNC_START_WEAK(name)			\
+	SYM_PUSH_SECTION(name) ASM_NL			\
 	SYM_START(name, SYM_L_WEAK, SYM_F_ALIGN)	\
 	ENDBR
 
 /* SYM_FUNC_START_WEAK_NOALIGN -- use for weak functions, w/o alignment */
 #define SYM_FUNC_START_WEAK_NOALIGN(name)		\
+	SYM_PUSH_SECTION(name) ASM_NL			\
 	SYM_START(name, SYM_L_WEAK, SYM_A_NONE)		\
 	ENDBR
 
 #endif /* _ASM_X86_LINKAGE_H */
-

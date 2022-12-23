@@ -52,13 +52,7 @@ SECTIONS {
 	}
 #endif
 
-#ifdef CONFIG_MODULE_FG_KASLR
-	.text : {
-		*(TEXT_MAIN_MODULE)
-	}
-
-	TEXT_FG_KASLR
-#endif
+	MODULE_FG_KASLR_TEXT
 }
 
 /* bring in arch-specific sections */

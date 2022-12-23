@@ -33,11 +33,19 @@
 #define MALLOC_VISIBLE static
 #endif
 
-/* A trivial malloc implementation, adapted from
- *  malloc by Hannu Savolainen 1993 and Matthias Urlichs 1994
- */
-STATIC_RW_DATA unsigned long malloc_ptr;
-STATIC_RW_DATA int malloc_count;
+#ifndef MALLOC_HIST_SIZE
+#define MALLOC_HIST_SIZE	16
+#endif
+#ifndef MALLOC_ALIGN
+#define MALLOC_ALIGN		4
+#endif
+#define MALLOC_MASK		(MALLOC_ALIGN - 1)
+
+#if MALLOC_HIST_SIZE
+STATIC_RW_DATA unsigned int malloc_hist[MALLOC_HIST_SIZE];
+#endif
+STATIC_RW_DATA typeof(free_mem_ptr) malloc_ptr;
+STATIC_RW_DATA unsigned int malloc_count;
 
 MALLOC_VISIBLE void *malloc(int size)
 {
@@ -45,26 +53,42 @@ MALLOC_VISIBLE void *malloc(int size)
 
 	if (size < 0)
 		return NULL;
-	if (!malloc_ptr)
-		malloc_ptr = free_mem_ptr;
 
-	malloc_ptr = (malloc_ptr + 3) & ~3;     /* Align */
+#if MALLOC_HIST_SIZE
+	if (malloc_count == MALLOC_HIST_SIZE)
+		return NULL;
+#endif
+
+	if (!malloc_ptr || !malloc_count)
+		malloc_ptr =
+			(typeof(malloc_ptr))
+			(((unsigned long)free_mem_ptr + MALLOC_MASK) &
+			 ~MALLOC_MASK);
+
+	size = (size + MALLOC_MASK) & ~MALLOC_MASK;
+
+	if (free_mem_end_ptr && malloc_ptr + size >= free_mem_end_ptr)
+		return NULL;
 
 	p = (void *)malloc_ptr;
 	malloc_ptr += size;
 
-	if (free_mem_end_ptr && malloc_ptr >= free_mem_end_ptr)
-		return NULL;
-
+#if MALLOC_HIST_SIZE
+	malloc_hist[malloc_count] = size;
+#endif
 	malloc_count++;
+
 	return p;
 }
 
 MALLOC_VISIBLE void free(void *where)
 {
+#if MALLOC_HIST_SIZE
+	if (malloc_count &&
+	    (void *)malloc_ptr - malloc_hist[malloc_count - 1] == where)
+		malloc_ptr = (typeof(malloc_ptr))where;
+#endif
 	malloc_count--;
-	if (!malloc_count)
-		malloc_ptr = free_mem_ptr;
 }
 
 #define large_malloc(a) malloc(a)

@@ -30,10 +30,16 @@ enum symtype {
 	S_NSYMTYPES
 };
 
-void process_32(FILE *fp, int use_real_mode, int as_text,
-		int show_absolute_syms, int show_absolute_relocs,
-		int show_reloc_info, int fgkaslr);
-void process_64(FILE *fp, int use_real_mode, int as_text,
-		int show_absolute_syms, int show_absolute_relocs,
-		int show_reloc_info, int fgkaslr);
+struct process_params {
+	FILE		*fp;
+	unsigned int	use_real_mode:1;
+	unsigned int	as_text:1;
+	unsigned int	show_absolute_syms:1;
+	unsigned int	show_absolute_relocs:1;
+	unsigned int	show_reloc_info:1;
+	unsigned int	text_pcrel:1;
+};
+
+void process_32(const struct process_params *params);
+void process_64(const struct process_params *params);
 #endif /* RELOCS_H */

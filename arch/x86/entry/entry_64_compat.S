@@ -273,8 +273,8 @@ SYM_INNER_LABEL(entry_SYSRETL_compat_unsafe_stack, SYM_L_GLOBAL)
 	swapgs
 	sysretl
 SYM_INNER_LABEL(entry_SYSRETL_compat_end, SYM_L_GLOBAL)
-	ANNOTATE_NOENDBR
-	int3
+//	ANNOTATE_NOENDBR
+//	int3
 SYM_CODE_END(entry_SYSCALL_compat)
 
 /*

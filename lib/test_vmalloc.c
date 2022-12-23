@@ -385,19 +385,6 @@ static struct test_driver {
 	unsigned long stop;
 } *tdriver;
 
-static void shuffle_array(int *arr, int n)
-{
-	int i, j;
-
-	for (i = n - 1; i > 0; i--)  {
-		/* Cut the range. */
-		j = prandom_u32_max(i);
-
-		/* Swap indexes. */
-		swap(arr[i], arr[j]);
-	}
-}
-
 static int test_func(void *private)
 {
 	struct test_driver *t = private;

@@ -12,50 +12,41 @@ void die(char *fmt, ...)
 
 static void usage(void)
 {
-	die("relocs [--abs-syms|--abs-relocs|--reloc-info|--text|--realmode|--fg-kaslr] vmlinux\n");
+	die("relocs [--abs-syms|--abs-relocs|--reloc-info|--text|--realmode|--text-pcrel] vmlinux\n");
 }
 
 int main(int argc, char **argv)
 {
-	int show_absolute_syms, show_absolute_relocs, show_reloc_info;
-	int as_text, use_real_mode, fgkaslr_opt;
-	const char *fname;
-	FILE *fp;
-	int i;
+	struct process_params params = { };
 	unsigned char e_ident[EI_NIDENT];
+	const char *fname = NULL;
+	int i;
 
-	show_absolute_syms = 0;
-	show_absolute_relocs = 0;
-	show_reloc_info = 0;
-	as_text = 0;
-	use_real_mode = 0;
-	fgkaslr_opt = 0;
-	fname = NULL;
 	for (i = 1; i < argc; i++) {
 		char *arg = argv[i];
 		if (*arg == '-') {
 			if (strcmp(arg, "--abs-syms") == 0) {
-				show_absolute_syms = 1;
+				params.show_absolute_syms = 1;
 				continue;
 			}
 			if (strcmp(arg, "--abs-relocs") == 0) {
-				show_absolute_relocs = 1;
+				params.show_absolute_relocs = 1;
 				continue;
 			}
 			if (strcmp(arg, "--reloc-info") == 0) {
-				show_reloc_info = 1;
+				params.show_reloc_info = 1;
 				continue;
 			}
 			if (strcmp(arg, "--text") == 0) {
-				as_text = 1;
+				params.as_text = 1;
 				continue;
 			}
 			if (strcmp(arg, "--realmode") == 0) {
-				use_real_mode = 1;
+				params.use_real_mode = 1;
 				continue;
 			}
-			if (strcmp(arg, "--fg-kaslr") == 0) {
-				fgkaslr_opt = 1;
+			if (strcmp(arg, "--text-pcrel") == 0) {
+				params.text_pcrel = 1;
 				continue;
 			}
 		}
@@ -68,22 +59,18 @@ int main(int argc, char **argv)
 	if (!fname) {
 		usage();
 	}
-	fp = fopen(fname, "r");
-	if (!fp) {
+	params.fp = fopen(fname, "r");
+	if (!params.fp) {
 		die("Cannot open %s: %s\n", fname, strerror(errno));
 	}
-	if (fread(&e_ident, 1, EI_NIDENT, fp) != EI_NIDENT) {
+	if (fread(&e_ident, 1, EI_NIDENT, params.fp) != EI_NIDENT) {
 		die("Cannot read %s: %s", fname, strerror(errno));
 	}
-	rewind(fp);
+	rewind(params.fp);
 	if (e_ident[EI_CLASS] == ELFCLASS64)
-		process_64(fp, use_real_mode, as_text,
-			   show_absolute_syms, show_absolute_relocs,
-			   show_reloc_info, fgkaslr_opt);
+		process_64(&params);
 	else
-		process_32(fp, use_real_mode, as_text,
-			   show_absolute_syms, show_absolute_relocs,
-			   show_reloc_info, fgkaslr_opt);
-	fclose(fp);
+		process_32(&params);
+	fclose(params.fp);
 	return 0;
 }

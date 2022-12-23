@@ -800,6 +800,7 @@ extern bool __raw_callee_save___kvm_vcpu_is_preempted(long);
  */
 asm(
 ".pushsection .text;"
+ASM_PUSH_SECTION(__raw_callee_save___kvm_vcpu_is_preempted) ";"
 ".global __raw_callee_save___kvm_vcpu_is_preempted;"
 ".type __raw_callee_save___kvm_vcpu_is_preempted, @function;"
 ASM_FUNC_ALIGN
@@ -810,6 +811,7 @@ ASM_ENDBR
 "setne	%al;"
 ASM_RET
 ".size __raw_callee_save___kvm_vcpu_is_preempted, .-__raw_callee_save___kvm_vcpu_is_preempted;"
+ASM_POP_SECTION() ";"
 ".popsection");
 
 #endif

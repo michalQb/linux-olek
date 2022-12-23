@@ -21,6 +21,7 @@ mandatory-y += dma-mapping.h
 mandatory-y += dma.h
 mandatory-y += emergency-restart.h
 mandatory-y += exec.h
+mandatory-y += extable.h
 mandatory-y += fb.h
 mandatory-y += ftrace.h
 mandatory-y += futex.h

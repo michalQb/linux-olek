@@ -3,6 +3,7 @@
 #define _ASM_X86_EXTABLE_H
 
 #include <asm/extable_fixup_types.h>
+#include <asm/ptrace.h>
 
 /*
  * The exception table consists of two addresses relative to the
@@ -23,7 +24,6 @@
 struct exception_table_entry {
 	int insn, fixup, data;
 };
-struct pt_regs;
 
 #define ARCH_HAS_RELATIVE_EXTABLE
 
@@ -34,6 +34,12 @@ struct pt_regs;
 		(a)->data = (b)->data;				\
 		(b)->data = (tmp).data;				\
 	} while (0)
+
+static inline unsigned long
+ex_fixup_addr(const struct exception_table_entry *x)
+{
+	return (unsigned long)&x->fixup + x->fixup;
+}
 
 extern int fixup_exception(struct pt_regs *regs, int trapnr,
 			   unsigned long error_code, unsigned long fault_addr);

@@ -14,3 +14,5 @@ cmd_create_randstruct_seed = \
 $(obj)/randstruct.seed: $(gen-randstruct-seed) FORCE
 	$(call if_changed,create_randstruct_seed)
 always-$(CONFIG_RANDSTRUCT) += randstruct.seed
+always-$(CONFIG_FG_KASLR_SECT) += randstruct.seed
+always-$(CONFIG_MODULE_FG_KASLR) += randstruct.seed

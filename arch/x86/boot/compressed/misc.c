@@ -26,6 +26,9 @@
  * it is not safe to place pointers in static structures.
  */
 
+static void *free_mem_ptr;
+static void *free_mem_end_ptr;
+
 /* Macros used by the included decompressor code below. */
 #define STATIC		static
 /* Define an externally visible malloc()/free(). */
@@ -50,15 +53,14 @@ struct boot_params *boot_params;
 
 struct port_io_ops pio_ops;
 
-memptr free_mem_ptr;
-memptr free_mem_end_ptr;
-
 static char *vidmem;
 static int vidport;
 
 /* These might be accessed before .bss is cleared, so use .data instead. */
 static int lines __section(".data");
 static int cols __section(".data");
+
+u32 __boot_layout_mode = BOOT_LAYOUT_STATIC;
 
 #ifdef CONFIG_KERNEL_GZIP
 #include "../../../../lib/decompress_inflate.c"
@@ -181,52 +183,57 @@ void __puthex(unsigned long value)
 	}
 }
 
-#ifdef CONFIG_X86_NEED_RELOCS
-static void handle_relocations(void *output, unsigned long output_len,
-			       unsigned long virt_addr)
+void init_malloc(void *start, size_t len)
 {
-	int *reloc;
-	unsigned long delta, map, ptr;
-	unsigned long min_addr = (unsigned long)output;
-	unsigned long max_addr = min_addr + (VO___bss_start - VO__text);
-
-	/*
-	 * Calculate the delta between where vmlinux was linked to load
-	 * and where it was actually loaded.
-	 */
-	delta = min_addr - LOAD_PHYSICAL_ADDR;
-
-	/*
-	 * The kernel contains a table of relocation addresses. Those
-	 * addresses have the final load address of the kernel in virtual
-	 * memory. We are currently working in the self map. So we need to
-	 * create an adjustment for kernel memory addresses to the self map.
-	 * This will involve subtracting out the base address of the kernel.
-	 */
-	map = delta - __START_KERNEL_map;
-
-	/*
-	 * 32-bit always performs relocations. 64-bit relocations are only
-	 * needed if KASLR has chosen a different starting address offset
-	 * from __START_KERNEL_map.
-	 */
-	if (IS_ENABLED(CONFIG_X86_64))
-		delta = virt_addr - LOAD_PHYSICAL_ADDR;
-
-	/*
-	 * it is possible to have delta be zero and still have enabled
-	 * FG-KASLR. We need to perform relocations for it regardless
-	 * of whether the base address has moved.
-	 */
-	if ((cmdline_find_option_bool("nokaslr") ||
-	     !IS_ENABLED(CONFIG_FG_KASLR)) && !delta) {
-		debug_putstr("No relocation needed... ");
+	if (unlikely(!len)) {
+		error_putstr("Invalid allocation source\n");
 		return;
 	}
 
-	pre_relocations_cleanup(map);
+	if (malloc_count) {
+		error_putstr("Overwriting non-empty allocation state\n");
+		memset(malloc_hist, 0, sizeof(malloc_hist));
+		malloc_count = 0;
+	}
 
-	debug_putstr("Performing relocations... ");
+	free_mem_ptr = start;
+	free_mem_end_ptr = free_mem_ptr + len;
+
+	debug_putstr("Heap is initialized with 0x");
+	debug_puthex(free_mem_end_ptr - free_mem_ptr);
+	debug_putstr(" bytes\n");
+}
+
+static void init_boot_layout_mode(void)
+{
+	set_boot_layout_mode(BOOT_LAYOUT_STATIC);
+
+	if (__BOOT_LAYOUT_MAX == BOOT_LAYOUT_STATIC)
+		return;
+
+	if (cmdline_find_option_bool("nokaslr")) {
+		warn("KASLR disabled: 'nokaslr' on cmdline.");
+		return;
+	}
+
+	set_boot_layout_mode(BOOT_LAYOUT_KASLR);
+
+	if (__BOOT_LAYOUT_MAX == BOOT_LAYOUT_KASLR)
+		return;
+
+	if (cmdline_find_option_bool("nofgkaslr"))
+		warn("FG-KASLR disabled: 'nofgkaslr' on cmdline.");
+	else
+		set_boot_layout_mode(BOOT_LAYOUT_FGKASLR);
+}
+
+#ifdef CONFIG_X86_NEED_RELOCS
+#ifndef CONFIG_FG_KASLR
+static void apply_relocs(const struct apply_relocs_params *params)
+{
+	unsigned long ptr;
+	const int *reloc;
+	long extended;
 
 	/*
 	 * Process relocations: 32 bit relocations first then 64 bit after.
@@ -247,183 +254,139 @@ static void handle_relocations(void *output, unsigned long output_len,
 	 *
 	 * So we work backwards from the end of the decompressed image.
 	 */
-	for (reloc = output + output_len - sizeof(*reloc); *reloc; reloc--) {
-		long extended = *reloc;
-		long value;
-
-		/*
-		 * if using fgkaslr, we might have moved the address
-		 * of the relocation. Check it to see if it needs adjusting
-		 * from the original address.
-		 */
-		adjust_address(&extended);
-
-		extended += map;
+	for (reloc = params->reloc; *reloc; reloc--) {
+		extended = *reloc + params->map;
 
 		ptr = (unsigned long)extended;
-		if (ptr < min_addr || ptr > max_addr)
+		if (ptr < params->min_addr || ptr > params->max_addr)
 			error("32-bit relocation outside of kernel!\n");
 
-		value = *(s32 *)ptr;
-
-		/*
-		 * If using FG-KASLR, the value of the relocation
-		 * might need to be changed because it referred
-		 * to an address that has moved.
-		 */
-		adjust_address(&value);
-
-		value += delta;
-		*(u32 *)ptr = value;
+		*(u32 *)ptr += params->delta;
 	}
 #ifdef CONFIG_X86_64
-	while (*--reloc) {
-		long extended = *reloc;
-		long oldvalue, value;
-		Elf64_Shdr *s;
-
-		/*
-		 * if using FG-KASLR, we might have moved the address of
-		 * the relocation. Check it to see if it needs adjusting
-		 * from the original address.
-		 */
-		s = adjust_address(&extended);
-
-		extended += map;
+	for (reloc--; *reloc; reloc--) {
+		extended = *reloc + params->map;
 
 		ptr = (unsigned long)extended;
-		if (ptr < min_addr || ptr > max_addr)
+		if (ptr < params->min_addr || ptr > params->max_addr)
 			error("inverse 32-bit relocation outside of kernel!\n");
 
-		value = *(s32 *)ptr;
-		oldvalue = value;
-
-		/*
-		 * If using fgkaslr, these relocs will contain
-		 * relative offsets which might need to be
-		 * changed because it referred
-		 * to an address that has moved.
-		 */
-		adjust_relative_offset(*reloc, &value, s);
-
-		/*
-		 * only percpu symbols need to have their values adjusted for
-		 * base address KASLR since relative offsets within the .text
-		 * and .text.* sections are ok wrt each other.
-		 */
-		if (is_percpu_addr(*reloc, oldvalue))
-			value -= delta;
-
-		*(s32 *)ptr = value;
+		*(s32 *)ptr -= params->delta;
 	}
 	for (reloc--; *reloc; reloc--) {
-		long extended = *reloc;
-		long value;
-
-		/*
-		 * if using FG-KASLR, we might have moved the address of the
-		 * relocation. Check it to see if it needs adjusting from the
-		 * original address.
-		 */
-		adjust_address(&extended);
-
-		extended += map;
+		extended = *reloc + params->map;
 
 		ptr = (unsigned long)extended;
-		if (ptr < min_addr || ptr > max_addr)
+		if (ptr < params->min_addr || ptr > params->max_addr)
 			error("64-bit relocation outside of kernel!\n");
 
-		value = *(s64 *)ptr;
-
-		/*
-		 * If using fgkaslr, the value of the relocation
-		 * might need to be changed because it referred
-		 * to an address that has moved.
-		 */
-		adjust_address(&value);
-
-		value += delta;
-		*(u64 *)ptr = value;
+		*(u64 *)ptr += params->delta;
 	}
-	post_relocations_cleanup(map);
-#endif
+#endif /* CONFIG_X86_64 */
 }
-#else
-static inline void handle_relocations(void *output, unsigned long output_len,
-				      unsigned long virt_addr)
-{ }
-#endif
+#endif /* !CONFIG_FG_KASLR */
 
-static void layout_image(void *output, Elf_Ehdr *ehdr, Elf_Phdr *phdrs)
+static void handle_relocations(void *output, unsigned long output_len,
+			       unsigned long virt_addr)
 {
-	u32 i;
+	struct apply_relocs_params params;
 
-	for (i = 0; i < ehdr->e_phnum; i++) {
-		const Elf_Phdr *phdr = &phdrs[i];
-		void *dest;
+	params.min_addr = (unsigned long)output;
+	params.max_addr = params.min_addr + (VO___bss_start - VO__text);
 
-		switch (phdr->p_type) {
-		case PT_LOAD:
-#ifdef CONFIG_X86_64
-			if ((phdr->p_align % 0x200000) != 0)
-				error("Alignment of LOAD segment isn't multiple of 2MB");
-#endif
-#ifdef CONFIG_RELOCATABLE
-			dest = output;
-			dest += (phdr->p_paddr - LOAD_PHYSICAL_ADDR);
-#else
-			dest = (void *)(phdr->p_paddr);
-#endif
-			memmove(dest, output + phdr->p_offset, phdr->p_filesz);
-			break;
-		default: /* Ignore other PT_* */
-			break;
-		}
-	}
-}
+	/*
+	 * Calculate the delta between where vmlinux was linked to load
+	 * and where it was actually loaded.
+	 */
+	params.delta = params.min_addr - LOAD_PHYSICAL_ADDR;
 
-static void parse_elf(void *output)
-{
-#ifdef CONFIG_X86_64
-	Elf64_Ehdr ehdr;
-	Elf64_Phdr *phdrs, *phdr;
-#else
-	Elf32_Ehdr ehdr;
-	Elf32_Phdr *phdrs, *phdr;
-#endif
-	int nokaslr;
-	void *dest;
-	int i;
+	/*
+	 * The kernel contains a table of relocation addresses. Those
+	 * addresses have the final load address of the kernel in virtual
+	 * memory. We are currently working in the self map. So we need to
+	 * create an adjustment for kernel memory addresses to the self map.
+	 * This will involve subtracting out the base address of the kernel.
+	 */
+	params.map = params.delta - __START_KERNEL_map;
 
-	memcpy(&ehdr, output, sizeof(ehdr));
-	if (ehdr.e_ident[EI_MAG0] != ELFMAG0 ||
-	   ehdr.e_ident[EI_MAG1] != ELFMAG1 ||
-	   ehdr.e_ident[EI_MAG2] != ELFMAG2 ||
-	   ehdr.e_ident[EI_MAG3] != ELFMAG3) {
-		error("Kernel is not a valid ELF file");
+	/*
+	 * 32-bit always performs relocations. 64-bit relocations are only
+	 * needed if KASLR has chosen a different starting address offset
+	 * from __START_KERNEL_map.
+	 */
+	if (IS_ENABLED(CONFIG_X86_64))
+		params.delta = virt_addr - LOAD_PHYSICAL_ADDR;
+
+	/*
+	 * It is possible to have delta be zero and still have enabled
+	 * FG-KASLR. We need to perform relocations for it regardless
+	 * of whether the base address has moved.
+	 */
+	if (get_boot_layout_mode() < BOOT_LAYOUT_FGKASLR && !params.delta) {
+		debug_putstr("No relocation needed... ");
 		return;
 	}
 
-	if (IS_ENABLED(CONFIG_FG_KASLR)) {
-		nokaslr = cmdline_find_option_bool("nokaslr");
-		if (nokaslr)
-			warn("FG_KASLR disabled: 'nokaslr' on cmdline.");
+	debug_putstr("Performing relocations... ");
+
+	params.reloc = output + output_len - sizeof(*params.reloc);
+	apply_relocs(&params);
+}
+#else /* !CONFIG_X86_NEED_RELOCS */
+static inline void handle_relocations(void *output, unsigned long output_len,
+				      unsigned long virt_addr)
+{
+}
+#endif /* !CONFIG_X86_NEED_RELOCS */
+
+#ifndef CONFIG_FG_KASLR
+static void layout_image(void *output, Elf_Ehdr *ehdr, Elf_Phdr *phdrs)
+{
+	for (u32 i = 0; i < ehdr->e_phnum; i++) {
+		const Elf_Phdr *phdr = &phdrs[i];
+		void *dest;
+
+		if (phdr->p_type != PT_LOAD)
+			/* Ignore other PT_* */
+			continue;
+
+		if (IS_ENABLED(CONFIG_X86_64) &&
+		    !IS_ALIGNED(phdr->p_align, MIN_KERNEL_ALIGN))
+			error("Alignment of LOAD segment isn't multiple of 2MB");
+
+#ifdef CONFIG_RELOCATABLE
+		dest = output + phdr->p_paddr - LOAD_PHYSICAL_ADDR;
+#else
+		dest = (void *)phdr->p_paddr;
+#endif
+		memmove(dest, output + phdr->p_offset, phdr->p_filesz);
 	}
+}
+#endif /* !CONFIG_FG_KASLR */
+
+static Elf_Off parse_elf(void *output)
+{
+	Elf_Phdr *phdrs;
+	Elf_Ehdr ehdr;
+	size_t phsize;
+
+	memcpy(&ehdr, output, sizeof(ehdr));
+	if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG))
+		error("Kernel is not a valid ELF file");
 
 	debug_putstr("Parsing ELF... ");
 
-	phdrs = malloc(sizeof(*phdrs) * ehdr.e_phnum);
+	phsize = array_size(ehdr.e_phnum, sizeof(*phdrs));
+
+	phdrs = malloc(phsize);
 	if (!phdrs)
 		error("Failed to allocate space for phdrs");
 
-	memcpy(phdrs, output + ehdr.e_phoff, sizeof(*phdrs) * ehdr.e_phnum);
-
-	if (IS_ENABLED(CONFIG_FG_KASLR) && !nokaslr)
-		layout_randomized_image(output, &ehdr, phdrs);
-	else
-		layout_image(output, &ehdr, phdrs);
-
+	memcpy(phdrs, output + ehdr.e_phoff, phsize);
+	layout_image(output, &ehdr, phdrs);
 	free(phdrs);
+
+	return ehdr.e_entry - LOAD_PHYSICAL_ADDR;
 }
 
 /*
@@ -452,6 +415,7 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 	const unsigned long kernel_total_size = VO__end - VO__text;
 	unsigned long virt_addr = LOAD_PHYSICAL_ADDR;
 	unsigned long needed_size;
+	Elf_Off entry_offset;
 
 	/* Retain x86 boot parameters pointer passed from startup_32/64. */
 	boot_params = rmode;
@@ -493,8 +457,7 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 
 	debug_putstr("early console in extract_kernel\n");
 
-	free_mem_ptr     = heap;	/* Heap */
-	free_mem_end_ptr = heap + BOOT_HEAP_SIZE;
+	init_malloc((void *)heap, BOOT_HEAP_SIZE);
 
 	/*
 	 * The memory hole needed for the kernel is the larger of either
@@ -525,6 +488,7 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 	debug_putaddr(trampoline_32bit);
 #endif
 
+	init_boot_layout_mode();
 	choose_random_location((unsigned long)input_data, input_len,
 				(unsigned long *)&output,
 				needed_size,
@@ -552,14 +516,17 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 	debug_putstr("\nDecompressing Linux... ");
 	__decompress(input_data, input_len, NULL, NULL, output, output_len,
 			NULL, error);
-	parse_elf(output);
+	entry_offset = parse_elf(output);
 	handle_relocations(output, output_len, virt_addr);
-	debug_putstr("done.\nBooting the kernel.\n");
+
+	debug_putstr("done.\nBooting the kernel (entry_offset: 0x");
+	debug_puthex(entry_offset);
+	debug_putstr(").\n");
 
 	/* Disable exception handling before booting the kernel */
 	cleanup_exception_handling();
 
-	return output;
+	return output + entry_offset;
 }
 
 void fortify_panic(const char *name)

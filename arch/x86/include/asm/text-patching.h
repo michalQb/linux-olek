@@ -2,8 +2,8 @@
 #ifndef _ASM_X86_TEXT_PATCHING_H
 #define _ASM_X86_TEXT_PATCHING_H
 
-#include <linux/types.h>
-#include <linux/stddef.h>
+#include <linux/bug.h>
+#include <linux/cache.h>
 #include <asm/ptrace.h>
 
 struct paravirt_patch_site;

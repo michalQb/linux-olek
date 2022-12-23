@@ -21,6 +21,7 @@ __visible void arch_rethook_trampoline_callback(struct pt_regs *regs);
  */
 asm(
 	".text\n"
+	ASM_PUSH_SECTION(arch_rethook_trampoline) "\n"
 	".global arch_rethook_trampoline\n"
 	".type arch_rethook_trampoline, @function\n"
 	"arch_rethook_trampoline:\n"
@@ -58,6 +59,7 @@ asm(
 #endif
 	ASM_RET
 	".size arch_rethook_trampoline, .-arch_rethook_trampoline\n"
+	ASM_POP_SECTION() "\n"
 );
 NOKPROBE_SYMBOL(arch_rethook_trampoline);
 

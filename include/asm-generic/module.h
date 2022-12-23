@@ -19,6 +19,7 @@ struct mod_arch_specific
 #define Elf_Dyn		Elf64_Dyn
 #define Elf_Ehdr	Elf64_Ehdr
 #define Elf_Addr	Elf64_Addr
+#define Elf_Off		Elf64_Off
 #ifdef CONFIG_MODULES_USE_ELF_REL
 #define Elf_Rel		Elf64_Rel
 #endif
@@ -36,6 +37,7 @@ struct mod_arch_specific
 #define Elf_Dyn		Elf32_Dyn
 #define Elf_Ehdr	Elf32_Ehdr
 #define Elf_Addr	Elf32_Addr
+#define Elf_Off		Elf32_Off
 #ifdef CONFIG_MODULES_USE_ELF_REL
 #define Elf_Rel		Elf32_Rel
 #endif

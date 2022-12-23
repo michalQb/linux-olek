@@ -2,11 +2,19 @@
 #ifndef _LINUX_EXTABLE_H
 #define _LINUX_EXTABLE_H
 
-#include <linux/stddef.h>	/* for NULL */
-#include <linux/types.h>
+#include <asm/extable.h>
 
 struct module;
 struct exception_table_entry;
+
+#ifndef ARCH_HAS_RELATIVE_EXTABLE
+#define ex_to_insn(x)	((x)->insn)
+#else
+static inline unsigned long ex_to_insn(const struct exception_table_entry *x)
+{
+	return (unsigned long)&x->insn + x->insn;
+}
+#endif
 
 const struct exception_table_entry *
 search_extable(const struct exception_table_entry *base,

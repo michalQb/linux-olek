@@ -323,7 +323,6 @@ static int fastop(struct x86_emulate_ctxt *ctxt, fastop_t fop);
 #define FASTOP_SIZE	16
 
 #define __FOP_FUNC(name) \
-	__ASM_PUSH_SECTION(name) "\n\t" \
 	".align " __stringify(FASTOP_SIZE) " \n\t" \
 	".type " name ", @function \n\t" \
 	name ":\n\t" \
@@ -335,8 +334,7 @@ static int fastop(struct x86_emulate_ctxt *ctxt, fastop_t fop);
 
 #define __FOP_RET(name) \
 	"11: " ASM_RET \
-	".size " name ", .-" name "\n\t" \
-	ASM_POP_SECTION() "\n\t"
+	".size " name ", .-" name "\n\t"
 
 #define FOP_RET(name) \
 	__FOP_RET(#name)

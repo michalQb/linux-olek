@@ -1,752 +1,828 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * This contains the routines needed to reorder the kernel text section
- * at boot time.
+ * Routines needed to reorder kernel text at early boot time.
  *
  * Copyright (C) 2020-2022, Intel Corporation.
- * Author: Kristen Carlson Accardi <kristen@linux.intel.com>
  */
 
-#include "misc.h"
-#include "error.h"
-#include "pgtable.h"
-#include "../string.h"
-#include "../voffset.h"
-#include <linux/sort.h>
-#include <linux/random.h>
+#include <asm/text-patching.h>
 #include <linux/bsearch.h>
+#include <linux/extable.h>
+#include <linux/sizes.h>
+#include <linux/sort.h>
+#include <linux/string.h>
+#include "misc.h"
+#include <linux/random.h>
+
+#include "error.h"
+#include "../voffset.h"
 #include "../../include/asm/extable.h"
 #include "../../include/asm/orc_types.h"
 
+#ifndef ARCH_SHF_SMALL
+#define ARCH_SHF_SMALL	0
+#endif
+
+#define sym_addr(sym)	VO_##sym
+
 /*
- * Use normal definitions of mem*() from string.c. There are already
- * included header files which expect a definition of memset() and by
- * the time we define memset macro, it is too late.
+ * "Special" text (noinstr, entry, sched, thunks etc.) can currently be
+ * treated only as a single element per its start/stop symbols when
+ * randomizing. Must be kept in sync with `kernel/vmlinux.lds.S` and
+ * fully cover the [noinstr, FG_KASLR_TEXT) range.
  */
-#undef memcpy
-#undef memset
-#define memmove		memmove
+static const struct special_entry {
+	Elf_Addr	start;
+	Elf_Addr	stop;
+	size_t		align;
+} specials[] = {
+#define SPECIAL(s, e, ...) {			\
+	.start		= sym_addr(s),		\
+	.stop		= sym_addr(e),		\
+	.align		= (__VA_ARGS__ + 0),	\
+}
+	/* Doesn't get randomized, used to differentiate _[s]text */
+	SPECIAL(_text, _text + CONFIG_FUNCTION_ALIGNMENT - 1),
 
-void *memmove(void *dest, const void *src, size_t n);
+	SPECIAL(__noinstr_text_start, __noinstr_text_end),
+	SPECIAL(__ref_text_start, __ref_text_end),
+	SPECIAL(__sched_text_start, __sched_text_end),
+	SPECIAL(__cpuidle_text_start, __cpuidle_text_end),
+	SPECIAL(__lock_text_start, __lock_text_end),
+	SPECIAL(__kprobes_text_start, __kprobes_text_end),
+	SPECIAL(__softirqentry_text_start, __softirqentry_text_end),
+	SPECIAL(__indirect_thunk_start, __indirect_thunk_end),
+	SPECIAL(__static_call_text_start, __static_call_text_end),
+	SPECIAL(__entry_text_start, __entry_text_end,
+		PMD_SIZE * IS_ENABLED(CONFIG_X86_64)),
 
-static int nofgkaslr;
-
-static unsigned long percpu_start;
-static unsigned long percpu_end;
-
-#define GEN(s)		static long addr_##s;
-#include "gen-symbols.h"
-#undef GEN
-
-/* addresses in mapped address space */
-static int *kallsyms_base;
-static u8 *names;
-static unsigned long relative_base;
-static unsigned int *markers_addr;
-
-struct kallsyms_name {
-	u8 len;
-	u8 indices[256];
+	/* Doesn't get randomized, used to adjust _etext address */
+	SPECIAL(_etext, _etext + CONFIG_FUNCTION_ALIGNMENT - 1),
+#undef SPECIAL
 };
 
-static struct kallsyms_name *names_table;
+static bool enabled;
 
-/* Array of pointers to sections headers for randomized sections */
-static Elf_Shdr **sections;
+/* Array of randomizable entries, incl. "specials" */
+static struct rand_entry {
+	u32		rel;	/* abs_addr - sym_addr(_text) */
+	u32		size;
+	union {
+		u32	align;
+		s32	offset;	/* Offset diff between vmlinux & randomized */
+	};
+} *randents;
+/* Total number of entries to randomize */
+static u32 randents_num;
 
-/* Number of elements in the randomized section header array (sections) */
-static int sections_size;
+/* Those match kernel symbols with the same name */
+static int *kallsyms_offsets;
+static unsigned long kallsyms_relative_base;
+/* Offsets of each symbol name in @kallsyms_names */
+static u32 *kallsyms_names_offs;
 
-/* Array of all section headers, randomized or otherwise */
-static Elf_Shdr *sechdrs;
+/* Used in cmp_section_addr() to distinguish ORC addresses */
+static bool cur_sect_addr_orc;
 
-static bool is_orc_unwind(long addr)
+/* Fortified, handles array_size() return value, prints fancy messages */
+static void __alloc_size(1) *malloc_verbose(size_t len, const char *reason)
 {
-	if (addr >= addr___start_orc_unwind_ip &&
-	    addr < addr___stop_orc_unwind_ip)
-		return true;
-	return false;
+	void *addr;
+
+	if (unlikely(!len))
+		return NULL;
+
+	if (unlikely(len == SIZE_MAX)) {
+		error_putstr("Array size overflow");
+		goto put_reason;
+	}
+
+	addr = malloc(len);
+	if (!addr)
+		goto print_err;
+
+	debug_putstr("Allocated 0x");
+	debug_puthex(len);
+	debug_putstr(" bytes");
+
+	if (reason) {
+		debug_putstr(" for ");
+		debug_putstr(reason);
+	}
+
+	debug_putstr("\n");
+
+	return addr;
+
+print_err:
+	error_putstr("Failed to allocate 0x");
+	error_puthex(len);
+	error_putstr(" bytes");
+
+put_reason:
+	if (reason) {
+		error_putstr(" for ");
+		error_putstr(reason);
+	}
+
+	error_putstr("\n");
+
+	return NULL;
+}
+
+static __always_inline void __alloc_size(1, 2) *
+malloc_array(size_t n, size_t entsz, const char *reason)
+{
+	return malloc_verbose(array_size(n, entsz), reason);
+}
+
+/* "Gracefully" downgrade FG-KASLR to KASLR if something goes wrong */
+static void downgrade_boot_layout_mode(void)
+{
+	warn("FG-KASLR disabled: no enough heap space");
+
+	set_boot_layout_mode(BOOT_LAYOUT_FGKASLR - 1);
+	enabled = false;
 }
 
 static bool is_text(long addr)
 {
-	if ((addr >= addr__stext && addr < addr__etext) ||
-	    (addr >= addr__sinittext && addr < addr__einittext) ||
-	    (addr >= addr___altinstr_replacement &&
-	     addr < addr___altinstr_replacement_end))
-		return true;
-	return false;
+	return (addr >= sym_addr(_text) && addr < sym_addr(_etext)) ||
+	       (addr >= sym_addr(_sinittext) && addr < sym_addr(_einittext)) ||
+	       (addr >= sym_addr(__altinstr_replacement) &&
+		addr < sym_addr(__altinstr_replacement_end));
 }
 
-bool is_percpu_addr(long pc, long offset)
+static bool is_orc_unwind(long addr)
 {
-	unsigned long ptr;
-	long address;
-
-	address = pc + offset + 4;
-
-	ptr = (unsigned long)address;
-
-	if (ptr >= percpu_start && ptr < percpu_end)
-		return true;
-
-	return false;
+	return addr >= sym_addr(__start_orc_unwind_ip) &&
+	       addr < sym_addr(__stop_orc_unwind_ip);
 }
 
-static bool cur_addr_orc;
-
-static int cmp_section_addr(const void *a, const void *b)
+static bool is_percpu(long pc, long offset)
 {
-	const Elf_Shdr *s = *(const Elf_Shdr **)b;
-	unsigned long end = s->sh_addr + s->sh_size;
-	unsigned long ptr = (unsigned long)a;
+	long addr = pc + offset + 4;
 
-	if (cur_addr_orc)
-		/* orc relocations can be one past the end of the section */
-		end++;
+	return addr >= sym_addr(__per_cpu_start) &&
+	       addr < sym_addr(__per_cpu_end);
+}
 
-	if (ptr >= s->sh_addr && ptr < end)
-		return 0;
-
-	if (ptr < s->sh_addr)
-		return -1;
-
-	return 1;
+static Elf_Addr entry_site_addr(const struct rand_entry *entry)
+{
+	return sym_addr(_text) + entry->rel;
 }
 
 /*
- * Discover if the address is in a randomized section and if so,
- * adjust by the saved offset.
+ * Here @a is the address of the symbol which is being searched and @b is
+ * the pointer to either current entry site or index of the current section.
  */
-Elf_Shdr *adjust_address(long *address)
+static int cmp_section_addr(const void *a, const void *b)
 {
-	Elf_Shdr **s, *shdr;
+	const struct rand_entry *entry = b;
+	Elf_Addr start = entry_site_addr(entry);
+	Elf_Addr end = start + entry->size;
+	long address = (long)a;
 
-	if (nofgkaslr)
-		return NULL;
+	/* ORC relocations can be one past the end of the section */
+	if (cur_sect_addr_orc)
+		end++;
 
-	s = bsearch((const void *)*address, sections, sections_size,
-		    sizeof(*s), cmp_section_addr);
-	if (!s)
-		return NULL;
-
-	shdr = *s;
-	*address += shdr->sh_offset;
-
-	return shdr;
+	return address < start ? -1 : address < end ? 0 : 1;
 }
 
-void adjust_relative_offset(long pc, long *value, Elf_Shdr *section)
+/*
+ * Discover if the address is in a randomized entry and if so, return
+ * the saved offset.
+ */
+static Elf_Off get_offset(long address)
 {
-	long address;
-	Elf_Shdr *s;
+	const struct rand_entry *res;
 
-	if (nofgkaslr)
-		return;
+	if (!enabled)
+		return 0;
 
-	/*
-	 * sometimes we are updating a relative offset that would
-	 * normally be relative to the next instruction (such as a call).
-	 * In this case to calculate the target, you need to add 32bits to
-	 * the pc to get the next instruction value. However, sometimes
-	 * targets are just data that was stored in a table such as ksymtab
-	 * or cpu alternatives. In this case our target is not relative to
-	 * the next instruction.
-	 */
+	res = bsearch((const void *)address, randents, randents_num,
+		      sizeof(*randents), cmp_section_addr);
 
-	/* Calculate the address that this offset would call. */
-	if (!is_text(pc))
-		address = pc + *value;
-	else
-		address = pc + *value + 4;
+	return res ? res->offset : 0;
+}
+
+static Elf_Off get_relative_offset(long pc, long value, Elf_Off sh_off)
+{
+	if (!enabled)
+		return 0;
 
 	/*
-	 * orc ip addresses are sorted at build time after relocs have
-	 * been applied, making the relocs no longer valid. Skip any
-	 * relocs for the orc_unwind_ip table. These will be updated
-	 * separately.
+	 * ORC IP addresses are sorted at build time after relocs have been
+	 * applied, making the relocs no longer valid. Skip any relocs for
+	 * the orc_unwind_ip table. These will be updated separately.
 	 */
 	if (is_orc_unwind(pc))
-		return;
-
-	s = adjust_address(&address);
+		return 0;
 
 	/*
-	 * if the address is in section that was randomized,
-	 * we need to adjust the offset.
-	 */
-	if (s)
-		*value += s->sh_offset;
-
-	/*
-	 * If the PC that this offset was calculated for was in a section
-	 * that has been randomized, the value needs to be adjusted by the
-	 * same amount as the randomized section was adjusted from it's original
+	 * Calculate the address that this offset would call and adjust if
+	 * it is in a section that was randomized.
+	 * If the target is text, the offset being updated is relative to the
+	 * next instruction and we need to add 32 bits to the PC.
+	 * If the PC that this offset was calculated for was in a section that
+	 * has been randomized, the value needs to be adjusted by the same
+	 * amount as the randomized section was adjusted from it's original
 	 * location.
 	 */
-	if (section)
-		*value -= section->sh_offset;
+	return get_offset(pc + is_text(pc) * 4 + value) - sh_off;
 }
 
-static void kallsyms_swp(void *a, void *b, int size)
+static unsigned long kallsym_addr(int offset)
 {
-	struct kallsyms_name name_a;
-	int idx1, idx2;
+	return offset < 0 ? kallsyms_relative_base - offset - 1 : offset;
+}
 
-	/* Determine our index into the array. */
-	idx1 = (const int *)a - kallsyms_base;
-	idx2 = (const int *)b - kallsyms_base;
-	swap(kallsyms_base[idx1], kallsyms_base[idx2]);
+static u32 kallsym_len(const u8 *pos)
+{
+	u32 len = *pos;
 
-	/* Swap the names table. */
-	memcpy(&name_a, &names_table[idx1], sizeof(name_a));
-	memcpy(&names_table[idx1], &names_table[idx2],
-	       sizeof(struct kallsyms_name));
-	memcpy(&names_table[idx2], &name_a, sizeof(struct kallsyms_name));
+	/* ULEB128 */
+	if (len & BIT(7))
+		return 2 + ((pos[1] << 7) | (len & ~BIT(7)));
+	else
+		return 1 + len;
 }
 
 static int kallsyms_cmp(const void *a, const void *b)
 {
-	unsigned long uaddr_a, uaddr_b;
-	int addr_a, addr_b;
-
-	addr_a = *(const int *)a;
-	addr_b = *(const int *)b;
-
-	if (addr_a >= 0)
-		uaddr_a = addr_a;
-	if (addr_b >= 0)
-		uaddr_b = addr_b;
-
-	if (addr_a < 0)
-		uaddr_a = relative_base - 1 - addr_a;
-	if (addr_b < 0)
-		uaddr_b = relative_base - 1 - addr_b;
-
-	if (uaddr_b > uaddr_a)
-		return -1;
-
-	return 0;
+	return kallsym_addr(*(int *)a) - kallsym_addr(*(int *)b);
 }
 
-static void deal_with_names(int num_syms)
+static void kallsyms_swp(void *a, void *b, int size)
 {
-	int num_bytes;
-	int offset;
-	int i, j;
+	u32 i, j;
 
-	/* we should have num_syms kallsyms_name entries */
-	num_bytes = num_syms * sizeof(*names_table);
-	names_table = malloc(num_syms * sizeof(*names_table));
-	if (!names_table) {
-		debug_putstr("\nbytes requested: ");
-		debug_puthex(num_bytes);
-		error("\nunable to allocate space for names table\n");
-	}
+	/* @i and @j are indexes in the arrays */
+	i = (const int *)a - kallsyms_offsets;
+	j = (const int *)b - kallsyms_offsets;
 
-	/* read all the names entries */
-	offset = 0;
-	for (i = 0; i < num_syms; i++) {
-		names_table[i].len = names[offset];
-		offset++;
-		for (j = 0; j < names_table[i].len; j++) {
-			names_table[i].indices[j] = names[offset];
-			offset++;
-		}
+	swap(kallsyms_offsets[i], kallsyms_offsets[j]);
+	swap(kallsyms_names_offs[i], kallsyms_names_offs[j]);
+}
+
+static void kallsyms_update_save_names_offs(const u8 *names, u32 num_syms)
+{
+	kallsyms_names_offs = malloc_array(num_syms,
+					   sizeof(*kallsyms_names_offs),
+					   "kallsyms offset table");
+	if (!kallsyms_names_offs)
+		error("Out of memory");
+
+	for (u32 name_off = 0, i = 0; i < num_syms; i++) {
+		int *offset = &kallsyms_offsets[i];
+		Elf_Off sh_off;
+
+		sh_off = get_offset(kallsym_addr(*offset));
+		*offset += *offset < 0 ? -sh_off : sh_off;
+
+		kallsyms_names_offs[i] = name_off;
+		name_off += kallsym_len(&names[name_off]);
 	}
 }
 
-static void write_sorted_names(int num_syms)
+static void kallsyms_rewrite_names(u8 *names, u32 *markers, u32 num_syms)
 {
-	unsigned int *markers;
-	int offset = 0;
-	int i, j;
+	size_t names_len;
+	u32 offset = 0;
+	u8 *new_names;
 
-	/*
-	 * we are going to need to regenerate the markers table, which is a
-	 * table of offsets into the compressed stream every 256 symbols.
-	 * this code copied almost directly from scripts/kallsyms.c
-	 */
-	markers = malloc(sizeof(unsigned int) * ((num_syms + 255) / 256));
-	if (!markers) {
-		debug_putstr("\nfailed to allocate heap space of ");
-		debug_puthex(((num_syms + 255) / 256));
-		debug_putstr(" bytes\n");
-		error("Unable to allocate space for markers table");
+	names_len = sym_addr(kallsyms_markers) - sym_addr(kallsyms_names);
+
+	new_names = malloc_verbose(names_len, "kallsyms string table");
+	if (!new_names)
+		error("Out of memory");
+
+	for (u32 mi = 0, i = 0; i < num_syms; i++) {
+		const u8 *old_sym = names + kallsyms_names_offs[i];
+		u32 sym_len = kallsym_len(old_sym);
+
+		if (!(i % 256))
+			markers[mi++] = offset;
+
+		memcpy(new_names + offset, old_sym, sym_len);
+		offset += sym_len;
 	}
 
-	for (i = 0; i < num_syms; i++) {
-		if ((i & 0xFF) == 0)
-			markers[i >> 8] = offset;
+	memcpy(names, new_names, offset);
 
-		names[offset] = (u8)names_table[i].len;
-		offset++;
-		for (j = 0; j < names_table[i].len; j++) {
-			names[offset] = names_table[i].indices[j];
-			offset++;
-		}
-	}
-
-	/* write new markers table over old one */
-	for (i = 0; i < ((num_syms + 255) >> 8); i++)
-		markers_addr[i] = markers[i];
-
-	free(markers);
-	free(names_table);
+	free(new_names);
+	free(kallsyms_names_offs);
 }
 
-static void sort_kallsyms(unsigned long map)
+static void update_kallsyms(unsigned long map)
 {
-	int num_syms;
-	int i;
+	unsigned long rel;
+	u32 *markers;
+	u32 num_syms;
+	u8 *names;
 
-	debug_putstr("\nRe-sorting kallsyms...\n");
+	kallsyms_offsets = (int *)(sym_addr(kallsyms_offsets) + map);
+	rel = *(const unsigned long *)(sym_addr(kallsyms_relative_base) + map);
+	kallsyms_relative_base = rel;
+	num_syms = *(const u32 *)(sym_addr(kallsyms_num_syms) + map);
+	names = (u8 *)(sym_addr(kallsyms_names) + map);
+	markers = (u32 *)(sym_addr(kallsyms_markers) + map);
 
-	num_syms = *(int *)(addr_kallsyms_num_syms + map);
-	kallsyms_base = (int *)(addr_kallsyms_offsets + map);
-	relative_base = *(unsigned long *)(addr_kallsyms_relative_base + map);
-	markers_addr = (unsigned int *)(addr_kallsyms_markers + map);
-	names = (u8 *)(addr_kallsyms_names + map);
+	debug_putstr("\nUpdating kallsyms...\n");
+	kallsyms_update_save_names_offs(names, num_syms);
 
-	/*
-	 * the kallsyms table was generated prior to any randomization.
-	 * it is a bunch of offsets from "relative base". In order for
-	 * us to check if a symbol has an address that was in a randomized
-	 * section, we need to reconstruct the address to it's original
-	 * value prior to handle_relocations.
-	 */
-	for (i = 0; i < num_syms; i++) {
-		unsigned long addr;
-
-		/*
-		 * according to kernel/kallsyms.c, positive offsets are absolute
-		 * values and negative offsets are relative to the base.
-		 */
-		if (kallsyms_base[i] >= 0)
-			addr = kallsyms_base[i];
-		else
-			addr = relative_base - 1 - kallsyms_base[i];
-
-		if (adjust_address(&addr))
-			/* here we need to recalcuate the offset */
-			kallsyms_base[i] = relative_base - 1 - addr;
-	}
-
-	/*
-	 * here we need to read in all the kallsyms_names info
-	 * so that we can regenerate it.
-	 */
-	deal_with_names(num_syms);
-
-	sort(kallsyms_base, num_syms, sizeof(int), kallsyms_cmp, kallsyms_swp);
-
-	/* write the newly sorted names table over the old one */
-	write_sorted_names(num_syms);
-}
-
-/*
- * We need to include this file here rather than in utils.c because
- * some of the helper functions in extable.c are used to update
- * the extable below and are defined as "static" in extable.c
- */
-#include "../../../../lib/extable.c"
-
-static inline unsigned long
-ex_fixup_addr(const struct exception_table_entry *x)
-{
-	return ((unsigned long)&x->fixup + x->fixup);
+	debug_putstr("Re-sorting kallsyms...\n");
+	sort(kallsyms_offsets, num_syms, sizeof(*kallsyms_offsets),
+	     kallsyms_cmp, kallsyms_swp);
+	kallsyms_rewrite_names(names, markers, num_syms);
 }
 
 static void update_ex_table(unsigned long map)
 {
-	struct exception_table_entry *start_ex_table =
-		(struct exception_table_entry *)(addr___start___ex_table + map);
-	int num_entries =
-		(addr___stop___ex_table - addr___start___ex_table) /
-		sizeof(struct exception_table_entry);
-	int i;
+	struct exception_table_entry *ex_table;
+	u32 nents;
 
-	debug_putstr("\nUpdating exception table...");
-	for (i = 0; i < num_entries; i++) {
-		unsigned long fixup = ex_fixup_addr(&start_ex_table[i]);
-		unsigned long insn = ex_to_insn(&start_ex_table[i]);
-		unsigned long addr;
-		Elf_Shdr *s;
+	ex_table = (typeof(ex_table))(sym_addr(__start___ex_table) + map);
+	nents = sym_addr(__stop___ex_table) - sym_addr(__start___ex_table);
+	nents /= sizeof(*ex_table);
 
-		/* check each address to see if it needs adjusting */
-		addr = insn - map;
-		s = adjust_address(&addr);
-		if (s)
-			start_ex_table[i].insn += s->sh_offset;
+	debug_putstr("Updating exception table...\n");
 
-		addr = fixup - map;
-		s = adjust_address(&addr);
-		if (s)
-			start_ex_table[i].fixup += s->sh_offset;
+	for (u32 i = 0; i < nents; i++) {
+		struct exception_table_entry *x = &ex_table[i];
+
+		x->fixup += get_offset(ex_fixup_addr(x) - map);
+		x->insn += get_offset(ex_to_insn(x) - map);
 	}
-}
 
-static void sort_ex_table(unsigned long map)
-{
-	struct exception_table_entry *start_ex_table =
-		(struct exception_table_entry *)(addr___start___ex_table + map);
-	struct exception_table_entry *stop_ex_table =
-		(struct exception_table_entry *)(addr___stop___ex_table + map);
-
-	debug_putstr("\nRe-sorting exception table...");
-
-	sort_extable(start_ex_table, stop_ex_table);
+	debug_putstr("Re-sorting exception table...\n");
+	sort_extable(ex_table, ex_table + nents);
 }
 
 static void update_orc_table(unsigned long map)
 {
-	int *ip_table = (int *)(addr___start_orc_unwind_ip + map);
-	int num_entries, i;
-
-	num_entries = addr___stop_orc_unwind_ip - addr___start_orc_unwind_ip;
-	num_entries /= sizeof(int);
-
-	debug_putstr("\nUpdating orc tables...\n");
-	cur_addr_orc = true;
-
-	for (i = 0; i < num_entries; i++) {
-		unsigned long ip = orc_ip(ip_table + i);
-		Elf_Shdr *s;
-
-		/* check each address to see if it needs adjusting */
-		ip = ip - map;
-
-		/*
-		 * objtool places terminator entries just outside the end of
-		 * the section. To identify an orc_unwind_ip address that might
-		 * need adjusting, the address should be compared differently
-		 * than a normal address.
-		 */
-		s = adjust_address(&ip);
-		if (s)
-			ip_table[i] += s->sh_offset;
-	}
-
-	cur_addr_orc = false;
-}
-
-static void sort_orc_table(unsigned long map)
-{
 	struct orc_entry *orc_table;
-	int num_entries;
 	int *ip_table;
+	u32 n;
 
-	orc_table = (struct orc_entry *)(addr___start_orc_unwind + map);
-	ip_table = (int *)(addr___start_orc_unwind_ip + map);
+	orc_table = (struct orc_entry *)(sym_addr(__start_orc_unwind) + map);
+	ip_table = (int *)(sym_addr(__start_orc_unwind_ip) + map);
+	n = sym_addr(__stop_orc_unwind_ip) - sym_addr(__start_orc_unwind_ip);
+	n /= sizeof(*ip_table);
 
-	num_entries = addr___stop_orc_unwind_ip - addr___start_orc_unwind_ip;
-	num_entries /= sizeof(int);
+	debug_putstr("Updating ORC tables...\n");
+	cur_sect_addr_orc = true;
 
-	debug_putstr("\nRe-sorting orc tables...\n");
-	orc_sort(ip_table, orc_table, num_entries);
+	for (u32 i = 0; i < n; i++)
+		ip_table[i] += get_offset(orc_ip(&ip_table[i]) - map);
+
+	cur_sect_addr_orc = false;
+
+	debug_putstr("Re-sorting ORC tables... ");
+	orc_sort(ip_table, orc_table, n);
 }
 
-void post_relocations_cleanup(unsigned long map)
+static void __apply_relocs(const struct apply_relocs_params *params)
 {
-	if (!nofgkaslr) {
-		update_ex_table(map);
-		sort_ex_table(map);
-		update_orc_table(map);
-		sort_orc_table(map);
-	}
+	unsigned long addr;
+	const int *reloc;
+	long extended;
 
-	/*
-	 * maybe one day free will do something. So, we "free" this memory
-	 * in either case
-	 */
-	free(sections);
-	free(sechdrs);
-}
+	for (reloc = params->reloc; *reloc; reloc--) {
+		/*
+		 * If using FG-KASLR, the address of the relocation might've
+		 * been moved. Check it to see if it needs adjusting.
+		 */
+		extended = *reloc + get_offset(*reloc) + params->map;
 
-void pre_relocations_cleanup(unsigned long map)
-{
-	if (nofgkaslr)
-		return;
-
-	sort_kallsyms(map);
-}
-
-static void move_text(int num_sections, char *secstrings, Elf_Shdr *text,
-		      void *source, void *dest, Elf64_Phdr *phdr)
-{
-	unsigned long adjusted_addr;
-	int *index_list;
-	int copy_bytes;
-	void *stash;
-	int i, j;
-
-	memmove(dest, source + text->sh_offset, text->sh_size);
-	copy_bytes = text->sh_size;
-	dest += text->sh_size;
-	adjusted_addr = text->sh_addr + text->sh_size;
-
-	/*
-	 * we leave the sections sorted in their original order
-	 * by s->sh_addr, but shuffle the indexes in a random
-	 * order for copying.
-	 */
-	index_list = malloc(sizeof(int) * num_sections);
-	if (!index_list)
-		error("Failed to allocate space for index list");
-
-	for (i = 0; i < num_sections; i++)
-		index_list[i] = i;
-
-#define get_random_long()	kaslr_get_random_long(NULL)
-	shuffle_array(index_list, num_sections);
-#undef get_random_long
-
-	/*
-	 * to avoid overwriting earlier sections before they can get
-	 * copied to dest, stash everything into a buffer first.
-	 * this will cause our source address to be off by
-	 * phdr->p_offset though, so we'll adjust s->sh_offset below.
-	 *
-	 * TBD: ideally we'd simply decompress higher up so that our
-	 * copy wasn't in danger of overwriting anything important.
-	 */
-	stash = malloc(phdr->p_filesz);
-	if (!stash)
-		error("Failed to allocate space for text stash");
-
-	memcpy(stash, source + phdr->p_offset, phdr->p_filesz);
-
-	/* now we'd walk through the sections. */
-	for (j = 0; j < num_sections; j++) {
-		unsigned long aligned_addr;
-		int pad_bytes;
-		Elf_Shdr *s;
-		void *src;
-
-		s = sections[index_list[j]];
-
-		/* align addr for this section */
-		aligned_addr = ALIGN(adjusted_addr, s->sh_addralign);
+		addr = (unsigned long)extended;
+		if (addr < params->min_addr || addr > params->max_addr)
+			error("32-bit relocation outside of kernel!");
 
 		/*
-		 * copy out of stash, so adjust offset
+		 * If using FG-KASLR, the value of the relocation might need to
+		 * be changed because it referred to an address that has moved.
 		 */
-		src = stash + s->sh_offset - phdr->p_offset;
+		*(u32 *)addr += get_offset(*(s32 *)addr) + params->delta;
+	}
+
+#ifdef CONFIG_X86_64
+	for (reloc--; *reloc; reloc--) {
+		Elf_Off off;
+		long pc;
+
+		pc = *reloc;
+		off = get_offset(pc);
+		extended = pc + off + params->map;
+
+		addr = (unsigned long)extended;
+		if (addr < params->min_addr || addr > params->max_addr)
+			error("inverse 32-bit relocation outside of kernel!");
 
 		/*
-		 * Fill any space between sections with int3
+		 * If using FG-KASLR, these relocs will contain relative
+		 * offsets which might need to be changed because it referred
+		 * to an address that has moved.
+		 * Only percpu symbols need to have their values adjusted for
+		 * base address KASLR since relative offsets within the text
+		 * are ok wrt each other.
 		 */
-		pad_bytes = aligned_addr - adjusted_addr;
-		memset(dest, 0xcc, pad_bytes);
-
-		dest = (void *)ALIGN((unsigned long)dest, s->sh_addralign);
-
-		memmove(dest, src, s->sh_size);
-
-		dest += s->sh_size;
-		copy_bytes += s->sh_size + pad_bytes;
-		adjusted_addr = aligned_addr + s->sh_size;
-
-		/* we can blow away sh_offset for our own uses */
-		s->sh_offset = aligned_addr - s->sh_addr;
+		*(s32 *)addr += get_relative_offset(pc, *(s32 *)addr, off) -
+				is_percpu(pc, *(s32 *)addr) * params->delta;
 	}
 
-	free(index_list);
+	for (reloc--; *reloc; reloc--) {
+		extended = *reloc + get_offset(*reloc) + params->map;
 
-	/*
-	 * move remainder of text segment. Ok to just use original source
-	 * here since this area is untouched.
-	 */
-	memmove(dest, source + text->sh_offset + copy_bytes,
-		phdr->p_filesz - copy_bytes);
-	free(stash);
+		addr = (unsigned long)extended;
+		if (addr < params->min_addr || addr > params->max_addr)
+			error("64-bit relocation outside of kernel!");
+
+		*(u64 *)addr += get_offset(*(s64 *)addr) + params->delta;
+	}
+#endif /* CONFIG_X86_64 */
 }
 
-static void parse_symtab(const Elf64_Sym *symtab, const char *strtab,
-			 long num_syms)
+void apply_relocs(const struct apply_relocs_params *params)
 {
-	const Elf64_Sym *sym;
+	if (enabled)
+		update_kallsyms(params->map);
 
-	if (!symtab || !strtab)
+	__apply_relocs(params);
+
+	if (!enabled)
 		return;
 
-	debug_putstr("\nLooking for symbols... ");
+	update_ex_table(params->map);
+	update_orc_table(params->map);
 
-	/*
-	 * walk through the symbol table looking for the symbols
-	 * that we care about.
-	 */
-	for (sym = symtab; --num_syms >= 0; sym++) {
-		if (!sym->st_name)
-			continue;
-
-#define GEN(s) ({						\
-	if (!addr_##s && !strcmp(#s, strtab + sym->st_name)) {	\
-		addr_##s = sym->st_value;			\
-		continue;					\
-	}							\
-});
-#include "gen-symbols.h"
-#undef GEN
-	}
+	free(randents);
 }
 
-void layout_randomized_image(void *output, Elf64_Ehdr *ehdr, Elf64_Phdr *phdrs)
+static void randomize_text(void *dest, const void *source,
+			   const Elf_Phdr *phdr)
 {
-	Elf64_Sym *symtab = NULL;
-	Elf_Shdr *percpu = NULL;
-	Elf_Shdr *text = NULL;
-	unsigned int shstrndx;
-	int num_sections = 0;
-	unsigned long shnum;
-	char *strtab = NULL;
-	long num_syms = 0;
-	const char *sname;
-	char *secstrings;
-	Elf_Shdr shdr;
-	Elf_Shdr *s;
-	void *dest;
-	int i;
+	Elf_Addr cur_addr = sym_addr(_text);
+	size_t text_len, copied = 0;
+	u32 *shuffled;
+	void *text;
 
-	debug_putstr("\nParsing ELF section headers... ");
+	debug_putstr("Shuffling 0x");
+	debug_puthex(randents_num);
+	debug_putstr(" entries...\n");
+
+	text_len = sym_addr(_etext) - sym_addr(_text);
+
+	text = malloc_verbose(text_len, "shuffled kernel text");
+	if (!text)
+		goto out_memmove;
+
+	shuffled = malloc_array(randents_num, sizeof(*shuffled),
+				"shuffled entries index table");
+	if (!shuffled)
+		goto out_free_text;
+
+	for (u32 i = 0; i < randents_num; i++)
+		shuffled[i] = i;
+
+	/* Exclude _[s]text and _etext */
+	shuffle_array(&shuffled[1], randents_num - 2);
+
+	for (u32 i = 0; i < randents_num; i++) {
+		struct rand_entry *entry = &randents[shuffled[i]];
+		Elf_Addr addr = entry_site_addr(entry);
+		u32 len, align = entry->align;
+		const void *src;
+
+		/* Gaps between functions must be padded with int3 */
+		len = ALIGN(cur_addr, align) - cur_addr;
+		memset(text + copied, INT3_INSN_OPCODE, len);
+		copied += len;
+		cur_addr += len;
+
+		src = source + addr - sym_addr(_text);
+		/* Will be used later for adjusting relocs */
+		entry->offset = cur_addr - addr;
+
+		len = entry->size;
+		memcpy(text + copied, src, len);
+		copied += len;
+		cur_addr += len;
+
+		/* Tail padding */
+		len = ALIGN(cur_addr, align) - cur_addr;
+		memset(text + copied, INT3_INSN_OPCODE, len);
+		copied += len;
+		cur_addr += len;
+	}
+
+	if (likely(copied <= text_len)) {
+		/*
+		 * Starting from this memcpy(), no "soft" rollback is possible
+		 * as it overwrites the source text.
+		 */
+		memcpy(dest, text, copied);
+		memset(dest + copied, INT3_INSN_OPCODE, text_len - copied);
+		copied = text_len;
+	} else {
+		error_putstr("_etext overrun\n");
+		copied = 0;
+	}
+
+	free(shuffled);
+out_free_text:
+	free(text);
+
+out_memmove:
+	if (!copied) {
+		downgrade_boot_layout_mode();
+		free(randents);
+	}
 
 	/*
-	 * Even though fgkaslr may have been disabled, we still
-	 * need to parse through the section headers to get the
-	 * start and end of the percpu section. This is because
-	 * if we were built with CONFIG_FG_KASLR, there are more
-	 * relative relocations present in vmlinux.relocs than
-	 * just the percpu, and only the percpu relocs need to be
-	 * adjusted when using just normal base address kaslr.
+	 * Move the remainder of the segment. If one of the allocations above
+	 * failed or overrun happened, this will act just like regular KASLR.
 	 */
-	if (cmdline_find_option_bool("nofgkaslr")) {
-		warn("FG_KASLR disabled on cmdline.");
-		nofgkaslr = 1;
+	memmove(dest + copied, source + copied, phdr->p_filesz - copied);
+}
+
+static int randents_cmp(const void *a, const void *b)
+{
+	const struct rand_entry *ea = a;
+	const struct rand_entry *eb = b;
+
+	return entry_site_addr(ea) - entry_site_addr(eb);
+}
+
+static void randents_swp(void *a, void *b, int size)
+{
+	u32 i, j;
+
+	/* @i and @j are indexes in the array */
+	i = (const struct rand_entry *)a - randents;
+	j = (const struct rand_entry *)b - randents;
+
+	swap(randents[i], randents[j]);
+}
+
+static void add_rand_entry(Elf_Addr addr, u32 size, u32 align)
+{
+	struct rand_entry *entry = &randents[randents_num++];
+
+	entry->rel = addr - sym_addr(_text);
+	entry->size = size;
+	entry->align = align ? : CONFIG_FUNCTION_ALIGNMENT;
+}
+
+static bool alloc_randents(u32 num)
+{
+	randents = malloc_array(num + ARRAY_SIZE(specials), sizeof(*randents),
+				"sorted entry sites table");
+	if (!randents)
+		return false;
+
+	for (u32 last = 0, i = 0; i < ARRAY_SIZE(specials); i++) {
+		const struct special_entry *sp = &specials[i];
+		u32 size = sp->stop - sp->start;
+
+		if (!size)
+			continue;
+
+		/*
+		 * When specials[i - 1].stop == specials[i].start, there is no
+		 * way to distinguish symbols `__i_minus_1_end` and
+		 * `__i_start`. The only thing can be done is merging these two
+		 * blocks, so that the mentioned start and stop will have the
+		 * same offset.
+		 */
+		if (randents_num && specials[last].stop == sp->start) {
+			struct rand_entry *entry = &randents[randents_num - 1];
+
+			entry->align = max_t(u32, entry->align, sp->align);
+			entry->size += size;
+		} else {
+			/* `size + 1` to cover *_text_end symbols */
+			add_rand_entry(sp->start, size + 1, sp->align);
+			last = i;
+		}
 	}
 
-	/* read the first section header */
-	shnum = ehdr->e_shnum;
-	shstrndx = ehdr->e_shstrndx;
-	if (shnum == SHN_UNDEF || shstrndx == SHN_XINDEX) {
-		memcpy(&shdr, output + ehdr->e_shoff, sizeof(shdr));
-		if (shnum == SHN_UNDEF)
-			shnum = shdr.sh_size;
-		if (shstrndx == SHN_XINDEX)
-			shstrndx = shdr.sh_link;
+	return true;
+}
+
+#ifdef CONFIG_FG_KASLR_OBJTOOL
+
+/* .entry_sites are located in a separate PHDR (init) */
+static const Elf_Phdr *find_init_phdr(const Elf_Ehdr *ehdr,
+				      const Elf_Phdr *phdrs)
+{
+	for (u32 i = 0; i < ehdr->e_phnum; i++) {
+		const Elf_Phdr *phdr = &phdrs[i];
+
+		if (phdr->p_type == PT_LOAD &&
+		    phdr->p_vaddr <= sym_addr(__start_entry_sites) &&
+		    phdr->p_vaddr + phdr->p_filesz >=
+		    sym_addr(__stop_entry_site_aux))
+			return phdr;
 	}
 
-	/* we are going to need to allocate space for the section headers */
-	sechdrs = malloc(sizeof(*sechdrs) * shnum);
-	if (!sechdrs)
-		error("Failed to allocate space for shdrs");
+	return NULL;
+}
 
-	sections = malloc(sizeof(*sections) * shnum);
-	if (!sections)
-		error("Failed to allocate space for section pointers");
+static void collect_randents_impl(const void *output, const Elf_Ehdr *ehdr,
+				  const Elf_Phdr *phdrs)
+{
+	const s32 *entry_sites;
+	const Elf_Phdr *init;
+	/* .entry_site_aux entries format */
+	const struct {
+		u32	size;
+		u32	align;
+	} *entry_aux;
+	u32 snum;
 
-	memcpy(sechdrs, output + ehdr->e_shoff,
-	       sizeof(*sechdrs) * shnum);
+	init = find_init_phdr(ehdr, phdrs);
+	if (unlikely(!init))
+		return;
 
-	/* we need to allocate space for the section string table */
-	s = &sechdrs[shstrndx];
+	entry_sites = output + init->p_offset +
+		      sym_addr(__start_entry_sites) - init->p_vaddr;
+	entry_aux = output + init->p_offset +
+		    sym_addr(__start_entry_site_aux) - init->p_vaddr;
 
-	secstrings = malloc(s->sh_size);
-	if (!secstrings)
-		error("Failed to allocate space for shstr");
+	snum = sym_addr(__stop_entry_sites) - sym_addr(__start_entry_sites);
+	snum /= sizeof(*entry_sites);
+	BUILD_BUG_ON(!snum);
 
-	memcpy(secstrings, output + s->sh_offset, s->sh_size);
+	if (!alloc_randents(snum))
+		return;
 
-	/*
-	 * now we need to walk through the section headers and collect the
-	 * sizes of the .text sections to be randomized.
-	 */
-	for (i = 0; i < shnum; i++) {
-		s = &sechdrs[i];
-		sname = secstrings + s->sh_name;
+	for (u32 i = 0; i < snum; i++) {
+		u32 size = entry_aux[i].size;
+		bool special = false;
+		Elf_Addr addr;
 
-		if (s->sh_type == SHT_SYMTAB) {
-			/* only one symtab per image */
-			if (symtab)
-				error("Unexpected duplicate symtab");
-
-			symtab = malloc(s->sh_size);
-			if (!symtab)
-				error("Failed to allocate space for symtab");
-
-			memcpy(symtab, output + s->sh_offset, s->sh_size);
-			num_syms = s->sh_size / sizeof(*symtab);
-			continue;
-		}
-
-		if (s->sh_type == SHT_STRTAB && i != ehdr->e_shstrndx) {
-			if (strtab)
-				error("Unexpected duplicate strtab");
-
-			strtab = malloc(s->sh_size);
-			if (!strtab)
-				error("Failed to allocate space for strtab");
-
-			memcpy(strtab, output + s->sh_offset, s->sh_size);
-		}
-
-		if (!strcmp(sname, ".text")) {
-			if (text)
-				error("Unexpected duplicate .text section");
-
-			text = s;
-			continue;
-		}
-
-		if (!strcmp(sname, ".data..percpu")) {
-			/* get start addr for later */
-			percpu = s;
-			continue;
-		}
-
-		if (!(s->sh_flags & SHF_ALLOC) ||
-		    !(s->sh_flags & SHF_EXECINSTR) ||
-		    !(strstarts(sname, ".text")))
+		if (unlikely(!size))
 			continue;
 
-		sections[num_sections] = s;
+		/* abs_addr = entry + *entry */
+		addr = sym_addr(__start_entry_sites) +
+		       i * sizeof(*entry_sites) + entry_sites[i];
 
-		num_sections++;
-	}
-	sections[num_sections] = NULL;
-	sections_size = num_sections;
-
-	parse_symtab(symtab, strtab, num_syms);
-
-	for (i = 0; i < ehdr->e_phnum; i++) {
-		Elf64_Phdr *phdr = &phdrs[i];
-
-		switch (phdr->p_type) {
-		case PT_LOAD:
-			if ((phdr->p_align % 0x200000) != 0)
-				error("Alignment of LOAD segment isn't multiple of 2MB");
-			dest = output;
-			dest += (phdr->p_paddr - LOAD_PHYSICAL_ADDR);
-			if (!nofgkaslr &&
-			    (text && phdr->p_offset == text->sh_offset)) {
-				move_text(num_sections, secstrings, text,
-					  output, dest, phdr);
-			} else {
-				if (percpu &&
-				    phdr->p_offset == percpu->sh_offset) {
-					percpu_start = percpu->sh_addr;
-					percpu_end = percpu_start +
-							phdr->p_filesz;
-				}
-				memmove(dest, output + phdr->p_offset,
-					phdr->p_filesz);
+		for (u32 j = 0; j < ARRAY_SIZE(specials); j++) {
+			if (addr >= specials[j].start &&
+			    addr + size <= specials[j].stop) {
+				special = true;
+				break;
 			}
-			break;
-		default: /* Ignore other PT_* */
-			break;
 		}
+
+		if (!special)
+			add_rand_entry(addr, size, entry_aux[i].align);
+	}
+}
+
+static size_t ext_heap_sz_impl(size_t base)
+{
+	u32 max_nents;
+	size_t add;
+
+	add = sym_addr(__stop_entry_sites) - sym_addr(__start_entry_sites);
+	max_nents = add / sizeof(s32);
+	/* From alloc_randents() */
+	max_nents += ARRAY_SIZE(specials);
+
+	add = max_nents * sizeof(*randents);
+	/* From randomize_text() */
+	add += max_nents * sizeof(u32);
+
+	return base + add;
+}
+
+#else /* !CONFIG_FG_KASLR_OBJTOOL */
+
+static void collect_randents_impl(const void *output, const Elf_Ehdr *ehdr,
+				  const Elf_Phdr *phdrs)
+{
+	const Elf_Shdr *sechdrs = output + ehdr->e_shoff;
+	const Elf_Shdr *shdr = &sechdrs[SHN_UNDEF];
+	const char *secstrings;
+	u32 shnum, si;
+
+	shnum = ehdr->e_shnum != SHN_UNDEF ? ehdr->e_shnum : shdr->sh_size;
+	si = ehdr->e_shstrndx != SHN_XINDEX ? ehdr->e_shstrndx : shdr->sh_link;
+	secstrings = output + sechdrs[si].sh_offset;
+
+	if (!alloc_randents(shnum))
+		return;
+
+	for (u32 i = 0; i < shnum; i++) {
+		shdr = &sechdrs[i];
+
+		if ((shdr->sh_flags & SHF_ALLOC) &&
+		    (shdr->sh_flags & SHF_EXECINSTR) &&
+		    !(shdr->sh_flags & ARCH_SHF_SMALL) &&
+		    strstarts(secstrings + shdr->sh_name, ".text.") &&
+		    likely(shdr->sh_size))
+			add_rand_entry(shdr->sh_addr, shdr->sh_size,
+				       shdr->sh_addralign);
+	}
+}
+
+/* shnum is not known in advance, just add some % on top to be sure */
+#define ext_heap_sz_impl(base)	((base) + ((base) >> 4))
+
+#endif /* !CONFIG_FG_KASLR_OBJTOOL */
+
+static void collect_entries(const void *output, const Elf_Ehdr *ehdr,
+			    const Elf_Phdr *phdrs)
+{
+	debug_putstr("\nLooking for text entries...\n");
+	collect_randents_impl(output, ehdr, phdrs);
+
+	/* _[s]text + _etext + minimum 2 elements to randomize */
+	if (unlikely(randents_num < 4))
+		downgrade_boot_layout_mode();
+	else
+		sort(randents, randents_num, sizeof(*randents), randents_cmp,
+		     randents_swp);
+}
+
+void layout_image(void *output, Elf_Ehdr *ehdr, Elf_Phdr *phdrs)
+{
+	Elf_Addr entry;
+
+	if (enabled)
+		collect_entries(output, ehdr, phdrs);
+
+	for (u32 i = 0; i < ehdr->e_phnum; i++) {
+		const Elf_Phdr *phdr = &phdrs[i];
+		const void *src;
+		void *dest;
+
+		if (phdr->p_type != PT_LOAD)
+			continue;
+
+		if (IS_ENABLED(CONFIG_X86_64) &&
+		    !IS_ALIGNED(phdr->p_align, MIN_KERNEL_ALIGN))
+			error("Alignment of LOAD segment isn't multiple of 2MB");
+
+		dest = output + phdr->p_paddr - LOAD_PHYSICAL_ADDR;
+		src = output + phdr->p_offset;
+
+		if (phdr->p_vaddr == sym_addr(_text) && enabled)
+			randomize_text(dest, src, phdr);
+		else
+			memmove(dest, src, phdr->p_filesz);
 	}
 
-	/* we need to keep the section info to redo relocs */
-	free(secstrings);
-	free(phdrs);
+	/* Adjust the entry point if it's in a randomized section */
+	entry = sym_addr(_text) + ehdr->e_entry - LOAD_PHYSICAL_ADDR;
+	ehdr->e_entry += get_offset(entry);
+
+	debug_putaddr(0xffffffff81ebe000 + get_offset(0xffffffff81ebe000));
+}
+
+/*
+ * FG-KASLR needs additional heap space. The peak usage is _etext - _text +
+ * @randents and @shuffled during randomize_text(). The rest, such as kallsyms
+ * names, happen after the text copy is freed and fit into that slot.
+ * The function adds the total value to the required output size, so that the
+ * KASLR function searching for a free slot in the memory will provide us with
+ * it. Then, if it was found, @free_mem_ptr{,_end} get initialized with it to
+ * make that space available via malloc().
+ */
+void choose_random_location(unsigned long input, unsigned long input_size,
+			    unsigned long *output, unsigned long output_size,
+			    unsigned long *virt_addr)
+{
+	unsigned long orig_output = *output;
+	size_t ext_heap_sz;
+
+	enabled = get_boot_layout_mode() >= BOOT_LAYOUT_FGKASLR;
+	if (!enabled) {
+		__choose_random_location(input, input_size, output,
+					 output_size, virt_addr);
+		return;
+	}
+
+	ext_heap_sz = sym_addr(_etext) - sym_addr(_text);
+	ext_heap_sz += BOOT_HEAP_SIZE;
+	ext_heap_sz = ext_heap_sz_impl(ext_heap_sz);
+
+	output_size = ALIGN(output_size, PAGE_SIZE);
+	ext_heap_sz = ALIGN(ext_heap_sz, PAGE_SIZE);
+	if (IS_ENABLED(CONFIG_X86_64))
+		ext_heap_sz = ALIGN(ext_heap_sz, MIN_KERNEL_ALIGN);
+
+	__choose_random_location(input, input_size, output,
+				 output_size + ext_heap_sz,
+				 virt_addr);
+
+	if (*output == orig_output)
+		/* No free slot was found and no extra heap is available */
+		downgrade_boot_layout_mode();
+	else
+		init_malloc((void *)*output + output_size, ext_heap_sz);
 }

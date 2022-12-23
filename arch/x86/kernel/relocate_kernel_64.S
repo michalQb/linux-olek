@@ -42,8 +42,7 @@
 SYM_PUSH_SECTION(kexec_control_code)
 	.align PAGE_SIZE
 	.code64
-SYM_POP_SECTION()
-SYM_CODE_START(relocate_range)
+SYM_OUTER_LABEL(relocate_range)
 SYM_POP_SECTION()
 SYM_CODE_START_NOALIGN_SECT(relocate_kernel, kexec_control_code)
 	UNWIND_HINT_EMPTY
@@ -318,4 +317,5 @@ SYM_CODE_END(swap_pages)
 
 SYM_PUSH_SECTION(kexec_control_code)
 	.skip KEXEC_CONTROL_CODE_MAX_SIZE - (. - relocate_kernel), 0xcc
-SYM_CODE_END(relocate_range);
+SYM_LABEL_END(relocate_range)
+SYM_POP_SECTION()

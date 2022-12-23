@@ -39,7 +39,7 @@ L4_START_KERNEL = l4_index(__START_KERNEL_map)
 L3_START_KERNEL = pud_index(__START_KERNEL_map)
 
 	.text
-	__HEAD
+	__INIT
 	.code64
 SYM_CODE_START_NOALIGN(startup_64)
 	UNWIND_HINT_EMPTY
@@ -125,6 +125,7 @@ SYM_CODE_START_NOALIGN(startup_64)
 	addq	$(early_top_pgt - __START_KERNEL_map), %rax
 	jmp 1f
 SYM_CODE_END(startup_64)
+	__FINIT
 
 SYM_CODE_START(secondary_startup_64)
 	UNWIND_HINT_EMPTY
@@ -357,7 +358,7 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	pushq	%rax		# target address in negative space
 	lretq
 .Lafter_lret:
-	ANNOTATE_NOENDBR
+//	ANNOTATE_NOENDBR
 SYM_CODE_END(secondary_startup_64)
 
 #include "verify_cpu.S"
@@ -447,7 +448,9 @@ SYM_CODE_START_SECT(early_idt_handler_array, early_idt_handler)
 	.fill early_idt_handler_array + i*EARLY_IDT_HANDLER_SIZE - ., 1, 0xcc
 	.endr
 SYM_CODE_END(early_idt_handler_array)
+SYM_PUSH_SECTION(early_idt_handler)
 	ANNOTATE_NOENDBR // early_idt_handler_array[NUM_EXCEPTION_VECTORS]
+SYM_POP_SECTION()
 
 SYM_CODE_START_LOCAL_SECT(early_idt_handler_common, early_idt_handler)
 	UNWIND_HINT_IRET_REGS offset=16
@@ -672,4 +675,3 @@ SYM_DATA_START_PAGE_ALIGNED(empty_zero_page)
 	.skip PAGE_SIZE
 SYM_DATA_END(empty_zero_page)
 EXPORT_SYMBOL(empty_zero_page)
-

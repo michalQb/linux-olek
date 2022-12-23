@@ -23,12 +23,6 @@ static inline unsigned long *pt_regs_nr(struct pt_regs *regs, int nr)
 	return (unsigned long *)((unsigned long)regs + reg_offset);
 }
 
-static inline unsigned long
-ex_fixup_addr(const struct exception_table_entry *x)
-{
-	return (unsigned long)&x->fixup + x->fixup;
-}
-
 static bool ex_handler_default(const struct exception_table_entry *e,
 			       struct pt_regs *regs)
 {

@@ -431,6 +431,11 @@ static int decode_instructions(struct objtool_file *file)
 				continue;
 
 			if (!find_insn(file, sec, func->offset)) {
+				if (func->type == STT_NOTYPE && !func->len &&
+				    func->offset == func->sec->sh.sh_size)
+					/* Label at the end of function */
+					continue;
+
 				WARN("%s(): can't find starting instruction",
 				     func->name);
 				return -1;
@@ -918,6 +923,73 @@ static int create_cfi_sections(struct objtool_file *file)
 
 			idx++;
 		}
+	}
+
+	return 0;
+}
+
+static int create_entry_sites_sections(struct objtool_file *file)
+{
+	struct section *sec, *aux, *s;
+	struct entry_site_aux {
+		unsigned int size;
+		unsigned int align;
+	} *auxen;
+	unsigned int idx;
+
+	sec = find_section_by_name(file->elf, ".entry_sites");
+	aux = find_section_by_name(file->elf, ".entry_site_aux");
+	if (sec || aux) {
+		WARN("file already has .entry_sites section, skipping");
+		return 0;
+	}
+
+	idx = 0;
+	for_each_sec(file, s) {
+		if (!s->text || !s->sh.sh_size)
+			continue;
+
+		if (!strncmp(s->name, ".init.text", 10) ||
+		    !strncmp(s->name, ".exit.text", 10))
+			continue;
+
+		idx++;
+	}
+
+	sec = elf_create_section(file->elf, ".entry_sites", 0,
+				 sizeof(unsigned int), idx);
+	if (!sec)
+		return -1;
+
+	aux = elf_create_section(file->elf, ".entry_site_aux", 0,
+				 sizeof(*auxen), idx);
+	if (!aux)
+		return -1;
+
+	idx = 0;
+	for_each_sec(file, s) {
+		unsigned int *loc;
+
+		if (!s->text || !s->sh.sh_size)
+			continue;
+
+		if (!strncmp(s->name, ".init.text", 10) ||
+		    !strncmp(s->name, ".exit.text", 10))
+			continue;
+
+		loc = (unsigned int *)sec->data->d_buf + idx;
+		memset(loc, 0, sizeof(unsigned int));
+
+		if (elf_add_reloc_to_insn(file->elf, sec,
+					  idx * sizeof(unsigned int),
+					  R_X86_64_PC32, s, 0))
+			return -1;
+
+		auxen = (struct entry_site_aux *)aux->data->d_buf + idx;
+		auxen->size = s->sh.sh_size;
+		auxen->align = s->sh.sh_addralign;
+
+		idx++;
 	}
 
 	return 0;
@@ -4514,6 +4586,13 @@ int check(struct objtool_file *file)
 
 	if (opts.cfi) {
 		ret = create_cfi_sections(file);
+		if (ret < 0)
+			goto out;
+		warnings += ret;
+	}
+
+	if (opts.entry) {
+		ret = create_entry_sites_sections(file);
 		if (ret < 0)
 			goto out;
 		warnings += ret;

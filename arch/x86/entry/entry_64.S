@@ -225,8 +225,8 @@ SYM_INNER_LABEL(entry_SYSRETQ_unsafe_stack, SYM_L_GLOBAL)
 	swapgs
 	sysretq
 SYM_INNER_LABEL(entry_SYSRETQ_end, SYM_L_GLOBAL)
-	ANNOTATE_NOENDBR
-	int3
+//	ANNOTATE_NOENDBR
+//	int3
 SYM_CODE_END(entry_SYSCALL_64)
 
 /*
@@ -284,7 +284,9 @@ SYM_FUNC_END(__switch_to_asm)
  * r12: kernel thread arg
  */
 .pushsection .text, "ax"
+SYM_PUSH_SECTION(ret_from_fork)
 	__FUNC_ALIGN
+SYM_POP_SECTION()
 SYM_CODE_START_NOALIGN(ret_from_fork)
 	UNWIND_HINT_EMPTY
 	ANNOTATE_NOENDBR // copy_thread
@@ -831,7 +833,9 @@ EXPORT_SYMBOL(asm_load_gs_index)
  *
  * C calling convention: exc_xen_hypervisor_callback(struct *pt_regs)
  */
+SYM_PUSH_SECTION(exc_xen_hypervisor_callback)
 	__FUNC_ALIGN
+SYM_POP_SECTION()
 SYM_CODE_START_LOCAL_NOALIGN(exc_xen_hypervisor_callback)
 
 /*
@@ -860,7 +864,9 @@ SYM_CODE_END(exc_xen_hypervisor_callback)
  * We distinguish between categories by comparing each saved segment register
  * with its current contents: any discrepancy means we in category 1.
  */
+SYM_PUSH_SECTION(xen_failsafe_callback)
 	__FUNC_ALIGN
+SYM_POP_SECTION()
 SYM_CODE_START_NOALIGN(xen_failsafe_callback)
 	UNWIND_HINT_EMPTY
 	ENDBR
@@ -1521,7 +1527,9 @@ SYM_CODE_END(ignore_sysret)
 #endif
 
 .pushsection .text, "ax"
+SYM_PUSH_SECTION(rewind_stack_and_make_dead)
 	__FUNC_ALIGN
+SYM_POP_SECTION()
 SYM_CODE_START_NOALIGN(rewind_stack_and_make_dead)
 	UNWIND_HINT_FUNC
 	/* Prevent any naive code from trying to unwind to our caller. */

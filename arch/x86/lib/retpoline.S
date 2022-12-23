@@ -12,7 +12,7 @@
 #include <asm/percpu.h>
 #include <asm/frame.h>
 
-	.section .text.__x86.indirect_thunk
+	.section .text..__x86.indirect_thunk
 
 
 .macro POLINE reg
@@ -131,7 +131,7 @@ SYM_CODE_END(__x86_indirect_jump_thunk_array)
  */
 #ifdef CONFIG_RETHUNK
 
-	.section .text.__x86.return_thunk
+	.section .text..__x86.return_thunk
 
 /*
  * Safety details here pertain to the AMD Zen{1,2} microarchitecture:
@@ -142,9 +142,11 @@ SYM_CODE_END(__x86_indirect_jump_thunk_array)
  * 3) STIBP must be enabled, or SMT disabled, to prevent the sibling thread
  *    from re-poisioning the BTB prediction.
  */
+SYM_PUSH_SECTION(zen_untrain_ret)
 	.align 64
 	.skip 63, 0xcc
-SYM_FUNC_START_NOALIGN(zen_untrain_ret);
+SYM_POP_SECTION()
+SYM_FUNC_START_NOALIGN(zen_untrain_ret)
 
 	/*
 	 * As executed from zen_untrain_ret, this is:
@@ -178,7 +180,7 @@ SYM_FUNC_START_NOALIGN(zen_untrain_ret);
 SYM_INNER_LABEL(__x86_return_thunk, SYM_L_GLOBAL)
 	ret
 	int3
-SYM_CODE_END(__x86_return_thunk)
+SYM_LABEL_END(__x86_return_thunk)
 
 	/*
 	 * Ensure the TEST decoding / BTB invalidation is complete.

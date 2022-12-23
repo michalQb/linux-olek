@@ -958,23 +958,23 @@ ifdef CONFIG_DEBUG_SECTION_MISMATCH
 KBUILD_CFLAGS += -fno-inline-functions-called-once
 endif
 
-# Allow ASM code to generate separate sections for each function. See
+# Allow Asm code to generate separate sections for each function. See
 # `include/linux/linkage.h` for explanation. This flag is to enable GAS to
 # insert the name of the previous section instead of `%S` inside .pushsection
-ifdef CONFIG_HAVE_ASM_FUNCTION_SECTIONS
-ifneq ($(CONFIG_LD_DEAD_CODE_DATA_ELIMINATION)$(CONFIG_LTO_CLANG)$(CONFIG_FG_KASLR),)
+ifdef CONFIG_ASM_FUNCTION_SECTIONS
 SECSUBST_AFLAGS := -Wa,--sectname-subst
+
+ifneq ($(CONFIG_LD_DEAD_CODE_DATA_ELIMINATION)$(CONFIG_LTO_CLANG)$(CONFIG_FG_KASLR),)
 KBUILD_AFLAGS_KERNEL += $(SECSUBST_AFLAGS)
 KBUILD_CFLAGS_KERNEL += $(SECSUBST_AFLAGS)
-export SECSUBST_AFLAGS
 endif
 
 # Same for modules. LD DCE doesn't work for them, thus not checking for it
 ifneq ($(CONFIG_MODULE_FG_KASLR)$(CONFIG_LTO_CLANG),)
-KBUILD_AFLAGS_MODULE += -Wa,--sectname-subst
-KBUILD_CFLAGS_MODULE += -Wa,--sectname-subst
+KBUILD_AFLAGS_MODULE += $(SECSUBST_AFLAGS)
+KBUILD_CFLAGS_MODULE += $(SECSUBST_AFLAGS)
 endif
-endif # CONFIG_HAVE_ASM_FUNCTION_SECTIONS
+endif # CONFIG_ASM_FUNCTION_SECTIONS
 
 # ClangLTO implies `-ffunction-sections -fdata-sections`, no need
 # to specify them manually and trigger a pointless full rebuild

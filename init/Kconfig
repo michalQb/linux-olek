@@ -1422,17 +1422,6 @@ config CC_OPTIMIZE_FOR_SIZE
 
 endchoice
 
-config HAVE_ASM_FUNCTION_SECTIONS
-	depends on ARCH_SUPPORTS_ASM_FUNCTION_SECTIONS
-	depends on $(cc-option,-Wa$(comma)--sectname-subst)
-	def_bool y
-	help
-	  This enables asm function sections if both architecture and
-	  toolchain support it. It allows creating a separate section
-	  for each function written in assembly in order to improve DCE,
-	  LTO and FG-KASLR (works the same way as -ffunction-sections
-	  for C code).
-
 config HAVE_LD_DEAD_CODE_DATA_ELIMINATION
 	bool
 	help
@@ -1955,33 +1944,6 @@ config BINDGEN_VERSION_TEXT
 #
 config TRACEPOINTS
 	bool
-
-config FG_KASLR
-	bool "Function Granular Kernel Address Space Layout Randomization"
-	depends on ARCH_SUPPORTS_FG_KASLR
-	depends on $(cc-option,-ffunction-sections)
-	help
-	  This option improves the randomness of the kernel text
-	  over basic Kernel Address Space Layout Randomization (KASLR)
-	  by reordering the kernel text at boot time. This feature
-	  uses information generated at compile time to re-layout the
-	  kernel text section at boot time at function level granularity.
-
-	  If unsure, say N.
-
-config FG_KASLR_SHIFT
-	int "FG-KASLR granularity (number of functions per section shift)"
-	depends on FG_KASLR
-	range 0 16
-	default 0
-	help
-	  This sets the number of functions that will be put in each section
-	  as a power of two.
-	  Decreasing the value increases the randomization, but also increases
-	  the size of the final kernel/vmlinux due to the amount of sections.
-	  0 means that a separate section will be created for each function.
-	  16 almost disables the randomization, leaving only the manual
-	  separation.
 
 endmenu		# General setup
 

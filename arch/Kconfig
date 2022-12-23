@@ -772,6 +772,109 @@ config CFI_PERMISSIVE
 
 	  If unsure, say N.
 
+config ARCH_SUPPORTS_ASM_FUNCTION_SECTIONS
+	bool
+	help
+	  An arch should select this if it can be built and run with its Asm
+	  functions placed into separate sections. Usually it means that all
+	  special cases when some functions need to be placed in one section
+	  or when a symbol needs explicit non-standard alignment are properly
+	  annotated with ASM_PUSH_SECTION()/ASM_POP_SECTION() and so on.
+
+config ASM_FUNCTION_SECTIONS
+	depends on ARCH_SUPPORTS_ASM_FUNCTION_SECTIONS
+	depends on $(cc-option,-Wa$(comma)--sectname-subst)
+	def_bool y
+	help
+	  This enables Asm function sections if both architecture and
+	  toolchain support it. It allows creating a separate section for each
+	  function written in Assembly in order to improve Dead Code and Data
+	  Elimination (DCE, CONFIG_LD_DEAD_CODE_DATA_ELIMINATION), Link-Time
+	  Optimization (LTO, CONFIG_LTO_CLANG) and FG-KASLR (CONFIG_FG_KASLR)
+	  (works the same way as -ffunction-sections for C code).
+
+config ARCH_SUPPORTS_FG_KASLR_OBJTOOL
+	bool
+	help
+	  An arch should select this if its early boot relocation/KASLR code
+	  supports FG-KASLR based on randomizing text entries enumerated in
+	  the special ELF section .entry_sites created by objtool (must be
+	  available on the architecture).
+	  Reliable source of random integers during early boot is required.
+
+config ARCH_SUPPORTS_FG_KASLR_SECT
+	bool
+	help
+	  An arch should select this if its early boot relocation/KASLR code
+	  supports FG-KASLR based on randomizing vmlinux ELF .text* sections
+	  order.
+	  Reliable source of random integers during early boot is required.
+
+config FG_KASLR
+	bool
+
+choice
+	prompt "Function Granular Kernel Address Space Layout Randomization (FG-KASLR)"
+	default FG_KASLR_NONE
+	help
+	  When enabled, randomizes the function order during early boot to make
+	  revealing kernel symbol addresses for performing attacks way more
+	  difficult.
+
+	  See Documentation/security/fgkaslr.rst for more information.
+
+config FG_KASLR_NONE
+	bool "No randomization"
+	help
+	  Build the kernel with no function order randomization.
+
+config FG_KASLR_OBJTOOL
+	bool "Randomize via objtool"
+	depends on ARCH_SUPPORTS_FG_KASLR_OBJTOOL
+	depends on HAVE_OBJTOOL
+	select FG_KASLR
+	select OBJTOOL
+	help
+	  When enabled, objtool records each function address (more precisely,
+	  the address of each input .text.* section) in the special section
+	  .entry_sites, basing on which the early boot arch code then
+	  randomizes the function order.
+	  The option adds almost no overhead to the compilation time or vmlinux
+	  size, but requires objtool to be available on the architecture. Also,
+	  it doesn't randomize function order at compile-time and makes Dead
+	  Code and Data Elimination (DCE) inefficient in terms of removing
+	  unused functions from the kernel as it creates a reference to every
+	  function, even if there are no callers for it.
+
+config FG_KASLR_SECT
+	bool "Randomize via vmlinux ELF sections"
+	depends on ARCH_SUPPORTS_FG_KASLR_SECT
+	select FG_KASLR
+	help
+	  When enabled, the resulting vmlinux ELF has a separate .text* section
+	  for almost every function. The early boot arch code then iterates
+	  over the sections and randomizes their order in the memory.
+	  This option adds noticeable (2-3%) overhead to both compilation
+	  (link) time and vmlinux size, but additionally randomizes function
+	  order at compile-time, doesn't require objtool and doesn't affect
+	  DCE.
+
+endchoice
+
+config FG_KASLR_SHIFT
+	int "FG-KASLR granularity (number of functions per section shift)"
+	depends on FG_KASLR_SECT
+	range 0 16
+	default 0
+	help
+	  This sets the number of functions that will be put in each section
+	  as a power of two.
+	  Decreasing the value increases the randomization, but also increases
+	  the size of the final kernel/vmlinux due to the amount of sections.
+	  0 means that a separate section will be created for each function.
+	  16 almost disables the randomization, leaving only the manual
+	  separation.
+
 config HAVE_ARCH_WITHIN_STACK_FRAMES
 	bool
 	help
@@ -1423,16 +1526,6 @@ config ARCH_HAS_NONLEAF_PMD_YOUNG
 	  accessed bit in non-leaf PMD entries when using them as part of linear
 	  address translations. Page table walkers that clear the accessed bit
 	  may use this capability to reduce their search space.
-
-config ARCH_SUPPORTS_ASM_FUNCTION_SECTIONS
-	bool
-	help
-	  An arch should select this if it can be built and run with its
-	  asm functions placed into separate sections to improve DCE, LTO
-	  and FG-KASLR.
-
-config ARCH_SUPPORTS_FG_KASLR
-	bool
 
 source "kernel/gcov/Kconfig"
 

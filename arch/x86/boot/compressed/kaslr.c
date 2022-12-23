@@ -823,18 +823,14 @@ static unsigned long find_random_virt_addr(unsigned long minimum,
  * Since this function examines addresses much more numerically,
  * it takes the input and output pointers as 'unsigned long'.
  */
-void choose_random_location(unsigned long input,
-			    unsigned long input_size,
-			    unsigned long *output,
-			    unsigned long output_size,
-			    unsigned long *virt_addr)
+void __choose_random_location(unsigned long input, unsigned long input_size,
+			      unsigned long *output, unsigned long output_size,
+			      unsigned long *virt_addr)
 {
 	unsigned long random_addr, min_addr;
 
-	if (cmdline_find_option_bool("nokaslr")) {
-		warn("KASLR disabled: 'nokaslr' on cmdline.");
+	if (get_boot_layout_mode() < BOOT_LAYOUT_KASLR)
 		return;
-	}
 
 	boot_params->hdr.loadflags |= KASLR_FLAG;
 
