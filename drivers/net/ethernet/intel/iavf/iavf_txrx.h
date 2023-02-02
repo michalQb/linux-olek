@@ -156,19 +156,17 @@ static inline int iavf_skb_pad(void)
 
 /**
  * iavf_test_staterr - tests bits in Rx descriptor status and error fields
- * @rx_desc: pointer to receive descriptor (in le64 format)
- * @stat_err_bits: value to mask
+ * @qword: `wb.qword1.status_error_len` from the descriptor
+ * @stat_err: bit number to mask
  *
  * This function does some fast chicanery in order to return the
  * value of the mask which is really only used for boolean tests.
  * The status_error_len doesn't need to be shifted because it begins
  * at offset zero.
  */
-static inline bool iavf_test_staterr(union iavf_rx_desc *rx_desc,
-				     const u64 stat_err_bits)
+static inline bool iavf_test_staterr(u64 qword, const u64 stat_err)
 {
-	return !!(rx_desc->wb.qword1.status_error_len &
-		  cpu_to_le64(stat_err_bits));
+	return !!(qword & BIT_ULL(stat_err));
 }
 
 /* How many Rx Buffers do we bundle into one write to the hardware ? */
@@ -382,7 +380,6 @@ struct iavf_ring {
 	struct iavf_q_vector *q_vector;	/* Backreference to associated vector */
 
 	struct rcu_head rcu;		/* to avoid race on free */
-	u16 next_to_alloc;
 	struct sk_buff *skb;		/* When iavf_clean_rx_ring_irq() must
 					 * return before it sees the EOP for
 					 * the current packet, we save that skb
@@ -425,7 +422,7 @@ static inline unsigned int iavf_rx_pg_order(struct iavf_ring *ring)
 
 #define iavf_rx_pg_size(_ring) (PAGE_SIZE << iavf_rx_pg_order(_ring))
 
-bool iavf_alloc_rx_buffers(struct iavf_ring *rxr, u16 cleaned_count);
+void iavf_alloc_rx_buffers(struct iavf_ring *rxr);
 netdev_tx_t iavf_xmit_frame(struct sk_buff *skb, struct net_device *netdev);
 void iavf_clean_tx_ring(struct iavf_ring *tx_ring);
 void iavf_clean_rx_ring(struct iavf_ring *rx_ring);

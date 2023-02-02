@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright(c) 2013 - 2018 Intel Corporation. */
 
+#include <linux/bitfield.h>
 #include <linux/net/intel/libie.h>
 #include <linux/prefetch.h>
 
@@ -736,7 +737,6 @@ void iavf_clean_rx_ring(struct iavf_ring *rx_ring)
 	/* Zero out the descriptor ring */
 	memset(rx_ring->desc, 0, rx_ring->size);
 
-	rx_ring->next_to_alloc = 0;
 	rx_ring->next_to_clean = 0;
 	rx_ring->next_to_use = 0;
 }
@@ -792,7 +792,6 @@ int iavf_setup_rx_descriptors(struct iavf_ring *rx_ring)
 		goto err;
 	}
 
-	rx_ring->next_to_alloc = 0;
 	rx_ring->next_to_clean = 0;
 	rx_ring->next_to_use = 0;
 
@@ -812,9 +811,6 @@ static inline void iavf_release_rx_desc(struct iavf_ring *rx_ring, u32 val)
 {
 	rx_ring->next_to_use = val;
 
-	/* update next to alloc since we have filled the ring */
-	rx_ring->next_to_alloc = val;
-
 	/* Force memory writes to complete before letting h/w
 	 * know there are new descriptors to fetch.  (Only
 	 * applicable for weak-ordered memory model archs,
@@ -828,12 +824,17 @@ static inline void iavf_release_rx_desc(struct iavf_ring *rx_ring, u32 val)
  * iavf_alloc_mapped_page - recycle or make a new page
  * @rx_ring: ring to use
  * @bi: rx_buffer struct to modify
+ * @dev: device used for DMA mapping
+ * @order: page order to allocate
+ * @gfp: GFP mask to allocate page
  *
  * Returns true if the page was successfully allocated or
  * reused.
  **/
 static bool iavf_alloc_mapped_page(struct iavf_ring *rx_ring,
-				   struct iavf_rx_buffer *bi)
+				   struct iavf_rx_buffer *bi,
+				   struct device *dev, u32 order,
+				   gfp_t gfp)
 {
 	struct page *page = bi->page;
 	dma_addr_t dma;
@@ -845,23 +846,21 @@ static bool iavf_alloc_mapped_page(struct iavf_ring *rx_ring,
 	}
 
 	/* alloc new page for storage */
-	page = dev_alloc_pages(iavf_rx_pg_order(rx_ring));
+	page = __dev_alloc_pages(gfp, order);
 	if (unlikely(!page)) {
 		rx_ring->rx_stats.alloc_page_failed++;
 		return false;
 	}
 
 	/* map page for use */
-	dma = dma_map_page_attrs(rx_ring->dev, page, 0,
-				 iavf_rx_pg_size(rx_ring),
-				 DMA_FROM_DEVICE,
-				 IAVF_RX_DMA_ATTR);
+	dma = dma_map_page_attrs(dev, page, 0, PAGE_SIZE << order,
+				 DMA_FROM_DEVICE, IAVF_RX_DMA_ATTR);
 
 	/* if mapping failed free memory back to system since
 	 * there isn't much point in holding memory we can't use
 	 */
-	if (dma_mapping_error(rx_ring->dev, dma)) {
-		__free_pages(page, iavf_rx_pg_order(rx_ring));
+	if (dma_mapping_error(dev, dma)) {
+		__free_pages(page, order);
 		rx_ring->rx_stats.alloc_page_failed++;
 		return false;
 	}
@@ -898,32 +897,36 @@ static void iavf_receive_skb(struct iavf_ring *rx_ring,
 }
 
 /**
- * iavf_alloc_rx_buffers - Replace used receive buffers
+ * __iavf_alloc_rx_buffers - Replace used receive buffers
  * @rx_ring: ring to place buffers on
- * @cleaned_count: number of buffers to replace
+ * @to_refill: number of buffers to replace
+ * @gfp: GFP mask to allocate pages
  *
- * Returns false if all allocations were successful, true if any fail
+ * Returns 0 if all allocations were successful or the number of buffers left
+ * to refill in case of an allocation failure.
  **/
-bool iavf_alloc_rx_buffers(struct iavf_ring *rx_ring, u16 cleaned_count)
+static u32 __iavf_alloc_rx_buffers(struct iavf_ring *rx_ring, u32 to_refill,
+				   gfp_t gfp)
 {
-	u16 ntu = rx_ring->next_to_use;
+	u32 order = iavf_rx_pg_order(rx_ring);
+	struct device *dev = rx_ring->dev;
+	u32 ntu = rx_ring->next_to_use;
 	union iavf_rx_desc *rx_desc;
 	struct iavf_rx_buffer *bi;
 
 	/* do nothing if no valid netdev defined */
-	if (!rx_ring->netdev || !cleaned_count)
-		return false;
+	if (unlikely(!rx_ring->netdev || !to_refill))
+		return 0;
 
 	rx_desc = IAVF_RX_DESC(rx_ring, ntu);
 	bi = &rx_ring->rx_bi[ntu];
 
 	do {
-		if (!iavf_alloc_mapped_page(rx_ring, bi))
-			goto no_buffers;
+		if (!iavf_alloc_mapped_page(rx_ring, bi, dev, order, gfp))
+			break;
 
 		/* sync the buffer for use by the device */
-		dma_sync_single_range_for_device(rx_ring->dev, bi->dma,
-						 bi->page_offset,
+		dma_sync_single_range_for_device(dev, bi->dma, bi->page_offset,
 						 rx_ring->rx_buf_len,
 						 DMA_FROM_DEVICE);
 
@@ -943,44 +946,33 @@ bool iavf_alloc_rx_buffers(struct iavf_ring *rx_ring, u16 cleaned_count)
 
 		/* clear the status bits for the next_to_use descriptor */
 		rx_desc->wb.qword1.status_error_len = 0;
-
-		cleaned_count--;
-	} while (cleaned_count);
+	} while (--to_refill);
 
 	if (rx_ring->next_to_use != ntu)
 		iavf_release_rx_desc(rx_ring, ntu);
 
-	return false;
+	return to_refill;
+}
 
-no_buffers:
-	if (rx_ring->next_to_use != ntu)
-		iavf_release_rx_desc(rx_ring, ntu);
-
-	/* make sure to come back via polling to try again after
-	 * allocation failure
-	 */
-	return true;
+void iavf_alloc_rx_buffers(struct iavf_ring *rxr)
+{
+	__iavf_alloc_rx_buffers(rxr, IAVF_DESC_UNUSED(rxr), GFP_KERNEL);
 }
 
 /**
  * iavf_rx_checksum - Indicate in skb if hw indicated a good cksum
  * @vsi: the VSI we care about
  * @skb: skb currently being received and modified
- * @rx_desc: the receive descriptor
+ * @qword: `wb.qword1.status_error_len` from the descriptor
  **/
 static inline void iavf_rx_checksum(struct iavf_vsi *vsi,
 				    struct sk_buff *skb,
-				    union iavf_rx_desc *rx_desc)
+				    u64 qword)
 {
 	struct libie_rx_ptype_parsed parsed;
-	u32 rx_error, rx_status;
+	u32 ptype, rx_error, rx_status;
 	bool ipv4, ipv6;
-	u8 ptype;
-	u64 qword;
 
-	skb->ip_summed = CHECKSUM_NONE;
-
-	qword = le64_to_cpu(rx_desc->wb.qword1.status_error_len);
 	ptype = (qword & IAVF_RXD_QW1_PTYPE_MASK) >> IAVF_RXD_QW1_PTYPE_SHIFT;
 
 	parsed = libie_parse_rx_ptype(ptype);
@@ -1035,24 +1027,25 @@ checksum_fail:
  * @ring: descriptor ring
  * @rx_desc: specific descriptor
  * @skb: skb currently being received and modified
- * @rx_ptype: Rx packet type
+ * @qword: `wb.qword1.status_error_len` from the descriptor
  **/
 static inline void iavf_rx_hash(struct iavf_ring *ring,
 				union iavf_rx_desc *rx_desc,
 				struct sk_buff *skb,
-				u8 rx_ptype)
+				u64 qword)
 {
+	const u64 rss_mask = (u64)IAVF_RX_DESC_FLTSTAT_RSS_HASH <<
+			     IAVF_RX_DESC_STATUS_FLTSTAT_SHIFT;
 	struct libie_rx_ptype_parsed parsed;
-	u32 hash;
-	const __le64 rss_mask =
-		cpu_to_le64((u64)IAVF_RX_DESC_FLTSTAT_RSS_HASH <<
-			    IAVF_RX_DESC_STATUS_FLTSTAT_SHIFT);
+	u32 rx_ptype, hash;
+
+	rx_ptype = FIELD_GET(IAVF_RXD_QW1_PTYPE_MASK, qword);
 
 	parsed = libie_parse_rx_ptype(rx_ptype);
 	if (!libie_has_rx_hash(ring->netdev, parsed))
 		return;
 
-	if ((rx_desc->wb.qword1.status_error_len & rss_mask) == rss_mask) {
+	if ((qword & rss_mask) == rss_mask) {
 		hash = le32_to_cpu(rx_desc->wb.qword0.hi_dword.rss);
 		libie_set_skb_hash(skb, hash, parsed);
 	}
@@ -1063,7 +1056,7 @@ static inline void iavf_rx_hash(struct iavf_ring *ring,
  * @rx_ring: rx descriptor ring packet is being transacted on
  * @rx_desc: pointer to the EOP Rx descriptor
  * @skb: pointer to current skb being populated
- * @rx_ptype: the packet type decoded by hardware
+ * @qword: `wb.qword1.status_error_len` from the descriptor
  *
  * This function checks the ring, descriptor, and packet information in
  * order to populate the hash, checksum, VLAN, protocol, and
@@ -1072,64 +1065,16 @@ static inline void iavf_rx_hash(struct iavf_ring *ring,
 static inline
 void iavf_process_skb_fields(struct iavf_ring *rx_ring,
 			     union iavf_rx_desc *rx_desc, struct sk_buff *skb,
-			     u8 rx_ptype)
+			     u64 qword)
 {
-	iavf_rx_hash(rx_ring, rx_desc, skb, rx_ptype);
+	iavf_rx_hash(rx_ring, rx_desc, skb, qword);
 
-	iavf_rx_checksum(rx_ring->vsi, skb, rx_desc);
+	iavf_rx_checksum(rx_ring->vsi, skb, qword);
 
 	skb_record_rx_queue(skb, rx_ring->queue_index);
 
 	/* modifies the skb - consumes the enet header */
 	skb->protocol = eth_type_trans(skb, rx_ring->netdev);
-}
-
-/**
- * iavf_cleanup_headers - Correct empty headers
- * @rx_ring: rx descriptor ring packet is being transacted on
- * @skb: pointer to current skb being fixed
- *
- * Also address the case where we are pulling data in on pages only
- * and as such no data is present in the skb header.
- *
- * In addition if skb is not at least 60 bytes we need to pad it so that
- * it is large enough to qualify as a valid Ethernet frame.
- *
- * Returns true if an error was encountered and skb was freed.
- **/
-static bool iavf_cleanup_headers(struct iavf_ring *rx_ring, struct sk_buff *skb)
-{
-	/* if eth_skb_pad returns an error the skb was freed */
-	if (eth_skb_pad(skb))
-		return true;
-
-	return false;
-}
-
-/**
- * iavf_reuse_rx_page - page flip buffer and store it back on the ring
- * @rx_ring: rx descriptor ring to store buffers on
- * @old_buff: donor buffer to have page reused
- *
- * Synchronizes page for reuse by the adapter
- **/
-static void iavf_reuse_rx_page(struct iavf_ring *rx_ring,
-			       struct iavf_rx_buffer *old_buff)
-{
-	struct iavf_rx_buffer *new_buff;
-	u16 nta = rx_ring->next_to_alloc;
-
-	new_buff = &rx_ring->rx_bi[nta];
-
-	/* update, and store next to alloc */
-	nta++;
-	rx_ring->next_to_alloc = (nta < rx_ring->count) ? nta : 0;
-
-	/* transfer page from old buffer to new buffer */
-	new_buff->dma		= old_buff->dma;
-	new_buff->page		= old_buff->page;
-	new_buff->page_offset	= old_buff->page_offset;
-	new_buff->pagecnt_bias	= old_buff->pagecnt_bias;
 }
 
 /**
@@ -1193,29 +1138,25 @@ static bool iavf_can_reuse_rx_page(struct iavf_rx_buffer *rx_buffer)
 
 /**
  * iavf_add_rx_frag - Add contents of Rx buffer to sk_buff
- * @rx_ring: rx descriptor ring to transact packets on
- * @rx_buffer: buffer containing page to add
  * @skb: sk_buff to place the data into
+ * @rx_buffer: buffer containing page to add
  * @size: packet length from rx_desc
+ * @pg_size: Rx buffer page size
  *
  * This function will add the data contained in rx_buffer->page to the skb.
  * It will just attach the page as a frag to the skb.
  *
  * The function will then update the page offset.
  **/
-static void iavf_add_rx_frag(struct iavf_ring *rx_ring,
+static void iavf_add_rx_frag(struct sk_buff *skb,
 			     struct iavf_rx_buffer *rx_buffer,
-			     struct sk_buff *skb,
-			     unsigned int size)
+			     u32 size, u32 pg_size)
 {
 #if (PAGE_SIZE < 8192)
-	unsigned int truesize = iavf_rx_pg_size(rx_ring) / 2;
+	unsigned int truesize = pg_size / 2;
 #else
 	unsigned int truesize = SKB_DATA_ALIGN(size + IAVF_SKB_PAD);
 #endif
-
-	if (!size)
-		return;
 
 	skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, rx_buffer->page,
 			rx_buffer->page_offset, size, truesize);
@@ -1226,63 +1167,47 @@ static void iavf_add_rx_frag(struct iavf_ring *rx_ring,
 #else
 	rx_buffer->page_offset += truesize;
 #endif
-}
-
-/**
- * iavf_get_rx_buffer - Fetch Rx buffer and synchronize data for use
- * @rx_ring: rx descriptor ring to transact packets on
- * @size: size of buffer to add to skb
- *
- * This function will pull an Rx buffer from the ring and synchronize it
- * for use by the CPU.
- */
-static struct iavf_rx_buffer *iavf_get_rx_buffer(struct iavf_ring *rx_ring,
-						 const unsigned int size)
-{
-	struct iavf_rx_buffer *rx_buffer;
-
-	rx_buffer = &rx_ring->rx_bi[rx_ring->next_to_clean];
-	prefetchw(rx_buffer->page);
-	if (!size)
-		return rx_buffer;
-
-	/* we are reusing so sync this buffer for CPU use */
-	dma_sync_single_range_for_cpu(rx_ring->dev,
-				      rx_buffer->dma,
-				      rx_buffer->page_offset,
-				      size,
-				      DMA_FROM_DEVICE);
 
 	/* We have pulled a buffer for use, so decrement pagecnt_bias */
 	rx_buffer->pagecnt_bias--;
+}
 
-	return rx_buffer;
+/**
+ * iavf_sync_rx_buffer - Synchronize received data for use
+ * @dev: device used for DMA mapping
+ * @buf: Rx buffer containing the data
+ * @size: size of the received data
+ *
+ * This function will synchronize the Rx buffer for use by the CPU.
+ */
+static void iavf_sync_rx_buffer(struct device *dev, struct iavf_rx_buffer *buf,
+			        u32 size)
+{
+	dma_sync_single_range_for_cpu(dev, buf->dma, buf->page_offset, size,
+				      DMA_FROM_DEVICE);
 }
 
 /**
  * iavf_build_skb - Build skb around an existing buffer
- * @rx_ring: Rx descriptor ring to transact packets on
- * @rx_buffer: Rx buffer to pull data from
- * @size: size of buffer to add to skb
+ * @rx_buffer: Rx buffer with the data
+ * @size: size of the data
+ * @pg_size: size of the Rx page
  *
  * This function builds an skb around an existing Rx buffer, taking care
  * to set up the skb correctly and avoid any memcpy overhead.
  */
-static struct sk_buff *iavf_build_skb(struct iavf_ring *rx_ring,
-				      struct iavf_rx_buffer *rx_buffer,
-				      unsigned int size)
+static struct sk_buff *iavf_build_skb(struct iavf_rx_buffer *rx_buffer,
+				      u32 size, u32 pg_size)
 {
 	void *va;
 #if (PAGE_SIZE < 8192)
-	unsigned int truesize = iavf_rx_pg_size(rx_ring) / 2;
+	unsigned int truesize = pg_size / 2;
 #else
 	unsigned int truesize = SKB_DATA_ALIGN(sizeof(struct skb_shared_info)) +
 				SKB_DATA_ALIGN(IAVF_SKB_PAD + size);
 #endif
 	struct sk_buff *skb;
 
-	if (!rx_buffer || !size)
-		return NULL;
 	/* prefetch first cache line of first page */
 	va = page_address(rx_buffer->page) + rx_buffer->page_offset;
 	net_prefetch(va);
@@ -1303,66 +1228,46 @@ static struct sk_buff *iavf_build_skb(struct iavf_ring *rx_ring,
 	rx_buffer->page_offset += truesize;
 #endif
 
+	rx_buffer->pagecnt_bias--;
+
 	return skb;
 }
 
 /**
- * iavf_put_rx_buffer - Clean up used buffer and either recycle or free
+ * iavf_put_rx_buffer - Recycle or free used buffer
  * @rx_ring: rx descriptor ring to transact packets on
- * @rx_buffer: rx buffer to pull data from
+ * @dev: device used for DMA mapping
+ * @rx_buffer: Rx buffer to handle
+ * @pg_size: Rx page size
  *
- * This function will clean up the contents of the rx_buffer.  It will
- * either recycle the buffer or unmap it and free the associated resources.
+ * Either recycle the buffer if possible or unmap and free the page.
  */
-static void iavf_put_rx_buffer(struct iavf_ring *rx_ring,
-			       struct iavf_rx_buffer *rx_buffer)
+static void iavf_put_rx_buffer(struct iavf_ring *rx_ring, struct device *dev,
+			       struct iavf_rx_buffer *rx_buffer, u32 pg_size)
 {
-	if (!rx_buffer)
-		return;
-
 	if (iavf_can_reuse_rx_page(rx_buffer)) {
-		/* hand second half of page back to the ring */
-		iavf_reuse_rx_page(rx_ring, rx_buffer);
 		rx_ring->rx_stats.page_reuse_count++;
-	} else {
-		/* we are not reusing the buffer so unmap it */
-		dma_unmap_page_attrs(rx_ring->dev, rx_buffer->dma,
-				     iavf_rx_pg_size(rx_ring),
-				     DMA_FROM_DEVICE, IAVF_RX_DMA_ATTR);
-		__page_frag_cache_drain(rx_buffer->page,
-					rx_buffer->pagecnt_bias);
+		return;
 	}
+
+	/* we are not reusing the buffer so unmap it */
+	dma_unmap_page_attrs(dev, rx_buffer->dma, pg_size,
+			     DMA_FROM_DEVICE, IAVF_RX_DMA_ATTR);
+	__page_frag_cache_drain(rx_buffer->page, rx_buffer->pagecnt_bias);
 
 	/* clear contents of buffer_info */
 	rx_buffer->page = NULL;
 }
 
 /**
- * iavf_is_non_eop - process handling of non-EOP buffers
+ * iavf_is_non_eop - check whether a buffer is non-EOP
  * @rx_ring: Rx ring being processed
- * @rx_desc: Rx descriptor for current buffer
- * @skb: Current socket buffer containing buffer in progress
- *
- * This function updates next to clean.  If the buffer is an EOP buffer
- * this function exits returning false, otherwise it will place the
- * sk_buff in the next buffer to be chained and return true indicating
- * that this is in fact a non-EOP buffer.
+ * @qword: `wb.qword1.status_error_len` from the descriptor
  **/
-static bool iavf_is_non_eop(struct iavf_ring *rx_ring,
-			    union iavf_rx_desc *rx_desc,
-			    struct sk_buff *skb)
+static bool iavf_is_non_eop(struct iavf_ring *rx_ring, u64 qword)
 {
-	u32 ntc = rx_ring->next_to_clean + 1;
-
-	/* fetch, update, and store next to clean */
-	ntc = (ntc < rx_ring->count) ? ntc : 0;
-	rx_ring->next_to_clean = ntc;
-
-	prefetch(IAVF_RX_DESC(rx_ring, ntc));
-
 	/* if we are the last buffer then there is nothing else to do */
-#define IAVF_RXD_EOF BIT(IAVF_RX_DESC_STATUS_EOF_SHIFT)
-	if (likely(iavf_test_staterr(rx_desc, IAVF_RXD_EOF)))
+	if (likely(iavf_test_staterr(qword, IAVF_RX_DESC_STATUS_EOF_SHIFT)))
 		return false;
 
 	rx_ring->rx_stats.non_eop_descs++;
@@ -1385,26 +1290,28 @@ static bool iavf_is_non_eop(struct iavf_ring *rx_ring,
 static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 {
 	unsigned int total_rx_bytes = 0, total_rx_packets = 0;
+	const gfp_t gfp = GFP_ATOMIC | __GFP_NOWARN;
+	u32 to_refill = IAVF_DESC_UNUSED(rx_ring);
+	u32 pg_size = iavf_rx_pg_size(rx_ring);
 	struct sk_buff *skb = rx_ring->skb;
-	u16 cleaned_count = IAVF_DESC_UNUSED(rx_ring);
-	bool failure = false;
+	struct device *dev = rx_ring->dev;
+	u32 ntc = rx_ring->next_to_clean;
+	u32 ring_size = rx_ring->count;
+	u32 cleaned_count = 0;
 
-	while (likely(total_rx_packets < (unsigned int)budget)) {
+	while (likely(cleaned_count < budget)) {
 		struct iavf_rx_buffer *rx_buffer;
 		union iavf_rx_desc *rx_desc;
 		unsigned int size;
 		u16 vlan_tag = 0;
-		u8 rx_ptype;
 		u64 qword;
 
 		/* return some buffers to hardware, one at a time is too slow */
-		if (cleaned_count >= IAVF_RX_BUFFER_WRITE) {
-			failure = failure ||
-				  iavf_alloc_rx_buffers(rx_ring, cleaned_count);
-			cleaned_count = 0;
-		}
+		if (to_refill >= IAVF_RX_BUFFER_WRITE)
+			to_refill = __iavf_alloc_rx_buffers(rx_ring, to_refill,
+							    gfp);
 
-		rx_desc = IAVF_RX_DESC(rx_ring, rx_ring->next_to_clean);
+		rx_desc = IAVF_RX_DESC(rx_ring, ntc);
 
 		/* status_error_len will always be zero for unused descriptors
 		 * because it's cleared in cleanup, and overlaps with hdr_addr
@@ -1412,54 +1319,63 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 		 * hardware wrote DD then the length will be non-zero
 		 */
 		qword = le64_to_cpu(rx_desc->wb.qword1.status_error_len);
+		if (!iavf_test_staterr(qword, IAVF_RX_DESC_STATUS_DD_SHIFT))
+			break;
 
 		/* This memory barrier is needed to keep us from reading
 		 * any other fields out of the rx_desc until we have
 		 * verified the descriptor has been written back.
 		 */
 		dma_rmb();
-#define IAVF_RXD_DD BIT(IAVF_RX_DESC_STATUS_DD_SHIFT)
-		if (!iavf_test_staterr(rx_desc, IAVF_RXD_DD))
-			break;
 
 		size = (qword & IAVF_RXD_QW1_LENGTH_PBUF_MASK) >>
 		       IAVF_RXD_QW1_LENGTH_PBUF_SHIFT;
 
 		iavf_trace(clean_rx_irq, rx_ring, rx_desc, skb);
-		rx_buffer = iavf_get_rx_buffer(rx_ring, size);
+		rx_buffer = &rx_ring->rx_bi[ntc];
+
+		/* Very rare, but possible case. The most common reason:
+		 * the last fragment contained FCS only, which was then
+		 * stripped by the HW.
+		 */
+		if (unlikely(!size))
+			goto skip_data;
+
+		iavf_sync_rx_buffer(dev, rx_buffer, size);
 
 		/* retrieve a buffer from the ring */
 		if (skb)
-			iavf_add_rx_frag(rx_ring, rx_buffer, skb, size);
+			iavf_add_rx_frag(skb, rx_buffer, size, pg_size);
 		else
-			skb = iavf_build_skb(rx_ring, rx_buffer, size);
+			skb = iavf_build_skb(rx_buffer, size, pg_size);
 
 		/* exit if we failed to retrieve a buffer */
 		if (!skb) {
 			rx_ring->rx_stats.alloc_buff_failed++;
-			if (rx_buffer && size)
-				rx_buffer->pagecnt_bias++;
 			break;
 		}
 
-		iavf_put_rx_buffer(rx_ring, rx_buffer);
-		cleaned_count++;
+skip_data:
+		iavf_put_rx_buffer(rx_ring, dev, rx_buffer, pg_size);
 
-		if (iavf_is_non_eop(rx_ring, rx_desc, skb))
+		cleaned_count++;
+		to_refill++;
+		if (unlikely(++ntc == ring_size))
+			ntc = 0;
+
+		if (iavf_is_non_eop(rx_ring, qword))
 			continue;
+
+		prefetch(rx_desc);
 
 		/* ERR_MASK will only have valid bits if EOP set, and
 		 * what we are doing here is actually checking
 		 * IAVF_RX_DESC_ERROR_RXE_SHIFT, since it is the zeroth bit in
 		 * the error field
 		 */
-		if (unlikely(iavf_test_staterr(rx_desc, BIT(IAVF_RXD_QW1_ERROR_SHIFT)))) {
-			dev_kfree_skb_any(skb);
-			skb = NULL;
-			continue;
-		}
-
-		if (iavf_cleanup_headers(rx_ring, skb)) {
+		if (unlikely(iavf_test_staterr(qword,
+					       IAVF_RXD_QW1_ERROR_SHIFT))) {
+			dev_kfree_skb(skb);
 			skb = NULL;
 			continue;
 		}
@@ -1467,12 +1383,8 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 		/* probably a little skewed due to removing CRC */
 		total_rx_bytes += skb->len;
 
-		qword = le64_to_cpu(rx_desc->wb.qword1.status_error_len);
-		rx_ptype = (qword & IAVF_RXD_QW1_PTYPE_MASK) >>
-			   IAVF_RXD_QW1_PTYPE_SHIFT;
-
 		/* populate checksum, VLAN, and protocol */
-		iavf_process_skb_fields(rx_ring, rx_desc, skb, rx_ptype);
+		iavf_process_skb_fields(rx_ring, rx_desc, skb, qword);
 
 		if (qword & BIT(IAVF_RX_DESC_STATUS_L2TAG1P_SHIFT) &&
 		    rx_ring->flags & IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1)
@@ -1490,7 +1402,14 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 		total_rx_packets++;
 	}
 
+	rx_ring->next_to_clean = ntc;
 	rx_ring->skb = skb;
+
+	if (to_refill >= IAVF_RX_BUFFER_WRITE)
+		to_refill = __iavf_alloc_rx_buffers(rx_ring, to_refill, gfp);
+	/* guarantee a trip back through this routine if there was a failure */
+	if (unlikely(to_refill >= IAVF_RX_BUFFER_WRITE))
+		cleaned_count = budget;
 
 	u64_stats_update_begin(&rx_ring->syncp);
 	rx_ring->stats.packets += total_rx_packets;
@@ -1499,8 +1418,7 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 	rx_ring->q_vector->rx.total_packets += total_rx_packets;
 	rx_ring->q_vector->rx.total_bytes += total_rx_bytes;
 
-	/* guarantee a trip back through this routine if there was a failure */
-	return failure ? budget : (int)total_rx_packets;
+	return cleaned_count;
 }
 
 static inline u32 iavf_buildreg_itr(const int type, u16 itr)
