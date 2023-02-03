@@ -34,10 +34,16 @@
 #include <linux/ptr_ring.h>
 #include <linux/dma-direction.h>
 
-#define PP_FLAG_DMA_MAP		BIT(0) /* Should page_pool do the DMA
+#define PP_FLAG_DMA_MAP		BIT(5) /* Should page_pool do the DMA
 					* map/unmap
 					*/
-#define PP_FLAG_DMA_SYNC_DEV	BIT(1) /* If set all pages that the driver gets
+#define PP_FLAG_DMA_MAP_WEAK	BIT(1) /* Map with %DMA_ATTR_WEAK_ORDERING */
+/* These flags correspond to the DMA map attributes to pass them directly to
+ * dma_map_page_attrs(), see page_pool_dma_map().
+ */
+#define PP_FLAG_DMA_ATTR	(PP_FLAG_DMA_MAP | \
+				 PP_FLAG_DMA_MAP_WEAK)
+#define PP_FLAG_DMA_SYNC_DEV	BIT(0) /* If set all pages that the driver gets
 					* from page_pool will be
 					* DMA-synced-for-device according to
 					* the length provided by the device
@@ -46,7 +52,7 @@
 					* device driver responsibility
 					*/
 #define PP_FLAG_PAGE_FRAG	BIT(2) /* for page frag feature */
-#define PP_FLAG_ALL		(PP_FLAG_DMA_MAP |\
+#define PP_FLAG_ALL		(PP_FLAG_DMA_ATTR |\
 				 PP_FLAG_DMA_SYNC_DEV |\
 				 PP_FLAG_PAGE_FRAG)
 
