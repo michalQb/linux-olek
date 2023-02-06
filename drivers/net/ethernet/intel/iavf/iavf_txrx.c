@@ -2665,16 +2665,12 @@ static int iavf_xmit_xdp_pkt(void *data, u16 size, struct iavf_ring *xdp_ring)
  */
 int iavf_xmit_xdp_buff(struct xdp_buff *xdp, struct iavf_ring *xdp_ring)
 {
-	struct xdp_frame *xdpf = xdp_convert_buff_to_frame(xdp);
 	int ret;
-
-	if (unlikely(!xdpf))
-		return -ENOSPC;
 
 	if (static_branch_unlikely(&iavf_xdp_locking_key))
 		spin_lock(&xdp_ring->tx_lock);
 
-	ret = iavf_xmit_xdp_pkt(xdpf->data, xdpf->len, xdp_ring);
+	ret = iavf_xmit_xdp_pkt(xdp->data, xdp->data_end - xdp->data, xdp_ring);
 
 	if (static_branch_unlikely(&iavf_xdp_locking_key))
 		spin_unlock(&xdp_ring->tx_lock);
