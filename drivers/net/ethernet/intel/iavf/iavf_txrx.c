@@ -829,17 +829,6 @@ err:
 }
 
 /**
- * iavf_is_xdp_enabled - Check if XDP is enabled on the RX ring
- * @rx_ring: Rx descriptor ring
- *
- * Returns true, if the ring has been configured for XDP.
- */
-static bool iavf_is_xdp_enabled(struct iavf_ring *rx_ring)
-{
-	return !!READ_ONCE(rx_ring->xdp_prog);
-}
-
-/**
  * iavf_rx_offset - Return expected offset into page to access data
  * @rx_ring: Ring we are requesting offset of
  *
@@ -847,11 +836,7 @@ static bool iavf_is_xdp_enabled(struct iavf_ring *rx_ring)
  */
 static inline unsigned int iavf_rx_offset(struct iavf_ring *rx_ring)
 {
-	if (iavf_is_xdp_enabled(rx_ring))
-		return XDP_PACKET_HEADROOM;
-	if (ring_uses_build_skb(rx_ring))
-		return IAVF_SKB_PAD;
-	return 0;
+	return ring_uses_build_skb(rx_ring) ? IAVF_SKB_PAD : 0;
 }
 
 /**
@@ -1198,7 +1183,6 @@ static struct sk_buff *iavf_construct_skb(struct iavf_ring *rx_ring,
 					  struct iavf_rx_buffer *rx_buffer,
 					  struct xdp_buff *xdp)
 {
-	unsigned int metasize = xdp->data - xdp->data_meta;
 	unsigned int size = xdp->data_end - xdp->data;
 	unsigned int truesize = xdp->frame_sz;
 	unsigned int headlen;
@@ -1207,11 +1191,11 @@ static struct sk_buff *iavf_construct_skb(struct iavf_ring *rx_ring,
 	if (!rx_buffer)
 		return NULL;
 	/* prefetch first cache line of first page */
-	net_prefetch(xdp->data_meta);
+	net_prefetch(xdp->data);
 
 	/* allocate a skb to store the frags */
 	skb = __napi_alloc_skb(&rx_ring->q_vector->napi,
-			       IAVF_RX_HDR_SIZE + metasize,
+			       IAVF_RX_HDR_SIZE,
 			       GFP_ATOMIC | __GFP_NOWARN);
 	if (unlikely(!skb))
 		return NULL;
@@ -1223,8 +1207,8 @@ static struct sk_buff *iavf_construct_skb(struct iavf_ring *rx_ring,
 					  IAVF_RX_HDR_SIZE);
 
 	/* align pull length to size of long to optimize memcpy performance */
-	memcpy(__skb_put(skb, headlen + metasize), xdp->data_meta,
-	       ALIGN(headlen + metasize, sizeof(long)));
+	memcpy(__skb_put(skb, headlen), xdp->data,
+	       ALIGN(headlen, sizeof(long)));
 
 	/* update all of the pointers */
 	size -= headlen;
