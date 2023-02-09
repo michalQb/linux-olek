@@ -2585,6 +2585,10 @@ static u16 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
 	u16 rs_idx;
 	u16 i;
 
+	/* Last RS index is invalid in xsk frames */
+	if (!xdp_ring->tx_bi[ntc].raw_buf)
+		return 0;
+
 	rs_idx = xdp_ring->tx_bi[ntc].rs_desc_idx;
 	last_rs_desc = IAVF_TX_DESC(xdp_ring, rs_idx);
 	if (last_rs_desc->cmd_type_offset_bsz &
@@ -2658,6 +2662,7 @@ static int iavf_xmit_xdp_pkt(void *data, u16 size, struct iavf_ring *xdp_ring)
 	tx_desc->buffer_addr = cpu_to_le64(dma);
 	tx_desc->cmd_type_offset_bsz = iavf_build_ctob(IAVF_TX_DESC_CMD_EOP, 0, size, 0);
 
+	xdp_ring->xdp_tx_active++;
 	ntu++;
 
 	if (ntu == xdp_ring->count)

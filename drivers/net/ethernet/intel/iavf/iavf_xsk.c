@@ -572,21 +572,6 @@ static void iavf_xmit_pkt_batch(struct iavf_ring *xdp_ring,
 }
 
 /**
- * iavf_set_rs_bit - set RS bit on last produced descriptor (one behind current NTU)
- * @xdp_ring: XDP ring to produce the HW Tx descriptors on
- */
-static void iavf_set_rs_bit(struct iavf_ring *xdp_ring)
-{
-	u16 ntu = xdp_ring->next_to_use ? xdp_ring->next_to_use - 1 :
-					  xdp_ring->count - 1;
-	struct iavf_tx_desc *tx_desc;
-
-	tx_desc = IAVF_TX_DESC(xdp_ring, ntu);
-	tx_desc->cmd_type_offset_bsz |=
-		cpu_to_le64(IAVF_TX_DESC_CMD_RS << IAVF_TXD_QW1_CMD_SHIFT);
-}
-
-/**
  * iavf_fill_tx_hw_ring - produce the number of Tx descriptors onto ring
  * @xdp_ring: XDP ring to produce the HW Tx descriptors on
  * @descs: AF_XDP descriptors to pull the DMA addresses and lengths from
@@ -597,7 +582,6 @@ static void iavf_fill_tx_hw_ring(struct iavf_ring *xdp_ring,
 				 struct xdp_desc *descs, u32 nb_pkts,
 				 unsigned int *total_bytes)
 {
-	u16 tx_thresh = IAVF_RING_QUARTER(xdp_ring);
 	u32 batched, leftover, i;
 
 	batched = ALIGN_DOWN(nb_pkts, PKTS_PER_BATCH);
@@ -607,16 +591,6 @@ static void iavf_fill_tx_hw_ring(struct iavf_ring *xdp_ring,
 		iavf_xmit_pkt_batch(xdp_ring, &descs[i], total_bytes);
 	for (; i < batched + leftover; i++)
 		iavf_xmit_pkt(xdp_ring, &descs[i], total_bytes);
-
-	if (xdp_ring->next_to_use > xdp_ring->next_rs) {
-		struct iavf_tx_desc *tx_desc;
-
-		tx_desc = IAVF_TX_DESC(xdp_ring, xdp_ring->next_rs);
-		tx_desc->cmd_type_offset_bsz |=
-			cpu_to_le64(IAVF_TX_DESC_CMD_RS <<
-					IAVF_TXD_QW1_CMD_SHIFT);
-		xdp_ring->next_rs += tx_thresh;
-	}
 }
 
 /**
