@@ -560,21 +560,6 @@ static void iavf_xmit_pkt_batch(struct iavf_ring *xdp_ring,
 }
 
 /**
- * iavf_set_rs_bit - set RS bit on last produced descriptor (one behind current NTU)
- * @xdp_ring: XDP ring to produce the HW Tx descriptors on
- */
-static void iavf_set_rs_bit(struct iavf_ring *xdp_ring)
-{
-	u16 ntu = xdp_ring->next_to_use ? xdp_ring->next_to_use - 1 :
-					  xdp_ring->count - 1;
-	struct iavf_tx_desc *tx_desc;
-
-	tx_desc = IAVF_TX_DESC(xdp_ring, ntu);
-	tx_desc->cmd_type_offset_bsz |=
-		cpu_to_le64(IAVF_TX_DESC_CMD_RS << IAVF_TXD_QW1_CMD_SHIFT);
-}
-
-/**
  * iavf_fill_tx_hw_ring - produce the number of Tx descriptors onto ring
  * @xdp_ring: XDP ring to produce the HW Tx descriptors on
  * @descs: AF_XDP descriptors to pull the DMA addresses and lengths from

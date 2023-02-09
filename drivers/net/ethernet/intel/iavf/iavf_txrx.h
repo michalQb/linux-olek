@@ -188,7 +188,12 @@ static inline unsigned int iavf_txd_use_count(unsigned int size)
 #define IAVF_TX_FLAGS_VLAN_SHIFT		16
 
 struct iavf_tx_buffer {
-	struct iavf_tx_desc *next_to_watch;
+
+	/* Track the last frame in batch/packet */
+	union {
+		struct iavf_tx_desc *next_to_watch;	/* on skb TX queue */
+		u16 rs_desc_idx;			/* on XDP queue */
+	};
 	union {
 		struct sk_buff *skb;
 		void *raw_buf;
@@ -245,9 +250,12 @@ struct iavf_ring {
 	u16 next_to_use;
 	u16 next_to_clean;
 
-	/* used for XDP rings only */
-	u16 next_dd;
-	u16 next_rs;
+	u8 atr_sample_rate;
+	u8 atr_count;
+
+	bool ring_active;		/* is ring online or not */
+	bool arm_wb;		/* do something to arm write back */
+	u8 packet_stride;
 
 	u16 flags;
 #define IAVF_TXR_FLAGS_WB_ON_ITR		BIT(0)
@@ -293,6 +301,10 @@ struct iavf_ring {
 } ____cacheline_internodealigned_in_smp;
 
 #define IAVF_RING_QUARTER(R)		((R)->count >> 2)
+#define IAVF_RX_DESC(R, i) (&(((union iavf_32byte_rx_desc *)((R)->desc))[i]))
+#define IAVF_TX_DESC(R, i) (&(((struct iavf_tx_desc *)((R)->desc))[i]))
+#define IAVF_TX_CTXTDESC(R, i) \
+	(&(((struct iavf_tx_context_desc *)((R)->desc))[i]))
 
 #define IAVF_ITR_ADAPTIVE_MIN_INC	0x0002
 #define IAVF_ITR_ADAPTIVE_MIN_USECS	0x0002
@@ -496,23 +508,50 @@ static inline void iavf_release_rx_desc(struct iavf_ring *rx_ring, u32 val)
 #define IAVF_RXQ_XDP_ACT_STOP_NOW	BIT(2)
 
 /**
+ * iavf_set_rs_bit - set RS bit on last produced descriptor.
+ * @xdp_ring: XDP ring to produce the HW Tx descriptors on
+ *
+ * Returns the index of descriptor RS bit was set on (one behind current NTU).
+ */
+static inline u16 iavf_set_rs_bit(struct iavf_ring *xdp_ring)
+{
+	u16 rs_idx = xdp_ring->next_to_use ? xdp_ring->next_to_use - 1 :
+					     xdp_ring->count - 1;
+	struct iavf_tx_desc *tx_desc;
+
+	tx_desc = IAVF_TX_DESC(xdp_ring, rs_idx);
+	tx_desc->cmd_type_offset_bsz |=
+		cpu_to_le64(IAVF_TX_DESC_CMD_RS << IAVF_TXD_QW1_CMD_SHIFT);
+
+	return rs_idx;
+}
+
+/**
  * iavf_finalize_xdp_rx - Finalize XDP actions once per RX ring clean
  * @xdp_ring: XDP TX queue assigned to a given RX ring
  * @rxq_xdp_act: Logical OR of flags of XDP actions that require finalization
+ * @first_idx: index of the first frame in the transmitted batch on XDP queue
  **/
 static inline void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring,
-					u32 rxq_xdp_act)
+					u16 rxq_xdp_act, u32 first_idx)
 {
-	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_REDIR)
-		xdp_do_flush();
+	struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[first_idx];
 
+	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_REDIR)
+		xdp_do_flush_map();
 	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_TX) {
 		if (static_branch_unlikely(&iavf_xdp_locking_key))
 			spin_lock(&xdp_ring->tx_lock);
+		tx_buf->rs_desc_idx = iavf_set_rs_bit(xdp_ring);
 		iavf_xdp_ring_update_tail(xdp_ring);
 		if (static_branch_unlikely(&iavf_xdp_locking_key))
 			spin_unlock(&xdp_ring->tx_lock);
 	}
+}
+
+static inline bool iavf_ring_is_xdp(struct iavf_ring *ring)
+{
+	return !!(ring->flags & IAVF_TXRX_FLAGS_XDP);
 }
 
 #endif /* _IAVF_TXRX_H_ */

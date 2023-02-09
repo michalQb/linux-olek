@@ -80,8 +80,6 @@ void iavf_clean_tx_ring(struct iavf_ring *tx_ring)
 
 	tx_ring->next_to_use = 0;
 	tx_ring->next_to_clean = 0;
-	tx_ring->next_rs = IAVF_RING_QUARTER(tx_ring) - 1;
-	tx_ring->next_dd = IAVF_RING_QUARTER(tx_ring) - 1;
 
 	if (!tx_ring->netdev)
 		return;
@@ -692,8 +690,6 @@ int iavf_setup_tx_descriptors(struct iavf_ring *tx_ring)
 
 	tx_ring->next_to_use = 0;
 	tx_ring->next_to_clean = 0;
-	tx_ring->next_rs = IAVF_RING_QUARTER(tx_ring) - 1;
-	tx_ring->next_dd = IAVF_RING_QUARTER(tx_ring) - 1;
 	tx_ring->prev_pkt_ctr = -1;
 	for (j = 0; j < tx_ring->count; j++) {
 		tx_desc = IAVF_TX_DESC(tx_ring, j);
@@ -1194,10 +1190,13 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 	unsigned int xdp_act;
 	struct xdp_buff xdp;
 	u32 rxq_xdp_act = 0;
+	u16 cached_ntu;
 
 	xdp_prog = rcu_dereference(rx_ring->xdp_prog);
-	if (xdp_prog)
+	if (xdp_prog) {
 		xdp_ring = rx_ring->xdp_ring;
+		cached_ntu = xdp_ring->next_to_use;
+	}
 	xdp_init_buff(&xdp, PAGE_SIZE, &rx_ring->xdp_rxq);
 
 	while (likely(cleaned_count < budget)) {
@@ -1328,7 +1327,7 @@ no_skb:
 	rx_ring->next_to_clean = ntc;
 	rx_ring->skb = skb;
 
-	iavf_finalize_xdp_rx(xdp_ring, rxq_xdp_act);
+	iavf_finalize_xdp_rx(xdp_ring, rxq_xdp_act, cached_ntu);
 
 	if (to_refill >= IAVF_RX_BUFFER_WRITE) {
 		to_refill = __iavf_alloc_rx_pages(rx_ring, to_refill, gfp);
@@ -2291,19 +2290,25 @@ netdev_tx_t iavf_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
  */
 static u32 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
 {
-	u32 batch_sz = IAVF_RING_QUARTER(xdp_ring);
 	struct libie_sq_onstack_stats stats = { };
-	struct iavf_tx_desc *next_dd_desc;
+	struct iavf_tx_desc *last_rs_desc;
 	u32 ntc = xdp_ring->next_to_clean;
 	u32 next_dd = xdp_ring->next_dd;
+	u32 cnt = xdp_ring->count;
+	u16 done_frames = 0;
+	u16 rs_idx;
 	u32 i;
 
-	next_dd_desc = IAVF_TX_DESC(xdp_ring, next_dd);
-	if (!(next_dd_desc->cmd_type_offset_bsz &
-	      cpu_to_le64(IAVF_TX_DESC_DTYPE_DESC_DONE)))
-		return 0;
+	rs_idx = xdp_ring->tx_bi[ntc].rs_desc_idx;
+	last_rs_desc = IAVF_TX_DESC(xdp_ring, rs_idx);
+	if (last_rs_desc->cmd_type_offset_bsz &
+	    cpu_to_le64(IAVF_TX_DESC_DTYPE_DESC_DONE)) {
+		done_frames = rs_idx >= ntc ? rs_idx - ntc + 1 :
+					      rs_idx + cnt - ntc + 1;
+		last_rs_desc->cmd_type_offset_bsz = 0;
+	}
 
-	for (i = 0; i < batch_sz; i++) {
+	for (i = 0; i < done_frames; i++) {
 		struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[ntc];
 
 		stats.bytes += tx_buf->bytecount;
@@ -2322,11 +2327,6 @@ static u32 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
 		if (ntc >= xdp_ring->count)
 			ntc = 0;
 	}
-
-	next_dd_desc->cmd_type_offset_bsz = 0;
-	xdp_ring->next_dd = xdp_ring->next_dd + batch_sz;
-	if (xdp_ring->next_dd > xdp_ring->count)
-		xdp_ring->next_dd = batch_sz - 1;
 
 	xdp_ring->next_to_clean = ntc;
 	iavf_update_tx_ring_stats(xdp_ring, &stats);
@@ -2393,18 +2393,9 @@ static int iavf_xmit_xdp_buff(const struct xdp_buff *xdp,
 						       size, 0);
 
 	ntu++;
-	if (ntu > xdp_ring->next_rs) {
-		tx_desc = IAVF_TX_DESC(xdp_ring, xdp_ring->next_rs);
-		tx_desc->cmd_type_offset_bsz |=
-			cpu_to_le64(IAVF_TX_DESC_CMD_RS <<
-				    IAVF_TXD_QW1_CMD_SHIFT);
-		xdp_ring->next_rs += batch_sz;
-	}
 
-	if (ntu == xdp_ring->count) {
+	if (ntu == xdp_ring->count)
 		ntu = 0;
-		xdp_ring->next_rs = batch_sz - 1;
-	}
 
 	xdp_ring->next_to_use = ntu;
 
