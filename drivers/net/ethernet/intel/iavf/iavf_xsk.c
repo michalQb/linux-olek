@@ -1184,7 +1184,7 @@ construct_skb:
 
 	rx_ring->next_to_clean = ntc;
 
-	iavf_finalize_xdp_rx(xdp_ring, rxq_xdp_act);
+	iavf_finalize_xdp_rx(xdp_ring, rxq_xdp_act, 0);
 
 	to_refill = IAVF_DESC_UNUSED(rx_ring);
 	if (to_refill > IAVF_RING_QUARTER(rx_ring))
