@@ -991,8 +991,7 @@ int iavf_clean_rx_irq_zc(struct iavf_ring *rx_ring, int budget)
 	 * so here it can not be NULL
 	 */
 	xdp_prog = READ_ONCE(rx_ring->xdp_prog);
-	if (xdp_prog)
-		xdp_ring = iavf_get_xdp_ring(rx_ring);
+	xdp_ring = iavf_get_xdp_ring(rx_ring);
 
 	while (likely(total_rx_packets < (unsigned int)budget)) {
 		union iavf_rx_desc *rx_desc;
@@ -1090,7 +1089,7 @@ construct_skb:
 		failure |= !iavf_alloc_rx_buffers_zc(rx_ring, entries_to_alloc);
 
 	if (rxq_xdp_act)
-		iavf_finalize_xdp_rx(xdp_ring, rxq_xdp_act);
+		iavf_finalize_xdp_rx(xdp_ring, rxq_xdp_act, 0);
 
 	iavf_update_rx_ring_stats(rx_ring, total_rx_bytes, total_rx_packets);
 	rx_ring->q_vector->rx.total_packets += total_rx_packets;

@@ -696,7 +696,8 @@ iavf_get_ptype_from_rx_desc(union iavf_rx_desc *rx_desc)
 	       IAVF_RXD_QW1_PTYPE_SHIFT;
 }
 
-void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring, u16 rxq_xdp_act);
+void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring, u16 rxq_xdp_act,
+			  u32 first_idx);
 
 static inline bool iavf_ring_is_xdp(struct iavf_ring *ring)
 {
