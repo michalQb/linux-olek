@@ -259,7 +259,12 @@ static inline unsigned int iavf_txd_use_count(unsigned int size)
 #define IAVF_TX_FLAGS_VLAN_SHIFT		16
 
 struct iavf_tx_buffer {
-	struct iavf_tx_desc *next_to_watch;
+
+	/* Track the last frame in batch/packet */
+	union {
+		struct iavf_tx_desc *next_to_watch;	/* on skb TX queue */
+		u16 rs_desc_idx;			/* on XDP queue */
+	};
 	union {
 		struct sk_buff *skb;
 		void *raw_buf;
@@ -357,10 +362,6 @@ struct iavf_ring {
 	u8 atr_sample_rate;
 	u8 atr_count;
 
-	/* used for XDP rings only */
-	u16 next_dd;
-	u16 next_rs;
-
 	bool ring_active;		/* is ring online or not */
 	bool arm_wb;		/* do something to arm write back */
 	u8 packet_stride;
@@ -403,6 +404,11 @@ struct iavf_ring {
 	struct xsk_buff_pool *xsk_pool;
 	u16 xdp_tx_active;
 } ____cacheline_internodealigned_in_smp;
+
+#define IAVF_RX_DESC(R, i) (&(((union iavf_32byte_rx_desc *)((R)->desc))[i]))
+#define IAVF_TX_DESC(R, i) (&(((struct iavf_tx_desc *)((R)->desc))[i]))
+#define IAVF_TX_CTXTDESC(R, i) \
+	(&(((struct iavf_tx_context_desc *)((R)->desc))[i]))
 
 static inline bool ring_uses_build_skb(struct iavf_ring *ring)
 {
@@ -696,4 +702,24 @@ static inline bool iavf_ring_is_xdp(struct iavf_ring *ring)
 {
 	return !!(ring->flags & IAVF_TXRX_FLAGS_XDP);
 }
+
+/**
+ * iavf_set_rs_bit - set RS bit on last produced descriptor.
+ * @xdp_ring: XDP ring to produce the HW Tx descriptors on
+ *
+ * Returns the index of descriptor RS bit was set on (one behind current NTU).
+ */
+static inline u16 iavf_set_rs_bit(struct iavf_ring *xdp_ring)
+{
+	u16 rs_idx = xdp_ring->next_to_use ? xdp_ring->next_to_use - 1 :
+					     xdp_ring->count - 1;
+	struct iavf_tx_desc *tx_desc;
+
+	tx_desc = IAVF_TX_DESC(xdp_ring, rs_idx);
+	tx_desc->cmd_type_offset_bsz |=
+		cpu_to_le64(IAVF_TX_DESC_CMD_RS << IAVF_TXD_QW1_CMD_SHIFT);
+
+	return rs_idx;
+}
+
 #endif /* _IAVF_TXRX_H_ */

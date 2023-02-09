@@ -74,8 +74,6 @@ tx_skip_free:
 
 	tx_ring->next_to_use = 0;
 	tx_ring->next_to_clean = 0;
-	tx_ring->next_rs = IAVF_RING_QUARTER(tx_ring) - 1;
-	tx_ring->next_dd = IAVF_RING_QUARTER(tx_ring) - 1;
 
 	if (!tx_ring->netdev)
 		return;
@@ -673,8 +671,6 @@ int iavf_setup_tx_descriptors(struct iavf_ring *tx_ring)
 
 	tx_ring->next_to_use = 0;
 	tx_ring->next_to_clean = 0;
-	tx_ring->next_rs = IAVF_RING_QUARTER(tx_ring) - 1;
-	tx_ring->next_dd = IAVF_RING_QUARTER(tx_ring) - 1;
 	tx_ring->tx_stats.prev_pkt_ctr = -1;
 	for (j = 0; j < tx_ring->count; j++) {
 		tx_desc = IAVF_TX_DESC(tx_ring, j);
@@ -1464,14 +1460,19 @@ xdp_err:
  * iavf_finalize_xdp_rx - Finalize XDP actions once per RX ring clean
  * @xdp_ring: XDP TX queue assigned to a given RX ring
  * @rxq_xdp_act: Logical OR of flags of XDP actions that require finalization
+ * @first_idx: index of the first frame in the transmitted batch on XDP queue
  **/
-void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring, u16 rxq_xdp_act)
+void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring, u16 rxq_xdp_act,
+			  u32 first_idx)
 {
+	struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[first_idx];
+
 	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_REDIR)
 		xdp_do_flush_map();
 	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_TX) {
 		if (static_branch_unlikely(&iavf_xdp_locking_key))
 			spin_lock(&xdp_ring->tx_lock);
+		tx_buf->rs_desc_idx = iavf_set_rs_bit(xdp_ring);
 		iavf_xdp_ring_update_tail(xdp_ring);
 		if (static_branch_unlikely(&iavf_xdp_locking_key))
 			spin_unlock(&xdp_ring->tx_lock);
@@ -1501,11 +1502,14 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 	unsigned int xdp_act;
 	struct xdp_buff xdp;
 	u16 rxq_xdp_act = 0;
+	u16 cached_ntu;
 
 	iavf_init_xdp_buff(&xdp, rx_ring);
 	xdp_prog = rcu_dereference(rx_ring->xdp_prog);
-	if (xdp_prog)
+	if (xdp_prog) {
 		xdp_ring = iavf_get_xdp_ring(rx_ring);
+		cached_ntu = xdp_ring->next_to_use;
+	}
 
 	while (likely(total_rx_packets < (unsigned int)budget)) {
 		struct iavf_rx_buffer *rx_buffer;
@@ -1626,8 +1630,8 @@ skip_skb:
 	iavf_update_rx_ring_stats(rx_ring, total_rx_bytes, total_rx_packets);
 	rx_ring->q_vector->rx.total_packets += total_rx_packets;
 	rx_ring->q_vector->rx.total_bytes += total_rx_bytes;
-	if (xdp_prog && rxq_xdp_act)
-		iavf_finalize_xdp_rx(xdp_ring, rxq_xdp_act);
+	if (rxq_xdp_act)
+		iavf_finalize_xdp_rx(xdp_ring, rxq_xdp_act, cached_ntu);
 
 	/* guarantee a trip back through this routine if there was a failure */
 	return failure ? budget : (int)total_rx_packets;
@@ -2574,18 +2578,23 @@ netdev_tx_t iavf_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 static u16 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
 {
 	unsigned int total_bytes = 0, total_pkts = 0;
-	u16 batch_sz = IAVF_RING_QUARTER(xdp_ring);
-	u16 next_dd = xdp_ring->next_dd;
 	u16 ntc = xdp_ring->next_to_clean;
-	struct iavf_tx_desc *next_dd_desc;
+	struct iavf_tx_desc *last_rs_desc;
+	u16 cnt = xdp_ring->count;
+	u16 done_frames = 0;
+	u16 rs_idx;
 	u16 i;
 
-	next_dd_desc = IAVF_TX_DESC(xdp_ring, next_dd);
-	if (!(next_dd_desc->cmd_type_offset_bsz &
-	      cpu_to_le64(IAVF_TX_DESC_DTYPE_DESC_DONE)))
-		return 0;
+	rs_idx = xdp_ring->tx_bi[ntc].rs_desc_idx;
+	last_rs_desc = IAVF_TX_DESC(xdp_ring, rs_idx);
+	if (last_rs_desc->cmd_type_offset_bsz &
+	    cpu_to_le64(IAVF_TX_DESC_DTYPE_DESC_DONE)) {
+		done_frames = rs_idx >= ntc ? rs_idx - ntc + 1 :
+					      rs_idx + cnt - ntc + 1;
+		last_rs_desc->cmd_type_offset_bsz = 0;
+	}
 
-	for (i = 0; i < batch_sz; i++) {
+	for (i = 0; i < done_frames; i++) {
 		struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[ntc];
 
 		total_bytes += tx_buf->bytecount;
@@ -2604,11 +2613,6 @@ static u16 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
 		if (ntc >= xdp_ring->count)
 			ntc = 0;
 	}
-
-	next_dd_desc->cmd_type_offset_bsz = 0;
-	xdp_ring->next_dd = xdp_ring->next_dd + batch_sz;
-	if (xdp_ring->next_dd > xdp_ring->count)
-		xdp_ring->next_dd = batch_sz - 1;
 
 	xdp_ring->next_to_clean = ntc;
 	iavf_update_tx_ring_stats(xdp_ring, total_pkts, total_bytes);
@@ -2655,18 +2659,9 @@ static int iavf_xmit_xdp_pkt(void *data, u16 size, struct iavf_ring *xdp_ring)
 	tx_desc->cmd_type_offset_bsz = iavf_build_ctob(IAVF_TX_DESC_CMD_EOP, 0, size, 0);
 
 	ntu++;
-	if (ntu > xdp_ring->next_rs) {
-		tx_desc = IAVF_TX_DESC(xdp_ring, xdp_ring->next_rs);
-		tx_desc->cmd_type_offset_bsz |=
-			cpu_to_le64(IAVF_TX_DESC_CMD_RS <<
-				    IAVF_TXD_QW1_CMD_SHIFT);
-		xdp_ring->next_rs += batch_sz;
-	}
 
-	if (ntu == xdp_ring->count) {
+	if (ntu == xdp_ring->count)
 		ntu = 0;
-		xdp_ring->next_rs = batch_sz - 1;
-	}
 
 	xdp_ring->next_to_use = ntu;
 	return 0;
