@@ -2423,6 +2423,7 @@ int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 		  u32 flags)
 {
 	struct iavf_adapter *adapter = netdev_priv(dev);
+	struct iavf_tx_buffer *tx_buf;
 	struct iavf_ring *xdp_ring;
 	u32 queue_index, nxmit = 0;
 	int err = 0;
@@ -2447,6 +2448,7 @@ int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 	if (static_branch_unlikely(&iavf_xdp_locking_key))
 		spin_lock(&xdp_ring->tx_lock);
 
+	tx_buf = &xdp_ring->tx_bi[xdp_ring->next_to_use];
 	for (u32 i = 0; i < n; i++) {
 		struct xdp_frame *xdpf = frames[i];
 		struct xdp_buff xdp;
@@ -2459,6 +2461,8 @@ int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 		nxmit++;
 	}
 
+	if (likely(nxmit))
+		tx_buf->rs_desc_idx = iavf_set_rs_bit(xdp_ring);
 	if (flags & XDP_XMIT_FLUSH)
 		iavf_xdp_ring_update_tail(xdp_ring);
 
