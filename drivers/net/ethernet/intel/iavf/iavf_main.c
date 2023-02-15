@@ -455,7 +455,7 @@ iavf_map_vector_to_rxq(struct iavf_adapter *adapter, int v_idx, int r_idx)
 	q_vector->rx.count++;
 	q_vector->rx.next_update = jiffies + 1;
 	q_vector->rx.target_itr = ITR_TO_REG(rx_ring->itr_setting);
-	q_vector->ring_mask |= BIT(r_idx);
+	q_vector->rx_ring_mask |= BIT(r_idx);
 	wr32(hw, IAVF_VFINT_ITRN1(IAVF_RX_ITR, q_vector->reg_idx),
 	     q_vector->rx.current_itr >> 1);
 	q_vector->rx.current_itr = q_vector->rx.target_itr;
@@ -484,7 +484,7 @@ iavf_map_vector_to_txq(struct iavf_adapter *adapter, int v_idx, int t_idx,
 	q_vector->tx.count++;
 	q_vector->tx.next_update = jiffies + 1;
 	q_vector->tx.target_itr = ITR_TO_REG(tx_ring->itr_setting);
-	q_vector->num_ringpairs++;
+	q_vector->tx_ring_mask |= BIT(t_idx);
 	wr32(hw, IAVF_VFINT_ITRN1(IAVF_TX_ITR, q_vector->reg_idx),
 	     q_vector->tx.target_itr >> 1);
 	q_vector->tx.current_itr = q_vector->tx.target_itr;
@@ -513,6 +513,8 @@ static void iavf_map_rings_to_vectors(struct iavf_adapter *adapter)
 		iavf_map_vector_to_txq(adapter, vidx, ridx, false);
 		if (iavf_adapter_xdp_active(adapter))
 			iavf_map_vector_to_txq(adapter, vidx, ridx, true);
+
+		adapter->q_vectors[vidx].num_ringpairs++;
 
 		/* In the case where we have more queues than vectors, continue
 		 * round-robin on vectors until all queues are mapped.
@@ -550,7 +552,8 @@ static void iavf_unmap_rings_from_vectors(struct iavf_adapter *adapter)
 		q_vector->rx.next_update = 0;
 		q_vector->rx.target_itr = 0;
 		q_vector->rx.current_itr = 0;
-		q_vector->ring_mask = 0;
+		q_vector->rx_ring_mask = 0;
+		q_vector->tx_ring_mask = 0;
 	}
 
 	for (i = 0; i < adapter->num_active_queues; i++) {
