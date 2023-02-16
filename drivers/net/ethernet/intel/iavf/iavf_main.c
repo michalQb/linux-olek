@@ -484,7 +484,7 @@ iavf_map_vector_to_txq(struct iavf_adapter *adapter, int v_idx, int t_idx,
 	q_vector->tx.count++;
 	q_vector->tx.next_update = jiffies + 1;
 	q_vector->tx.target_itr = ITR_TO_REG(tx_ring->itr_setting);
-	q_vector->tx_ring_mask |= BIT(t_idx);
+	q_vector->tx_ring_mask |= BIT(tx_ring->queue_index);
 	wr32(hw, IAVF_VFINT_ITRN1(IAVF_TX_ITR, q_vector->reg_idx),
 	     q_vector->tx.target_itr >> 1);
 	q_vector->tx.current_itr = q_vector->tx.target_itr;
