@@ -3638,6 +3638,22 @@ static int iavf_setup_all_tx_resources(struct iavf_adapter *adapter)
 }
 
 /**
+ * iavf_rx_xsk_pool - Get a valid xsk pool for RX ring
+ * @rx_ring: Rx ring being configured
+ *
+ * Do not return a xsk pool, if socket is TX-only
+ **/
+static struct xsk_buff_pool *iavf_rx_xsk_pool(struct iavf_ring *rx_ring)
+{
+	struct xsk_buff_pool *xsk_pool = iavf_xsk_pool(rx_ring);
+
+	if (xsk_pool && xsk_buff_can_alloc(xsk_pool, 1))
+		return xsk_pool;
+
+	return NULL;
+}
+
+/**
  * iavf_setup_all_rx_resources - allocate all queues Rx resources
  * @adapter: board private structure
  *
@@ -3649,10 +3665,14 @@ static int iavf_setup_all_tx_resources(struct iavf_adapter *adapter)
  **/
 static int iavf_setup_all_rx_resources(struct iavf_adapter *adapter)
 {
+	struct iavf_ring *rx_ring;
 	int i, err = 0;
 
 	for (i = 0; i < adapter->num_active_queues; i++) {
-		adapter->rx_rings[i].count = adapter->rx_desc_count;
+		rx_ring = &adapter->rx_rings[i];
+		rx_ring->count = adapter->rx_desc_count;
+		rx_ring->xsk_pool = iavf_rx_xsk_pool(rx_ring);
+
 		err = iavf_setup_rx_descriptors(&adapter->rx_rings[i]);
 		if (!err)
 			continue;
