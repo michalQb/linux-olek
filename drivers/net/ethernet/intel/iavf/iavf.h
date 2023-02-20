@@ -530,6 +530,35 @@ static inline bool iavf_adapter_xdp_active(struct iavf_adapter *adapter)
 	return !!READ_ONCE(adapter->xdp_prog);
 }
 
+static inline struct xsk_buff_pool *iavf_xsk_pool(struct iavf_ring *ring)
+{
+	struct iavf_adapter *adapter = ring->vsi->back;
+	struct iavf_vsi *vsi = ring->vsi;
+	u16 qid = ring->queue_index;
+
+	if (!iavf_adapter_xdp_active(adapter) ||
+	    !test_bit(qid, adapter->af_xdp_zc_qps))
+		return NULL;
+
+	return xsk_get_pool_from_qid(vsi->netdev, qid);
+}
+
+/**
+ * iavf_rx_xsk_pool - Get a valid xsk pool for RX ring
+ * @rx_ring: Rx ring being configured
+ *
+ * Do not return a xsk pool, if socket is TX-only
+ **/
+static inline struct xsk_buff_pool *iavf_rx_xsk_pool(struct iavf_ring *rx_ring)
+{
+	struct xsk_buff_pool *xsk_pool = iavf_xsk_pool(rx_ring);
+
+	if (xsk_pool && xsk_buff_can_alloc(xsk_pool, 1))
+		return xsk_pool;
+
+	return NULL;
+}
+
 int iavf_up(struct iavf_adapter *adapter);
 void iavf_down(struct iavf_adapter *adapter);
 int iavf_process_config(struct iavf_adapter *adapter);
