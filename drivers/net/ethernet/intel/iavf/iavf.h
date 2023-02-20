@@ -558,6 +558,22 @@ static inline struct xsk_buff_pool *iavf_xsk_pool(struct iavf_ring *ring)
 	return xsk_get_pool_from_qid(vsi->netdev, qid);
 }
 
+/**
+ * iavf_rx_xsk_pool - Get a valid xsk pool for RX ring
+ * @rx_ring: Rx ring being configured
+ *
+ * Do not return a xsk pool, if socket is TX-only
+ **/
+static inline struct xsk_buff_pool *iavf_rx_xsk_pool(struct iavf_ring *rx_ring)
+{
+	struct xsk_buff_pool *xsk_pool = iavf_xsk_pool(rx_ring);
+
+	if (xsk_pool && xsk_buff_can_alloc(xsk_pool, 1))
+		return xsk_pool;
+
+	return NULL;
+}
+
 static inline struct xsk_buff_pool *iavf_tx_xsk_pool(struct iavf_ring *ring)
 {
 	struct iavf_adapter *adapter = ring->vsi->back;
