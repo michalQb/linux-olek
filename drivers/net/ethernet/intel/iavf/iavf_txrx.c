@@ -29,8 +29,6 @@ static void iavf_unmap_and_free_tx_resource(struct iavf_ring *ring,
 	if (tx_buffer->skb) {
 		if (tx_buffer->tx_flags & IAVF_TX_FLAGS_FD_SB)
 			kfree(tx_buffer->raw_buf);
-		else if (ring->flags & IAVF_TXRX_FLAGS_XDP)
-			page_frag_free(tx_buffer->raw_buf);
 		else
 			dev_kfree_skb_any(tx_buffer->skb);
 		if (dma_unmap_len(tx_buffer, len))
