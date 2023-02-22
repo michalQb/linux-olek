@@ -187,6 +187,18 @@ static inline unsigned int iavf_txd_use_count(unsigned int size)
 #define IAVF_TX_FLAGS_VLAN_PRIO_SHIFT		29
 #define IAVF_TX_FLAGS_VLAN_SHIFT		16
 
+/**
+ * enum iavf_xdp_buffer_type - type of &iavf_tx_buffer on XDP queue
+ * @IAVF_XDP_BUFFER_NONE: unused, no action required
+ * @IAVF_XDP_BUFFER_TX: free according to our memory model
+ * @IAVF_XDP_BUFFER_FRAME: use xdp_return_frame()
+ */
+enum iavf_xdp_buffer_type {
+	IAVF_XDP_BUFFER_NONE	= 0U,
+	IAVF_XDP_BUFFER_TX,
+	IAVF_XDP_BUFFER_FRAME,
+};
+
 struct iavf_tx_buffer {
 
 	/* Track the last frame in batch/packet */
@@ -200,6 +212,7 @@ struct iavf_tx_buffer {
 	};
 	unsigned int bytecount;
 	unsigned short gso_segs;
+	unsigned short xdp_type;
 
 	DEFINE_DMA_UNMAP_ADDR(dma);
 	DEFINE_DMA_UNMAP_LEN(len);
