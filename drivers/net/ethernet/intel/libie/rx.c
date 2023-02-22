@@ -110,6 +110,25 @@ EXPORT_SYMBOL_NS_GPL(libie_rx_ptype_lut, LIBIE);
 /* Page Pool */
 
 /**
+ * libie_rx_sync_len - get the actual buffer size to be synced and passed to HW
+ * @dev: &net_device to calculate the size for
+ * @hr: headroom in front of each frame
+ *
+ * Returns the buffer size to pass it to HW and use for DMA synchronization
+ * for the MTU the @dev has.
+ */
+static u32 libie_rx_sync_len(const struct net_device *dev, u32 hr)
+{
+	u32 len;
+
+	len = READ_ONCE(dev->mtu) + LIBIE_RX_LL_LEN;
+	len = ALIGN(len, LIBIE_RX_BUF_LEN_ALIGN);
+	len = min(len, LIBIE_RX_BUF_LEN(hr));
+
+	return len;
+}
+
+/**
  * libie_rx_page_pool_create - create a PP with the default libie settings
  * @dev: &net_device which a PP will be created for
  * @size: size of the PP, usually simply Rx queue len
@@ -119,6 +138,7 @@ EXPORT_SYMBOL_NS_GPL(libie_rx_ptype_lut, LIBIE);
 struct page_pool *libie_rx_page_pool_create(const struct net_device *dev,
 					    u32 size)
 {
+	u32 hr = LIBIE_SKB_HEADROOM;
 	const struct page_pool_params pp = {
 		.flags		= PP_FLAG_DMA_MAP | PP_FLAG_DMA_MAP_WEAK |
 				  PP_FLAG_DMA_SYNC_DEV,
@@ -127,8 +147,8 @@ struct page_pool *libie_rx_page_pool_create(const struct net_device *dev,
 		.nid		= NUMA_NO_NODE,
 		.dev		= dev->dev.parent,
 		.dma_dir	= DMA_FROM_DEVICE,
-		.max_len	= LIBIE_RX_BUF_LEN,
-		.offset		= LIBIE_SKB_HEADROOM,
+		.max_len	= libie_rx_sync_len(dev, hr),
+		.offset		= hr,
 	};
 
 	static_assert((PP_FLAG_DMA_MAP | PP_FLAG_DMA_MAP_WEAK) ==
