@@ -179,7 +179,7 @@ static inline unsigned int iavf_txd_use_count(unsigned int size)
 #define IAVF_TX_FLAGS_IPV6			BIT(5)
 #define IAVF_TX_FLAGS_FCCRC			BIT(6)
 #define IAVF_TX_FLAGS_FSO			BIT(7)
-#define IAVF_TX_FLAGS_FD_SB			BIT(9)
+/* BIT(9) is free, was IAVF_TX_FLAGS_FD_SB */
 #define IAVF_TX_FLAGS_VXLAN_TUNNEL		BIT(10)
 #define IAVF_TX_FLAGS_HW_OUTER_SINGLE_VLAN	BIT(11)
 #define IAVF_TX_FLAGS_VLAN_MASK			0xffff0000
