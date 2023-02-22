@@ -132,6 +132,8 @@ static inline void libie_skb_set_hash(struct sk_buff *skb, u32 hash,
 
 /* Space reserved in front of each frame */
 #define LIBIE_SKB_HEADROOM	(NET_SKB_PAD + NET_IP_ALIGN)
+/* Maximum headroom to calculate max MTU below */
+#define LIBIE_MAX_HEADROOM	LIBIE_SKB_HEADROOM
 /* Link layer / L2 overhead: Ethernet, 2 VLAN tags (C + S), FCS */
 #define LIBIE_RX_LL_LEN		(ETH_HLEN + 2 * VLAN_HLEN + ETH_FCS_LEN)
 
@@ -143,22 +145,23 @@ static inline void libie_skb_set_hash(struct sk_buff *skb, u32 hash,
 /* HW-writeable space in one buffer: truesize - headroom/tailroom,
  * HW-aligned
  */
-#define __LIBIE_RX_BUF_LEN						    \
-	ALIGN_DOWN(SKB_MAX_ORDER(LIBIE_SKB_HEADROOM, LIBIE_RX_PAGE_ORDER),  \
+#define __LIBIE_RX_BUF_LEN(hr)						    \
+	ALIGN_DOWN(SKB_MAX_ORDER(hr, LIBIE_RX_PAGE_ORDER),		    \
 		   LIBIE_RX_BUF_LEN_ALIGN)
 /* The largest size for a single descriptor as per HW */
 #define LIBIE_MAX_RX_BUF_LEN	9728U
 /* "True" HW-writeable space: minimum from SW and HW values */
-#define LIBIE_RX_BUF_LEN	min_t(u32, __LIBIE_RX_BUF_LEN,		    \
+#define LIBIE_RX_BUF_LEN(hr)	min_t(u32, __LIBIE_RX_BUF_LEN(hr),	    \
 				      LIBIE_MAX_RX_BUF_LEN)
 
 /* The maximum frame size as per HW (S/G) */
 #define __LIBIE_MAX_RX_FRM_LEN	16382U
 /* ATST, HW can chain up to 5 Rx descriptors */
-#define LIBIE_MAX_RX_FRM_LEN	min_t(u32, __LIBIE_MAX_RX_FRM_LEN,	    \
-				      LIBIE_RX_BUF_LEN * 5)
+#define LIBIE_MAX_RX_FRM_LEN(hr)					    \
+	min_t(u32, __LIBIE_MAX_RX_FRM_LEN, LIBIE_RX_BUF_LEN(hr) * 5)
 /* Maximum frame size minus LL overhead */
-#define LIBIE_MAX_MTU		(LIBIE_MAX_RX_FRM_LEN - LIBIE_RX_LL_LEN)
+#define LIBIE_MAX_MTU		(LIBIE_MAX_RX_FRM_LEN(LIBIE_MAX_HEADROOM) - \
+				 LIBIE_RX_LL_LEN)
 
 /* DMA mapping attributes for Rx buffers: no impl. sync + relaxed on Sparc */
 #define LIBIE_RX_DMA_ATTR						    \

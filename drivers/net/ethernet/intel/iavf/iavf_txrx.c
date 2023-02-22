@@ -868,6 +868,7 @@ static u32 __iavf_alloc_rx_pages(struct iavf_ring *rx_ring, u32 to_refill,
 	struct page_pool *pool = rx_ring->pool;
 	u32 ntu = rx_ring->next_to_use;
 	union iavf_rx_desc *rx_desc;
+	u32 hr = pool->p.offset;
 
 	/* do nothing if no valid netdev defined */
 	if (unlikely(!rx_ring->netdev || !to_refill))
@@ -889,7 +890,7 @@ static u32 __iavf_alloc_rx_pages(struct iavf_ring *rx_ring, u32 to_refill,
 		/* Refresh the desc even if buffer_addrs didn't change
 		 * because each write-back erases this info.
 		 */
-		rx_desc->read.pkt_addr = cpu_to_le64(dma + LIBIE_SKB_HEADROOM);
+		rx_desc->read.pkt_addr = cpu_to_le64(dma + hr);
 
 		rx_desc++;
 		ntu++;
@@ -1028,35 +1029,36 @@ void iavf_process_skb_fields(struct iavf_ring *rx_ring,
  * iavf_add_rx_frag - Add contents of Rx buffer to sk_buff
  * @skb: sk_buff to place the data into
  * @page: page containing data to add
+ * @hr: headroom in front of the data
  * @size: packet length from rx_desc
  *
  * This function will add the data contained in page to the skb.
  * It will just attach the page as a frag to the skb.
- *
- * The function will then update the page offset.
- **/
-static void iavf_add_rx_frag(struct sk_buff *skb, struct page *page, u32 size)
+ */
+static void iavf_add_rx_frag(struct sk_buff *skb, struct page *page, u32 hr,
+			     u32 size)
 {
-	skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, page,
-			LIBIE_SKB_HEADROOM, size, LIBIE_RX_TRUESIZE);
+	skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, page, hr, size,
+			LIBIE_RX_TRUESIZE);
 }
 
 /**
  * iavf_build_skb - Build skb around an existing buffer
  * @page: Rx page to with the data
+ * @hr: headroom in front of the data
  * @size: size of the data
  *
  * This function builds an skb around an existing Rx buffer, taking care
  * to set up the skb correctly and avoid any memcpy overhead.
  */
-static struct sk_buff *iavf_build_skb(struct page *page, u32 size)
+static struct sk_buff *iavf_build_skb(struct page *page, u32 hr, u32 size)
 {
 	struct sk_buff *skb;
 	void *va;
 
 	/* prefetch first cache line of first page */
 	va = page_address(page);
-	net_prefetch(va + LIBIE_SKB_HEADROOM);
+	net_prefetch(va + hr);
 
 	/* build an skb around the page buffer */
 	skb = napi_build_skb(va, LIBIE_RX_TRUESIZE);
@@ -1066,7 +1068,7 @@ static struct sk_buff *iavf_build_skb(struct page *page, u32 size)
 	skb_mark_for_recycle(skb);
 
 	/* update pointers within the skb to store the data */
-	skb_reserve(skb, LIBIE_SKB_HEADROOM);
+	skb_reserve(skb, hr);
 	__skb_put(skb, size);
 
 	return skb;
@@ -1109,6 +1111,7 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 	struct sk_buff *skb = rx_ring->skb;
 	u32 ntc = rx_ring->next_to_clean;
 	u32 ring_size = rx_ring->count;
+	u32 hr = pool->p.offset;
 	u32 cleaned_count = 0;
 
 	while (likely(cleaned_count < budget)) {
@@ -1165,9 +1168,9 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 
 		/* retrieve a buffer from the ring */
 		if (skb)
-			iavf_add_rx_frag(skb, page, size);
+			iavf_add_rx_frag(skb, page, hr, size);
 		else
-			skb = iavf_build_skb(page, size);
+			skb = iavf_build_skb(page, hr, size);
 
 		/* exit if we failed to retrieve a buffer */
 		if (!skb) {

@@ -411,10 +411,11 @@ int iavf_get_vf_vlan_v2_caps(struct iavf_adapter *adapter)
  */
 static void iavf_set_qp_config_info(struct virtchnl_queue_pair_info *vqpi,
 				    struct iavf_adapter *adapter,
-				    int queue_index, int max_frame,
+				    int queue_index, u32 max_frame,
 				    bool xdp_pair)
 {
 	struct iavf_ring *rxq = &adapter->rx_rings[queue_index];
+	const struct page_pool_params *pp = &rxq->pool->p;
 	struct iavf_ring *txq;
 	int xdpq_idx;
 
@@ -436,10 +437,12 @@ static void iavf_set_qp_config_info(struct virtchnl_queue_pair_info *vqpi,
 		return;
 	}
 
+	max_frame = min_not_zero(max_frame, LIBIE_MAX_RX_FRM_LEN(pp->offset));
+
 	vqpi->rxq.ring_len = rxq->count;
 	vqpi->rxq.dma_ring_addr = rxq->dma;
 	vqpi->rxq.max_pkt_size = max_frame;
-	vqpi->rxq.databuffer_size = LIBIE_RX_BUF_LEN;
+	vqpi->rxq.databuffer_size = pp->max_len;
 }
 
 /**
@@ -463,8 +466,6 @@ int iavf_configure_selected_queues(struct iavf_adapter *adapter, u32 qp_mask,
 	struct virtchnl_vsi_queue_config_info *vqci;
 	struct virtchnl_queue_pair_info *vqpi;
 	size_t len;
-
-	max_frame = min_not_zero(max_frame, LIBIE_MAX_RX_FRM_LEN);
 
 	if (adapter->current_op != VIRTCHNL_OP_UNKNOWN) {
 		/* bail because we already have a command pending */
