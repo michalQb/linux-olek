@@ -47,8 +47,18 @@ static void iavf_unmap_and_free_tx_resource(struct iavf_ring *ring,
  */
 static void iavf_free_xdp_resource(struct iavf_tx_buffer *tx_buffer)
 {
-	page_frag_free(tx_buffer->raw_buf);
-	tx_buffer->raw_buf = NULL;
+	switch (tx_buffer->xdp_type) {
+	case IAVF_XDP_BUFFER_TX:
+		page_frag_free(tx_buffer->raw_buf);
+		tx_buffer->raw_buf = NULL;
+		break;
+	case IAVF_XDP_BUFFER_FRAME:
+		xdp_return_frame(tx_buffer->xdpf);
+		tx_buffer->xdpf = NULL;
+		break;
+	}
+
+	tx_buffer->xdp_type = IAVF_XDP_BUFFER_NONE;
 }
 
 /**
@@ -2375,13 +2385,13 @@ static u32 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
  * iavf_xmit_xdp_buff - submit single buffer to XDP ring for transmission
  * @xdp: XDP buffer pointer
  * @xdp_ring: XDP ring for transmission
- * @map: whether to map the buffer
+ * @frame: whether the function is called from .ndo_xdp_xmit()
  *
  * Returns negative on failure, 0 on success.
  */
 static int iavf_xmit_xdp_buff(const struct xdp_buff *xdp,
 			      struct iavf_ring *xdp_ring,
-			      bool map)
+			      bool frame)
 {
 	u32 batch_sz = IAVF_RING_QUARTER(xdp_ring);
 	u32 size = xdp->data_end - xdp->data;
@@ -2400,7 +2410,7 @@ static int iavf_xmit_xdp_buff(const struct xdp_buff *xdp,
 		return -EBUSY;
 	}
 
-	if (map) {
+	if (frame) {
 		dma = dma_map_single(xdp_ring->dev, data, size, DMA_TO_DEVICE);
 		if (dma_mapping_error(xdp_ring->dev, dma))
 			return -ENOMEM;
@@ -2416,11 +2426,13 @@ static int iavf_xmit_xdp_buff(const struct xdp_buff *xdp,
 	tx_buff = &xdp_ring->tx_bi[ntu];
 	tx_buff->bytecount = size;
 	tx_buff->gso_segs = 1;
-	/* TODO: set type to XDP_TX or XDP_XMIT depending on @map and assign
-	 * either ->data_hard_start (which is pointer to xdp_frame) or @page
-	 * above.
-	 */
-	tx_buff->raw_buf = data;
+	if (frame) {
+		tx_buff->xdp_type = IAVF_XDP_BUFFER_FRAME;
+		tx_buff->xdpf = xdp->data_hard_start;
+	} else {
+		tx_buff->xdp_type = IAVF_XDP_BUFFER_TX;
+		tx_buff->raw_buf = data;
+	}
 
 	/* record length, and DMA address */
 	dma_unmap_len_set(tx_buff, len, size);
@@ -2495,8 +2507,11 @@ int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 
 		xdp_convert_frame_to_buff(xdpf, &xdp);
 		err = iavf_xmit_xdp_buff(&xdp, xdp_ring, true);
-		if (unlikely(err))
+		if (unlikely(err)) {
+			netdev_err(dev, "XDP frame TX failed, error: %d\n",
+				   err);
 			break;
+		}
 
 		nxmit++;
 	}

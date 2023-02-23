@@ -207,8 +207,9 @@ struct iavf_tx_buffer {
 		u16 rs_desc_idx;			/* on XDP queue */
 	};
 	union {
-		struct sk_buff *skb;
-		void *raw_buf;
+		struct sk_buff *skb;		/* used for .ndo_start_xmit() */
+		void *raw_buf;			/* used for XDP_TX */
+		struct xdp_frame *xdpf;		/* used for .ndo_xdp_xmit() */
 	};
 	unsigned int bytecount;
 	unsigned short gso_segs;
