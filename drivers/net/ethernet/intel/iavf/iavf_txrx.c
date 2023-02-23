@@ -2366,8 +2366,7 @@ static u32 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
 		dma_unmap_single(xdp_ring->dev, dma_unmap_addr(tx_buf, dma),
 				 dma_unmap_len(tx_buf, len), DMA_TO_DEVICE);
 		dma_unmap_len_set(tx_buf, len, 0);
-		page_frag_free(tx_buf->raw_buf);
-		tx_buf->raw_buf = NULL;
+		iavf_free_xdp_resource(tx_buf);
 
 		ntc++;
 		if (ntc >= xdp_ring->count)
