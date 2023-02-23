@@ -2376,6 +2376,8 @@ static u32 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
  * @xdp: XDP buffer pointer
  * @xdp_ring: XDP ring for transmission
  * @map: whether to map the buffer
+ *
+ * Returns negative on failure, 0 on success.
  */
 static int iavf_xmit_xdp_buff(const struct xdp_buff *xdp,
 			      struct iavf_ring *xdp_ring,
