@@ -441,11 +441,18 @@ failure:
 static void
 iavf_clean_xdp_tx_buf(struct iavf_ring *xdp_ring, struct iavf_tx_buffer *tx_buf)
 {
-	xdp_return_frame((struct xdp_frame *)tx_buf->raw_buf);
+	switch (tx_buf->xdp_type) {
+	case IAVF_XDP_BUFFER_FRAME:
+		dma_unmap_single(xdp_ring->dev, dma_unmap_addr(tx_buf, dma),
+				 dma_unmap_len(tx_buf, len), DMA_TO_DEVICE);
+		dma_unmap_len_set(tx_buf, len, 0);
+		xdp_return_frame(tx_buf->xdpf);
+		tx_buf->xdpf = NULL;
+		break;
+	}
+
 	xdp_ring->xdp_tx_active--;
-	dma_unmap_single(xdp_ring->xsk_pool->dev, dma_unmap_addr(tx_buf, dma),
-			 dma_unmap_len(tx_buf, len), DMA_TO_DEVICE);
-	dma_unmap_len_set(tx_buf, len, 0);
+	tx_buf->xdp_type = IAVF_XDP_BUFFER_NONE;
 }
 
 /**
@@ -485,12 +492,10 @@ static void iavf_clean_xdp_irq_zc(struct iavf_ring *xdp_ring)
 	for (i = 0; i < done_frames; i++) {
 		tx_buf = &xdp_ring->tx_bi[ntc];
 
-		if (tx_buf->raw_buf) {
+		if (tx_buf->xdp_type)
 			iavf_clean_xdp_tx_buf(xdp_ring, tx_buf);
-			tx_buf->raw_buf = NULL;
-		} else {
+		else
 			xsk_frames++;
-		}
 
 		ntc++;
 		if (ntc >= xdp_ring->count)
