@@ -50,6 +50,52 @@ static void iavf_unmap_and_free_tx_resource(struct iavf_ring *ring,
 }
 
 /**
+ * iavf_free_xdp_resource - Correctly free XDP TX buffer
+ * @tx_buffer: the buffer being released
+ */
+static void iavf_free_xdp_resource(struct iavf_tx_buffer *tx_buffer)
+{
+	page_frag_free(tx_buffer->raw_buf);
+	tx_buffer->raw_buf = NULL;
+}
+
+/**
+ * iavf_unmap_and_free_xdp_resource - Release a TX buffer on XDP ring
+ * @ring: the ring that owns the buffer
+ * @tx_buffer: the buffer to free
+ */
+static void iavf_unmap_and_free_xdp_resource(struct iavf_ring *ring,
+					     struct iavf_tx_buffer *tx_buffer)
+{
+	if (dma_unmap_len(tx_buffer, len))
+		dma_unmap_page(ring->dev,
+			       dma_unmap_addr(tx_buffer, dma),
+			       dma_unmap_len(tx_buffer, len),
+			       DMA_TO_DEVICE);
+
+	dma_unmap_len_set(tx_buffer, len, 0);
+
+	if (tx_buffer->raw_buf)
+		iavf_free_xdp_resource(tx_buffer);
+}
+
+/**
+ * iavf_release_tx_resources - Release all Tx buffers on ring
+ * @ring: TX or XDP ring
+ */
+static void iavf_release_tx_resources(struct iavf_ring *ring)
+{
+	bool is_xdp = iavf_ring_is_xdp(ring);
+	u32 i;
+
+	for (i = 0; i < ring->count; i++)
+		if (is_xdp)
+			iavf_unmap_and_free_xdp_resource(ring, &ring->tx_bi[i]);
+		else
+			iavf_unmap_and_free_tx_resource(ring, &ring->tx_bi[i]);
+}
+
+/**
  * iavf_clean_tx_ring - Free any empty Tx buffers
  * @tx_ring: ring to be cleaned
  **/
@@ -65,9 +111,7 @@ void iavf_clean_tx_ring(struct iavf_ring *tx_ring)
 		iavf_xsk_clean_xdp_ring(tx_ring);
 	} else {
 		/* Free all the Tx ring sk_buffs */
-		for (u32 i = 0; i < tx_ring->count; i++)
-			iavf_unmap_and_free_tx_resource(tx_ring,
-							&tx_ring->tx_bi[i]);
+		iavf_release_tx_resources(tx_ring);
 	}
 
 	bi_size = sizeof(struct iavf_tx_buffer) * tx_ring->count;
