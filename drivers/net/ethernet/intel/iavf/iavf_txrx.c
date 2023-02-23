@@ -39,8 +39,18 @@ static void iavf_unmap_and_free_tx_resource(struct iavf_ring *ring,
  */
 static void iavf_free_xdp_resource(struct iavf_tx_buffer *tx_buffer)
 {
-	page_frag_free(tx_buffer->raw_buf);
-	tx_buffer->raw_buf = NULL;
+	switch (tx_buffer->xdp_type) {
+	case IAVF_XDP_BUFFER_TX:
+		page_frag_free(tx_buffer->raw_buf);
+		tx_buffer->raw_buf = NULL;
+		break;
+	case IAVF_XDP_BUFFER_FRAME:
+		xdp_return_frame(tx_buffer->xdpf);
+		tx_buffer->xdpf = NULL;
+		break;
+	}
+
+	tx_buffer->xdp_type = IAVF_XDP_BUFFER_NONE;
 }
 
 /**
@@ -2645,8 +2655,10 @@ static u16 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
  * @data: packet data pointer
  * @size: packet data size
  * @xdp_ring: XDP ring for transmission
+ * @frame: source xdp_frame, if exists (XDP_REDIRECT), NULL otherwise
  */
-static int iavf_xmit_xdp_pkt(void *data, u16 size, struct iavf_ring *xdp_ring)
+static int iavf_xmit_xdp_pkt(void *data, u16 size, struct iavf_ring *xdp_ring,
+			     struct xdp_frame *frame)
 {
 	u16 batch_sz = IAVF_RING_QUARTER(xdp_ring);
 	u16 ntu = xdp_ring->next_to_use;
@@ -2669,7 +2681,13 @@ static int iavf_xmit_xdp_pkt(void *data, u16 size, struct iavf_ring *xdp_ring)
 	tx_buff = &xdp_ring->tx_bi[ntu];
 	tx_buff->bytecount = size;
 	tx_buff->gso_segs = 1;
-	tx_buff->raw_buf = data;
+	if (frame) {
+		tx_buff->xdp_type = IAVF_XDP_BUFFER_FRAME;
+		tx_buff->xdpf = frame;
+	} else {
+		tx_buff->xdp_type = IAVF_XDP_BUFFER_TX;
+		tx_buff->raw_buf = data;
+	}
 
 	/* record length, and DMA address */
 	dma_unmap_len_set(tx_buff, len, size);
@@ -2703,7 +2721,8 @@ int iavf_xmit_xdp_buff(struct xdp_buff *xdp, struct iavf_ring *xdp_ring)
 	if (static_branch_unlikely(&iavf_xdp_locking_key))
 		spin_lock(&xdp_ring->tx_lock);
 
-	ret = iavf_xmit_xdp_pkt(xdp->data, xdp->data_end - xdp->data, xdp_ring);
+	ret = iavf_xmit_xdp_pkt(xdp->data, xdp->data_end - xdp->data, xdp_ring,
+				NULL);
 
 	if (static_branch_unlikely(&iavf_xdp_locking_key))
 		spin_unlock(&xdp_ring->tx_lock);
@@ -2746,7 +2765,7 @@ int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 		struct xdp_frame *xdpf = frames[i];
 		int err;
 
-		err = iavf_xmit_xdp_pkt(xdpf->data, xdpf->len, xdp_ring);
+		err = iavf_xmit_xdp_pkt(xdpf->data, xdpf->len, xdp_ring, xdpf);
 		if (err) {
 			netdev_err(dev, "XDP frame TX failed, error: %d\n",
 				   err);
