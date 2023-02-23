@@ -352,6 +352,9 @@ bool __iavf_chk_linearize(struct sk_buff *skb);
 
 DECLARE_STATIC_KEY_FALSE(iavf_xdp_locking_key);
 
+void iavf_process_skb_fields(const struct iavf_ring *rx_ring,
+			     const union iavf_rx_desc *rx_desc,
+			     struct sk_buff *skb, u64 qword);
 int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 		  u32 flags);
 
