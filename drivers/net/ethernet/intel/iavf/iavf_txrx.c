@@ -2690,7 +2690,7 @@ static int iavf_xmit_xdp_pkt(void *data, u16 size, struct iavf_ring *xdp_ring)
 }
 
 /**
- * iavf_xmit_xdp_buff - convert an XDP buffer to an XDP frame and send it
+ * iavf_xmit_xdp_buff - submit XDP buffer to XDP ring for transmission
  * @xdp: XDP buffer
  * @xdp_ring: XDP Tx ring
  *
