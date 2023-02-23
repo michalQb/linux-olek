@@ -666,7 +666,8 @@ int iavf_xsk_wakeup(struct net_device *netdev, u32 queue_id, u32 flags)
 	struct iavf_q_vector *q_vector;
 	struct iavf_ring *ring;
 
-	if (adapter->state == __IAVF_DOWN)
+	if (adapter->state == __IAVF_DOWN ||
+	    adapter->state == __IAVF_RESETTING)
 		return -ENETDOWN;
 
 	if (!iavf_adapter_xdp_active(adapter))
