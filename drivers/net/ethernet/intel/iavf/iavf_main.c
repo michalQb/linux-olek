@@ -1801,13 +1801,12 @@ static int iavf_alloc_xdp_queues(struct iavf_adapter *adapter, u32 num_active_qu
 {
 	int i;
 
-	adapter->num_xdp_tx_queues = iavf_adapter_xdp_active(adapter) ?
-				     num_active_queues : 0;
-
-	adapter->xdp_rings = kcalloc(adapter->num_xdp_tx_queues,
+	adapter->xdp_rings = kcalloc(num_active_queues,
 				     sizeof(struct iavf_ring), GFP_KERNEL);
 	if (!adapter->xdp_rings)
 		goto err_out;
+
+	adapter->num_xdp_tx_queues = num_active_queues;
 
 	/* Setup extra XDP Tx queues if there are any */
 	for (i = 0; i < adapter->num_xdp_tx_queues; i++)
@@ -1866,8 +1865,9 @@ static int iavf_alloc_queues(struct iavf_adapter *adapter)
 		iavf_init_rx_ring(adapter, i);
 	}
 
-	if (iavf_alloc_xdp_queues(adapter, num_active_queues))
-		goto err_out;
+	if (iavf_adapter_xdp_active(adapter))
+		if (iavf_alloc_xdp_queues(adapter, num_active_queues))
+			goto err_out;
 
 	iavf_set_queue_vlan_tag_loc(adapter);
 
