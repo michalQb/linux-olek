@@ -449,6 +449,9 @@ iavf_clean_xdp_tx_buf(struct iavf_ring *xdp_ring, struct iavf_tx_buffer *tx_buf)
 		xdp_return_frame(tx_buf->xdpf);
 		tx_buf->xdpf = NULL;
 		break;
+	case IAVF_XDP_BUFFER_TX:
+		xsk_buff_free(tx_buf->xdp);
+		break;
 	}
 
 	xdp_ring->xdp_tx_active--;
@@ -987,6 +990,54 @@ static int iavf_xmit_xdp_buff_zc(struct xdp_buff *xdp,
 }
 
 /**
+ * iavf_xmit_xdp_tx_zc - AF_XDP ZC handler for XDP_TX
+ * @xdp: XDP buffer to xmit
+ * @xdp_ring: XDP ring to produce descriptor onto
+ *
+ * Returns 0 for successfully produced desc,
+ * -EBUSY if there was not enough space on XDP ring.
+ */
+static int iavf_xmit_xdp_tx_zc(struct xdp_buff *xdp,
+			       struct iavf_ring *xdp_ring)
+{
+	u32 size = xdp->data_end - xdp->data;
+	u32 ntu = xdp_ring->next_to_use;
+	struct iavf_tx_desc *tx_desc;
+	struct iavf_tx_buffer *tx_buf;
+	dma_addr_t dma;
+
+	if (IAVF_DESC_UNUSED(xdp_ring) < IAVF_RING_QUARTER(xdp_ring))
+		iavf_clean_xdp_irq_zc(xdp_ring);
+
+	if (!IAVF_DESC_UNUSED(xdp_ring)) {
+		xdp_ring->tx_stats.tx_busy++;
+		return -EBUSY;
+	}
+
+	dma = xsk_buff_xdp_get_dma(xdp);
+	xsk_buff_raw_dma_sync_for_device(xdp_ring->xsk_pool, dma, size);
+
+	tx_buf = &xdp_ring->tx_bi[ntu];
+	tx_buf->bytecount = size;
+	tx_buf->gso_segs = 1;
+	tx_buf->xdp_type = IAVF_XDP_BUFFER_TX;
+	tx_buf->xdp = xdp;
+
+	tx_desc = IAVF_TX_DESC(xdp_ring, ntu);
+	tx_desc->buffer_addr = cpu_to_le64(dma);
+	tx_desc->cmd_type_offset_bsz = iavf_build_ctob(IAVF_TX_DESC_CMD_EOP,
+						       0, size, 0);
+
+	xdp_ring->xdp_tx_active++;
+
+	if (++ntu == xdp_ring->count)
+		ntu = 0;
+	xdp_ring->next_to_use = ntu;
+
+	return 0;
+}
+
+/**
  * iavf_run_xdp_zc - Run XDP program and perform resulting action for ZC
  * @rx_ring: RX descriptor ring to transact packets on
  * @xdp: a prepared XDP buffer
@@ -1023,7 +1074,7 @@ iavf_run_xdp_zc(struct iavf_ring *rx_ring, struct xdp_buff *xdp,
 	case XDP_PASS:
 		break;
 	case XDP_TX:
-		err = iavf_xmit_xdp_buff_zc(xdp, xdp_ring);
+		err = iavf_xmit_xdp_tx_zc(xdp, xdp_ring);
 		if (unlikely(err))
 			goto xdp_err;
 
