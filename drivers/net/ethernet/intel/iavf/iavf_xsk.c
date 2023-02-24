@@ -603,7 +603,11 @@ bool iavf_xmit_zc(struct iavf_ring *xdp_ring)
 	struct xdp_desc *descs = xdp_ring->xsk_pool->tx_descs;
 	u32 nb_pkts, nb_processed = 0;
 	unsigned int total_bytes = 0;
+	bool ret = true;
 	int budget;
+
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_lock(&xdp_ring->tx_lock);
 
 	iavf_clean_xdp_irq_zc(xdp_ring);
 
@@ -612,7 +616,7 @@ bool iavf_xmit_zc(struct iavf_ring *xdp_ring)
 
 	nb_pkts = xsk_tx_peek_release_desc_batch(xdp_ring->xsk_pool, budget);
 	if (!nb_pkts)
-		return true;
+		goto unlock;
 
 	if (xdp_ring->next_to_use + nb_pkts >= xdp_ring->count) {
 		nb_processed = xdp_ring->count - xdp_ring->next_to_use;
@@ -631,7 +635,12 @@ bool iavf_xmit_zc(struct iavf_ring *xdp_ring)
 	if (xsk_uses_need_wakeup(xdp_ring->xsk_pool))
 		xsk_set_tx_need_wakeup(xdp_ring->xsk_pool);
 
-	return nb_pkts < budget;
+	ret = nb_pkts < budget;
+unlock:
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_unlock(&xdp_ring->tx_lock);
+
+	return ret;
 }
 
 /**
@@ -1037,6 +1046,20 @@ static int iavf_xmit_xdp_tx_zc(struct xdp_buff *xdp,
 	return 0;
 }
 
+static int iavf_xmit_xdp_tx_zc_locked(struct xdp_buff *xdp,
+				      struct iavf_ring *xdp_ring)
+{
+	int ret;
+
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_lock(&xdp_ring->tx_lock);
+	ret = iavf_xmit_xdp_tx_zc(xdp, xdp_ring);
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_unlock(&xdp_ring->tx_lock);
+
+	return ret;
+}
+
 /**
  * iavf_run_xdp_zc - Run XDP program and perform resulting action for ZC
  * @rx_ring: RX descriptor ring to transact packets on
@@ -1074,7 +1097,7 @@ iavf_run_xdp_zc(struct iavf_ring *rx_ring, struct xdp_buff *xdp,
 	case XDP_PASS:
 		break;
 	case XDP_TX:
-		err = iavf_xmit_xdp_tx_zc(xdp, xdp_ring);
+		err = iavf_xmit_xdp_tx_zc_locked(xdp, xdp_ring);
 		if (unlikely(err))
 			goto xdp_err;
 
