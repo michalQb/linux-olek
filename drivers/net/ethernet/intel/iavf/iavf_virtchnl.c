@@ -195,7 +195,7 @@ free_exit:
  *
  * Return a result of a given operation returned by PF
  * or exit with timeout.
- **/
+ */
 static int iavf_get_vf_op_result(struct iavf_adapter *adapter,
 				 enum virtchnl_ops op,
 				 unsigned int msecs)
@@ -451,7 +451,7 @@ static void iavf_set_qp_config_info(struct virtchnl_queue_pair_info *vqpi,
  *
  * Note: The caller must ensure that the calling context has taken
  *	 'adapter->crit_lock' mutex when 'wait' parameter is set to true.
- **/
+ */
 int iavf_configure_selected_queues(struct iavf_adapter *adapter, u32 qp_mask,
 				   bool wait)
 {
@@ -523,7 +523,7 @@ int iavf_configure_selected_queues(struct iavf_adapter *adapter, u32 qp_mask,
  *
  * Note: The caller must ensure that the calling context has taken
  *	 'adapter->crit_lock' mutex when 'wait' parameter is set to true.
- **/
+ */
 int iavf_configure_queues(struct iavf_adapter *adapter, bool wait)
 {
 	int pairs = adapter->num_active_queues + adapter->num_xdp_tx_queues;
@@ -544,7 +544,7 @@ int iavf_configure_queues(struct iavf_adapter *adapter, bool wait)
  *
  * Note: The caller must ensure that the calling context has taken
  *	 'adapter->crit_lock' mutex when 'wait' parameter is set to true.
- **/
+ */
 int iavf_enable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
 				u32 tx_queues, bool wait)
 {
@@ -583,7 +583,7 @@ int iavf_enable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
  *
  * Note: The caller must ensure that the calling context has taken
  *	 'adapter->crit_lock' mutex when 'wait' parameter is set to true.
- **/
+ */
 int iavf_disable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
 				 u32 tx_queues, bool wait)
 {
@@ -621,7 +621,7 @@ int iavf_disable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
  *
  * Note: The caller must ensure that the calling context has taken
  *	 'adapter->crit_lock' mutex when 'wait' parameter is set to true.
- **/
+ */
 int iavf_enable_queues(struct iavf_adapter *adapter, bool wait)
 {
 	u32 num_tx_queues = adapter->num_active_queues +
@@ -643,7 +643,7 @@ int iavf_enable_queues(struct iavf_adapter *adapter, bool wait)
  *
  * Note: The caller must ensure that the calling context has taken
  *	 'adapter->crit_lock' mutex when 'wait' parameter is set to true.
- **/
+ */
 int iavf_disable_queues(struct iavf_adapter *adapter, bool wait)
 {
 	u32 num_tx_queues = adapter->num_active_queues +
