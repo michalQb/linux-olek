@@ -530,7 +530,7 @@ static void iavf_map_rings_to_vectors(struct iavf_adapter *adapter)
  * iavf_unmap_rings_from_vectors - Clear existing mapping for queues and vectors
  * @adapter: board private structure
  *
- **/
+ */
 static void iavf_unmap_rings_from_vectors(struct iavf_adapter *adapter)
 {
 	struct iavf_ring *rx_ring, *tx_ring;
@@ -3102,7 +3102,7 @@ restart_watchdog:
  * Returns pointer to the old XDP program.
  * adapter->xdp_prog is not used in packet processing, so it can be
  * safely set kinda like a flag before resource re-configuration (reset)
- **/
+ */
 static struct bpf_prog *iavf_xchg_xdp_prog(struct iavf_adapter *adapter,
 					   struct bpf_prog *prog)
 {
@@ -3114,7 +3114,7 @@ static struct bpf_prog *iavf_xchg_xdp_prog(struct iavf_adapter *adapter,
  * @adapter: board private structure
  *
  * Should be used when adapter is being removed.
- **/
+ */
 static void iavf_free_xdp_prog(struct iavf_adapter *adapter)
 {
 	struct bpf_prog *old_xdp_prog;
@@ -4961,7 +4961,7 @@ static netdev_features_t iavf_fix_features(struct net_device *netdev,
  *
  * If program change also requires XDP resources reconfiguration,
  * schedule a reset instead
- **/
+ */
 static void iavf_copy_xdp_prog_to_rings(const struct iavf_adapter *adapter)
 {
 	for (u32 i = 0; i < adapter->num_active_queues; i++)
@@ -4978,7 +4978,7 @@ static void iavf_copy_xdp_prog_to_rings(const struct iavf_adapter *adapter)
  * @prog: BPF program to be assigned to adapter
  *
  * Returns 0 on success, negative on failure
- **/
+ */
 static void iavf_assign_bpf_prog(struct iavf_adapter *adapter,
 				 struct bpf_prog *prog)
 {
@@ -5000,7 +5000,7 @@ static void iavf_assign_bpf_prog(struct iavf_adapter *adapter,
  * to prevent race conditions with 'reset_task' and VIRTCHNL communication.
  *
  * Returns 0 on success, negative on failure
- **/
+ */
 static int iavf_close_sync(struct iavf_adapter *adapter)
 {
 	int err;
@@ -5035,7 +5035,7 @@ err_virtchnl:
  * to prevent race conditions with 'reset_task' and VIRTCHNL communication.
  *
  * Returns 0 on success, negative on failure
- **/
+ */
 static int iavf_open_sync(struct iavf_adapter *adapter)
 {
 	int err, ret;
@@ -5133,7 +5133,7 @@ static void iavf_destroy_xdp_rings(struct iavf_adapter *adapter)
  *			    to handle that program.
  * @adapter: board private structure
  * @prog: XDP program
- **/
+ */
 static int iavf_prepare_xdp_rings(struct iavf_adapter *adapter,
 				  struct bpf_prog *prog)
 {
@@ -5168,7 +5168,7 @@ err_alloc_queues:
  * iavf_xdp_can_create_queues - check if queue number is appropriate for XDP
  * @adapter: board private structure
  * @extack: netlink extended ack
- **/
+ */
 static bool iavf_xdp_can_create_queues(struct iavf_adapter *adapter,
 				       struct netlink_ext_ack *extack)
 {
@@ -5193,7 +5193,7 @@ static bool iavf_xdp_can_create_queues(struct iavf_adapter *adapter,
  * @adapter: board private structure
  * @prog: XDP program
  * @extack: netlink extended ack
- **/
+ */
 static int iavf_setup_xdp(struct iavf_adapter *adapter, struct bpf_prog *prog,
 			  struct netlink_ext_ack *extack)
 {
