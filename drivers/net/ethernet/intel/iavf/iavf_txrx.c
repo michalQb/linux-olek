@@ -1165,7 +1165,7 @@ static bool iavf_is_non_eop(struct iavf_ring *rx_ring, u64 qword)
  * @rxq_xdp_act: Logical OR of flags of XDP actions that require finalization
  *
  * Returns resulting XDP action.
- **/
+ */
 static unsigned int
 iavf_run_xdp(struct iavf_ring *rx_ring, struct xdp_buff *xdp,
 	     struct bpf_prog *xdp_prog, struct iavf_ring *xdp_ring,
