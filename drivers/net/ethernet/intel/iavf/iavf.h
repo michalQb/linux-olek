@@ -724,7 +724,7 @@ static inline void iavf_receive_skb(struct iavf_ring *rx_ring,
  * @tx_ring: TX descriptor ring
  * @total_pkts: Number of packets transmitted since the last update
  * @total_bytes: Number of bytes transmitted since the last update
- **/
+ */
 static inline void iavf_update_tx_ring_stats(struct iavf_ring *tx_ring,
 				      unsigned int total_pkts,
 				      unsigned int total_bytes)

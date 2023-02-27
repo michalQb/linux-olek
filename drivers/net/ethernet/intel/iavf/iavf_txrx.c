@@ -1489,7 +1489,7 @@ xdp_err:
  * @xdp_ring: XDP TX queue assigned to a given RX ring
  * @rxq_xdp_act: Logical OR of flags of XDP actions that require finalization
  * @first_idx: index of the first frame in the transmitted batch on XDP queue
- **/
+ */
 void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring, u16 rxq_xdp_act,
 			  u32 first_idx)
 {
