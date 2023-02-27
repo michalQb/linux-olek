@@ -769,7 +769,7 @@ static void iavf_configure_tx(struct iavf_adapter *adapter)
  * @adapter: board private structure
  *
  * Return Rx buffer length that shall be used for a given adapter.
- **/
+ */
 unsigned int iavf_get_rx_buf_len(struct iavf_adapter *adapter)
 {
 	unsigned int rx_buf_len = IAVF_RXBUFFER_2048;
@@ -802,8 +802,7 @@ unsigned int iavf_get_rx_buf_len(struct iavf_adapter *adapter)
  * @adapter: board private structure
  * @rx_ring: Rx ring to be configured
  * @rx_buf_len: buffer length that shall be used for the given Rx ring.
- *
- **/
+ */
 void iavf_configure_rx_ring(struct iavf_adapter *adapter,
 			    struct iavf_ring *rx_ring,
 			    unsigned int rx_buf_len)
@@ -863,7 +862,7 @@ void iavf_configure_rx_ring(struct iavf_adapter *adapter,
  * @adapter: board private structure
  *
  * Configure the Rx unit of the MAC after a reset.
- **/
+ */
 static void iavf_configure_rx(struct iavf_adapter *adapter)
 {
 	unsigned int rx_buf_len;
@@ -1744,7 +1743,7 @@ void iavf_set_queue_vlan_tag_loc(struct iavf_adapter *adapter)
  * @ring_index: index of the ring to be initialized
  *
  * Init all basic pointers and flags in a newly allocated Rx ring.
- **/
+ */
 static void iavf_init_rx_ring(struct iavf_adapter *adapter,
 			      int ring_index)
 {
@@ -1765,7 +1764,7 @@ static void iavf_init_rx_ring(struct iavf_adapter *adapter,
  * @xdp_ring: set to true if the ring is XDP Tx queue
  *
  * Init all basic pointers and flags in a newly allocated Tx ring.
- **/
+ */
 static void iavf_init_tx_ring(struct iavf_adapter *adapter,
 			      int ring_index,
 			      bool xdp_ring)
