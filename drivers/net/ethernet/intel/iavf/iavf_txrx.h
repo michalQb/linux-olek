@@ -678,6 +678,7 @@ static inline void iavf_rx_hash(struct iavf_ring *ring,
 
 /**
  * iavf_get_vlan_tag_from_rx_desc - get VLAN from Rx descriptor
+ * @rx_ring: Rx ring that produced descriptor
  * @rx_desc: Rx descriptor
  */
 static inline u16
@@ -699,7 +700,7 @@ iavf_get_vlan_tag_from_rx_desc(struct iavf_ring *rx_ring,
 }
 
 /**
- * iavf_get_vlan_tag_from_rx_desc - get ptype value from Rx descriptor
+ * iavf_get_ptype_from_rx_desc - get ptype value from Rx descriptor
  * @rx_desc: Rx descriptor
  */
 static inline u8
