@@ -1394,7 +1394,7 @@ static unsigned char *iavf_get_hard_start(struct iavf_rx_buffer *rx_buff,
  * iavf_prepare_xdp_buff - Set XDP buffer fields
  * @xdp: XDP buffer to modify
  * @rx_ring: rx ring being cleaned
- * @rx_buffer: rx buffer with packet
+ * @rx_buff: rx buffer with packet
  * @rx_buff_size: size of packet data
  */
 static void iavf_prepare_xdp_buff(struct xdp_buff *xdp,
