@@ -594,7 +594,7 @@ static inline void iavf_xdp_ring_update_tail(struct iavf_ring *xdp_ring)
  * iavf_release_rx_desc - Store the new tail and head values
  * @rx_ring: ring to bump
  * @val: new head index
- **/
+ */
 static inline void iavf_release_rx_desc(struct iavf_ring *rx_ring, u32 val)
 {
 	rx_ring->next_to_use = val;
@@ -616,7 +616,7 @@ static inline void iavf_release_rx_desc(struct iavf_ring *rx_ring, u32 val)
  * @rx_ring: ring to bump
  * @rx_bytes: number of bytes processed since last update
  * @rx_packets: number of packets processed since last update
- **/
+ */
 static inline void iavf_update_rx_ring_stats(struct iavf_ring *rx_ring,
 					     unsigned int rx_bytes,
 					     unsigned int rx_packets)
