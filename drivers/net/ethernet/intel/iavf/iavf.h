@@ -521,7 +521,7 @@ static inline void iavf_change_state(struct iavf_adapter *adapter,
  * @adapter: board private structure
  *
  * Returns true if XDP program is loaded on a given adapter.
- **/
+ */
 static inline bool iavf_adapter_xdp_active(struct iavf_adapter *adapter)
 {
 	return !!READ_ONCE(adapter->xdp_prog);

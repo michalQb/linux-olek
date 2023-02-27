@@ -408,7 +408,7 @@ int iavf_get_vf_vlan_v2_caps(struct iavf_adapter *adapter)
  * with data. Because of virtchnl protocol can operate on queue pairs only,
  * associate each extra Tx queue with an empty Rx queue
  * (with zero length).
- **/
+ */
 static void iavf_set_qp_config_info(struct virtchnl_queue_pair_info *vqpi,
 				    struct iavf_adapter *adapter,
 				    int queue_index, u32 max_frame,

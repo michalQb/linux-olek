@@ -467,7 +467,7 @@ iavf_map_vector_to_rxq(struct iavf_adapter *adapter, int v_idx, int r_idx)
  * @v_idx: interrupt number
  * @t_idx: queue number
  * @xdpq: set to true if Tx queue is XDP Tx queue
- **/
+ */
 static void
 iavf_map_vector_to_txq(struct iavf_adapter *adapter, int v_idx, int t_idx,
 		       bool xdpq)
@@ -1568,7 +1568,7 @@ iavf_acquire_msix_vectors(struct iavf_adapter *adapter, int vectors)
  * @adapter: board private structure to update
  *
  * Free all of the memory associated with XDP queues.
- **/
+ */
 static void iavf_free_xdp_queues(struct iavf_adapter *adapter)
 {
 	adapter->num_xdp_tx_queues = 0;
@@ -1775,7 +1775,7 @@ static void iavf_xdp_cfg_tx_sharing(struct iavf_adapter *adapter)
  * @adapter: board private structure to initialize
  *
  * Variation of iavf_alloc_queues(), which configures XDP queues only.
- **/
+ */
 static int iavf_alloc_xdp_queues(struct iavf_adapter *adapter, u32 num_active_queues)
 {
 	int i;
@@ -3631,7 +3631,7 @@ void iavf_free_all_tx_resources(struct iavf_adapter *adapter)
  * callers duty to clean those orphaned rings.
  *
  * Return 0 on success, negative on failure
- **/
+ */
 static int iavf_setup_all_tx_resources(struct iavf_adapter *adapter)
 {
 	struct iavf_ring *ring;
