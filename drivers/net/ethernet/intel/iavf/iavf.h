@@ -545,7 +545,7 @@ static inline struct xsk_buff_pool *iavf_xsk_pool(struct iavf_ring *ring)
  * @rx_ring: Rx ring being configured
  *
  * Do not return a xsk pool, if socket is TX-only
- **/
+ */
 static inline struct xsk_buff_pool *iavf_rx_xsk_pool(struct iavf_ring *rx_ring)
 {
 	struct xsk_buff_pool *xsk_pool = iavf_xsk_pool(rx_ring);
