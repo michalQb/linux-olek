@@ -632,7 +632,7 @@ static inline void iavf_update_rx_ring_stats(struct iavf_ring *rx_ring,
  * @ptype: the ptype value from the descriptor
  *
  * Returns a hash type to be used by skb_set_hash
- **/
+ */
 static inline int iavf_ptype_to_htype(u8 ptype)
 {
 	struct iavf_rx_ptype_decoded decoded = decode_rx_desc_ptype(ptype);
@@ -656,7 +656,7 @@ static inline int iavf_ptype_to_htype(u8 ptype)
  * @rx_desc: specific descriptor
  * @skb: skb currently being received and modified
  * @rx_ptype: Rx packet type
- **/
+ */
 static inline void iavf_rx_hash(struct iavf_ring *ring,
 				union iavf_rx_desc *rx_desc,
 				struct sk_buff *skb,

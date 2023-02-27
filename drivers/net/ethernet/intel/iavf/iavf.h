@@ -593,7 +593,7 @@ static inline void iavf_set_ring_xdp(struct iavf_ring *ring)
  * @vsi: the VSI we care about
  * @skb: skb currently being received and modified
  * @rx_desc: the receive descriptor
- **/
+ */
 static inline void iavf_rx_checksum(struct iavf_vsi *vsi,
 				    struct sk_buff *skb,
 				    union iavf_rx_desc *rx_desc)
@@ -682,7 +682,7 @@ checksum_fail:
  * This function checks the ring, descriptor, and packet information in
  * order to populate the hash, checksum, VLAN, protocol, and
  * other fields within the skb.
- **/
+ */
 static inline
 void iavf_process_skb_fields(struct iavf_ring *rx_ring,
 			     union iavf_rx_desc *rx_desc, struct sk_buff *skb,
@@ -703,7 +703,7 @@ void iavf_process_skb_fields(struct iavf_ring *rx_ring,
  * @rx_ring:  rx ring in play
  * @skb: packet to send up
  * @vlan_tag: vlan tag for packet
- **/
+ */
 static inline void iavf_receive_skb(struct iavf_ring *rx_ring,
 				    struct sk_buff *skb, u16 vlan_tag)
 {
