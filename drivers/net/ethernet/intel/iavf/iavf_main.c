@@ -1754,7 +1754,7 @@ static void iavf_init_tx_ring(struct iavf_adapter *adapter,
  *
  * If there is more CPUs than rings, sharing XDP TxQ allows us
  * to handle XDP_REDIRECT from other interfaces.
- **/
+ */
 static void iavf_xdp_cfg_tx_sharing(struct iavf_adapter *adapter)
 {
 	u32 num_active_queues = adapter->num_active_queues;
