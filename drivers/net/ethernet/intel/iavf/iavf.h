@@ -615,6 +615,7 @@ int iavf_get_setting_rss_lut_result(struct iavf_adapter *adapter,
 				    unsigned int msecs);
 void iavf_enable_vlan_stripping(struct iavf_adapter *adapter);
 void iavf_disable_vlan_stripping(struct iavf_adapter *adapter);
+int iavf_poll_for_link_status(struct iavf_adapter *adapter, unsigned int msecs);
 void iavf_virtchnl_completion(struct iavf_adapter *adapter,
 			      enum virtchnl_ops v_opcode,
 			      enum iavf_status v_retval, u8 *msg, u16 msglen);
