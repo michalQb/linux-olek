@@ -2197,6 +2197,52 @@ static void iavf_netdev_features_vlan_strip_set(struct net_device *netdev,
 }
 
 /**
+ * iavf_poll_for_link_status - poll for PF notification about link status
+ * @adapter: adapter structure
+ * @msecs: timeout in milliseconds
+ *
+ * Returns:
+ *   0 - if notification about link down was received,
+ *   1 - if notification about link up was received,
+ *   or negative error code in case of error.
+ */
+int iavf_poll_for_link_status(struct iavf_adapter *adapter, unsigned int msecs)
+{
+	struct iavf_hw *hw = &adapter->hw;
+	struct iavf_arq_event_info event;
+	struct virtchnl_pf_event *vpe;
+	int ret;
+
+	event.buf_len = IAVF_MAX_AQ_BUF_SIZE;
+	event.msg_buf = kzalloc(IAVF_MAX_AQ_BUF_SIZE, GFP_KERNEL);
+	if (!event.msg_buf)
+		return -ENOMEM;
+
+	ret = iavf_poll_virtchnl_msg_timeout(hw, &event, VIRTCHNL_OP_EVENT,
+					     msecs);
+	if (ret)
+		goto virtchnl_msg_err;
+
+	vpe = (struct virtchnl_pf_event *)event.msg_buf;
+	if (vpe->event == VIRTCHNL_EVENT_LINK_CHANGE) {
+		bool link_up = iavf_get_vpe_link_status(adapter, vpe);
+
+		iavf_set_adapter_link_speed_from_vpe(adapter, vpe);
+
+		ret = link_up ? 1 : 0;
+	} else {
+		iavf_virtchnl_completion(adapter, VIRTCHNL_OP_EVENT, 0,
+					 event.msg_buf, event.msg_len);
+		ret = -EBUSY;
+	}
+
+virtchnl_msg_err:
+	kfree(event.msg_buf);
+
+	return ret;
+}
+
+/**
  * iavf_virtchnl_completion
  * @adapter: adapter structure
  * @v_opcode: opcode sent by PF
