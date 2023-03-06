@@ -10,7 +10,6 @@
 #include "iavf_trace.h"
 #include "iavf_xsk.h"
 
-#define IAVF_PF_REQ_TIMEOUT_MS		300
 #define IAVF_CRIT_LOCK_WAIT_TIMEOUT_MS	1000
 #define IAVF_VC_MSG_TIMEOUT_MS		3000
 
@@ -141,51 +140,6 @@ iavf_qvec_ena_irq(struct iavf_adapter *adapter, struct iavf_q_vector *q_vector)
 }
 
 /**
- * iavf_cfg_qp_in_pf - Configure selected queue pairs in PF.
- * @adapter: adapter of interest
- * @qp_mask: mask of queue pairs that shall be configured
- *
- * Returns 0 on success, negative on failure or timeout.
- */
-static int
-iavf_cfg_qp_in_pf(struct iavf_adapter *adapter, u32 qp_mask)
-{
-	iavf_configure_selected_queues(adapter, qp_mask);
-	return iavf_get_configure_queues_result(adapter,
-						IAVF_PF_REQ_TIMEOUT_MS);
-}
-
-/**
- * iavf_ena_queues_in_pf - Enable selected queues in PF.
- * @adapter: adapter of interest
- * @rxq_mask: mask of Rx queues that shall be enabled
- * @txq_mask: mask of Tx queues that shall be enabled
- *
- * Returns 0 on success, negative on failure or timeout.
- */
-static int
-iavf_ena_queues_in_pf(struct iavf_adapter *adapter, u32 rxq_mask, u32 txq_mask)
-{
-	iavf_enable_selected_queues(adapter, rxq_mask, txq_mask);
-	return iavf_get_queue_enable_result(adapter, IAVF_PF_REQ_TIMEOUT_MS);
-}
-/**
- * iavf_dis_queues_in_pf - Disable selected queues in PF.
- * @adapter: adapter of interest
- * @rxq_mask: mask of Rx queues that shall be disabled
- * @txq_mask: mask of Tx queues that shall be disabled
- *
- * Returns 0 on success, negative on failure or timeout.
- */
-
-static int
-iavf_dis_queues_in_pf(struct iavf_adapter *adapter, u32 rxq_mask, u32 txq_mask)
-{
-	iavf_disable_selected_queues(adapter, rxq_mask, txq_mask);
-	return iavf_get_queue_disable_result(adapter, IAVF_PF_REQ_TIMEOUT_MS);
-}
-
-/**
  * iavf_qp_dis - Disables a queue pair
  * @adapter: adapter of interest
  * @q_idx: ring index in array
@@ -220,7 +174,7 @@ static int iavf_qp_dis(struct iavf_adapter *adapter, u16 q_idx)
 		tx_queues |= BIT(xdp_ring->queue_index);
 	}
 
-	err = iavf_dis_queues_in_pf(adapter, rx_queues, tx_queues);
+	err = iavf_disable_selected_queues(adapter, rx_queues, tx_queues, true);
 	if (err)
 		goto dis_exit;
 
@@ -301,7 +255,7 @@ static int iavf_qp_ena(struct iavf_adapter *adapter, u16 q_idx)
 	/* Use 'tx_queues' mask as a queue pair mask to configure
 	 * also an extra XDP Tx queue.
 	 */
-	err = iavf_cfg_qp_in_pf(adapter, tx_queues);
+	err = iavf_configure_selected_queues(adapter, tx_queues, true);
 	if (err)
 		goto ena_exit;
 
@@ -317,7 +271,7 @@ static int iavf_qp_ena(struct iavf_adapter *adapter, u16 q_idx)
 
 	iavf_configure_rx_ring(adapter, rx_ring);
 
-	err = iavf_ena_queues_in_pf(adapter, rx_queues, tx_queues);
+	err = iavf_enable_selected_queues(adapter, rx_queues, tx_queues, true);
 	if (err)
 		goto ena_exit;
 
