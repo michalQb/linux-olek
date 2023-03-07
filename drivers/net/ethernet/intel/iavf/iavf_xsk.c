@@ -195,7 +195,6 @@ static int iavf_qp_dis(struct iavf_adapter *adapter, u16 q_idx)
 {
 	struct iavf_vsi *vsi = &adapter->vsi;
 	struct iavf_q_vector *q_vector;
-	struct iavf_ring *tx_ring;
 	struct iavf_ring *rx_ring;
 	u32 rx_queues, tx_queues;
 	int err;
@@ -203,7 +202,6 @@ static int iavf_qp_dis(struct iavf_adapter *adapter, u16 q_idx)
 	if (q_idx >= adapter->num_active_queues)
 		return -EINVAL;
 
-	tx_ring = &adapter->tx_rings[q_idx];
 	rx_ring = &adapter->rx_rings[q_idx];
 	q_vector = rx_ring->q_vector;
 
@@ -215,8 +213,11 @@ static int iavf_qp_dis(struct iavf_adapter *adapter, u16 q_idx)
 	iavf_qvec_toggle_napi(adapter, q_vector, false);
 	iavf_qvec_dis_irq(adapter, q_vector);
 
-	if (iavf_adapter_xdp_active(adapter))
-		tx_queues |= BIT(q_idx + adapter->num_active_queues);
+	if (iavf_adapter_xdp_active(adapter)) {
+		struct iavf_ring *xdp_ring = &adapter->xdp_rings[q_idx];
+
+		tx_queues |= BIT(xdp_ring->queue_index);
+	}
 
 	err = iavf_dis_queues_in_pf(adapter, rx_queues, tx_queues);
 	if (err)
@@ -274,7 +275,6 @@ static int iavf_qp_ena(struct iavf_adapter *adapter, u16 q_idx)
 {
 	struct iavf_vsi *vsi = &adapter->vsi;
 	struct iavf_q_vector *q_vector;
-	struct iavf_ring *tx_ring;
 	struct iavf_ring *rx_ring;
 	u32 rx_queues, tx_queues;
 	unsigned int rx_buf_len;
@@ -283,7 +283,6 @@ static int iavf_qp_ena(struct iavf_adapter *adapter, u16 q_idx)
 	if (q_idx >= adapter->num_active_queues)
 		return -EINVAL;
 
-	tx_ring = &adapter->tx_rings[q_idx];
 	rx_ring = &adapter->rx_rings[q_idx];
 	q_vector = rx_ring->q_vector;
 
@@ -291,10 +290,9 @@ static int iavf_qp_ena(struct iavf_adapter *adapter, u16 q_idx)
 	tx_queues = rx_queues;
 
 	if (iavf_adapter_xdp_active(adapter)) {
-		u16 xdpq_idx = q_idx + adapter->num_active_queues;
 		struct iavf_ring *xdp_ring = &adapter->xdp_rings[q_idx];
 
-		tx_queues |= BIT(xdpq_idx);
+		tx_queues |= BIT(xdp_ring->queue_index);
 
 		iavf_set_ring_xdp(xdp_ring);
 		xdp_ring->xsk_pool = iavf_tx_xsk_pool(xdp_ring);
