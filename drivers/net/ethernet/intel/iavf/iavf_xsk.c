@@ -214,8 +214,11 @@ static int iavf_qp_dis(struct iavf_adapter *adapter, u16 q_idx)
 	iavf_qvec_toggle_napi(adapter, q_vector, false);
 	iavf_qvec_dis_irq(adapter, q_vector);
 
-	if (iavf_adapter_xdp_active(adapter))
-		tx_queues |= BIT(q_idx + adapter->num_active_queues);
+	if (iavf_adapter_xdp_active(adapter)) {
+		struct iavf_ring *xdp_ring = &adapter->xdp_rings[q_idx];
+
+		tx_queues |= BIT(xdp_ring->queue_index);
+	}
 
 	err = iavf_dis_queues_in_pf(adapter, rx_queues, tx_queues);
 	if (err)
@@ -286,8 +289,14 @@ static int iavf_qp_ena(struct iavf_adapter *adapter, u16 q_idx)
 	rx_queues = BIT(q_idx);
 	tx_queues = rx_queues;
 
-	if (iavf_adapter_xdp_active(adapter))
-		tx_queues |= BIT(q_idx + adapter->num_active_queues);
+	if (iavf_adapter_xdp_active(adapter)) {
+		struct iavf_ring *xdp_ring = &adapter->xdp_rings[q_idx];
+
+		tx_queues |= BIT(xdp_ring->queue_index);
+
+		iavf_set_ring_xdp(xdp_ring);
+		xdp_ring->xsk_pool = iavf_tx_xsk_pool(xdp_ring);
+	}
 
 	/* Use 'tx_queues' mask as a queue pair mask to configure
 	 * also an extra XDP Tx queue.
