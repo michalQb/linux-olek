@@ -1772,6 +1772,7 @@ static void iavf_xdp_cfg_tx_sharing(struct iavf_adapter *adapter)
 /**
  * iavf_alloc_xdp_queues - Allocate memory for XDP rings
  * @adapter: board private structure to initialize
+ * @num_active_queues: number of exposed queue pairs
  *
  * Variation of iavf_alloc_queues(), which configures XDP queues only.
  */
