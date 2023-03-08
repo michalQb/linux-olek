@@ -145,7 +145,7 @@ iavf_poll_virtchnl_msg(struct iavf_hw *hw, struct iavf_arq_event_info *event,
 /**
  * iavf_process_pending_pf_msg
  * @adapter: adapter structure
- * @timeout_msec: timeout in milliseconds
+ * @timeout_msecs: timeout in milliseconds
  *
  * Check if any VIRTCHNL message is currently pending and process it
  * if needed.
@@ -664,10 +664,15 @@ int iavf_disable_queues(struct iavf_adapter *adapter, bool wait)
 /**
  * iavf_map_queues
  * @adapter: adapter structure
+ * @wait: if true, wait until the request is completed
  *
- * Request that the PF map queues to interrupt vectors. Misc causes, including
- * admin queue, are always mapped to vector 0.
- **/
+ * Send a request to PF to update the mapping queues to interrupt vectors.
+ * Misc causes, including admin queue, are always mapped to vector 0.
+ * Returns 0 if the command succeeds or negative value in case of error.
+ *
+ * Note: The caller must ensure that the calling context has taken
+ *       'adapter->crit_lock' mutex when 'wait' parameter is set to true.
+ */
 int iavf_map_queues(struct iavf_adapter *adapter, bool wait)
 {
 	struct virtchnl_irq_map_info *vimi;
