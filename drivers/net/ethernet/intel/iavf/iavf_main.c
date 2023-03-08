@@ -1451,7 +1451,7 @@ static void iavf_clear_adv_rss_conf(struct iavf_adapter *adapter)
 /**
  * iavf_stop_traffic - Stop NAPI and interrupts before link down
  * @adapter: board private structure
- **/
+ */
 void iavf_stop_traffic(struct iavf_adapter *adapter)
 {
 	struct net_device *netdev = adapter->netdev;
@@ -1466,7 +1466,7 @@ void iavf_stop_traffic(struct iavf_adapter *adapter)
 /**
  * iavf_start_traffic - Start NAPI and interrupts after link up
  * @adapter: board private structure
- **/
+ */
 void iavf_start_traffic(struct iavf_adapter *adapter)
 {
 	struct net_device *netdev = adapter->netdev;
@@ -1483,7 +1483,7 @@ void iavf_start_traffic(struct iavf_adapter *adapter)
  * @adapter: board private structure
  *
  * Expects to be called while holding the __IAVF_IN_CRITICAL_TASK bit lock.
- **/
+ */
 void iavf_down(struct iavf_adapter *adapter)
 {
 	if (adapter->state <= __IAVF_DOWN_PENDING)
@@ -5118,7 +5118,7 @@ err_setup_tx_resources:
  * iavf_destroy_xdp_rings - remove XDP program from adapter and release
  *			    XDP rings related to that program.
  * @adapter: board private structure
- **/
+ */
 static void iavf_destroy_xdp_rings(struct iavf_adapter *adapter)
 {
 	iavf_unmap_rings_from_vectors(adapter);
