@@ -5279,7 +5279,7 @@ err_no_queues:
 
 /**
  * iavf_xdp - XDP command handler
- * @dev: netdevice
+ * @netdev: netdevice
  * @xdp: XDP command
  */
 static int iavf_xdp(struct net_device *netdev, struct netdev_bpf *xdp)
