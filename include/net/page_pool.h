@@ -32,7 +32,7 @@
 
 #include <linux/mm.h> /* Needed by ptr_ring */
 #include <linux/ptr_ring.h>
-#include <linux/dma-direction.h>
+#include <linux/dma-mapping.h>
 
 #define PP_FLAG_DMA_MAP		BIT(5) /* Should page_pool do the DMA
 					* map/unmap
@@ -375,6 +375,22 @@ static inline void page_pool_set_dma_addr(struct page *page, dma_addr_t addr)
 	page->dma_addr = addr;
 	if (PAGE_POOL_DMA_USE_PP_FRAG_COUNT)
 		page->dma_addr_upper = upper_32_bits(addr);
+}
+
+static inline void page_pool_dma_sync_for_cpu(struct page_pool *pool,
+					      struct page *page,
+					      u32 dma_sync_size)
+{
+	dma_sync_single_range_for_cpu(pool->p.dev,
+				      page_pool_get_dma_addr(page),
+				      pool->p.offset, dma_sync_size,
+				      pool->p.dma_dir);
+}
+
+static inline void page_pool_dma_sync_full_for_cpu(struct page_pool *pool,
+						   struct page *page)
+{
+	page_pool_dma_sync_for_cpu(pool, page, pool->p.max_len);
 }
 
 static inline bool is_page_pool_compiled_in(void)
