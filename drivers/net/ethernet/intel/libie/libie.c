@@ -2,6 +2,30 @@
 
 #include <linux/net/intel/libie.h>
 
+/* Page Pool */
+
+struct page_pool *libie_rx_page_pool_create(const struct net_device *dev,
+					    u32 size)
+{
+	const struct page_pool_params pp = {
+		.flags		= PP_FLAG_DMA_MAP | PP_FLAG_DMA_MAP_WEAK |
+				  PP_FLAG_DMA_SYNC_DEV,
+		.order		= LIBIE_RX_PAGE_ORDER,
+		.pool_size	= size,
+		.nid		= NUMA_NO_NODE,
+		.dev		= dev->dev.parent,
+		.dma_dir	= DMA_FROM_DEVICE,
+		.max_len	= LIBIE_RX_BUF_LEN,
+		.offset		= LIBIE_SKB_HEADROOM,
+	};
+
+	static_assert((PP_FLAG_DMA_MAP | PP_FLAG_DMA_MAP_WEAK) ==
+		      LIBIE_RX_DMA_ATTR);
+
+	return page_pool_create(&pp);
+}
+EXPORT_SYMBOL_NS_GPL(libie_rx_page_pool_create, LIBIE);
+
 /* O(1) converting i40e/ice/iavf's 8/10-bit hardware packet type to a parsed
  * bitfield struct.
  */

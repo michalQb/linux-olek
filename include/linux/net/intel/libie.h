@@ -44,6 +44,9 @@
 #define LIBIE_RX_DMA_ATTR						    \
 	(DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING)
 
+struct page_pool *libie_rx_page_pool_create(const struct net_device *dev,
+					    u32 size);
+
 /* O(1) converting i40e/ice/iavf's 8/10-bit hardware packet type to a parsed
  * bitfield struct.
  */
