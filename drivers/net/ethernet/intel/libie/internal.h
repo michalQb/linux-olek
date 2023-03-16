@@ -11,4 +11,17 @@
 
 #define LIBIE_EXPORT_SYMBOL(s)		EXPORT_SYMBOL_NS_GPL(s, LIBIE)
 
+struct libie_rq_stats;
+struct page_pool;
+
+#ifdef CONFIG_PAGE_POOL_STATS
+void libie_rq_stats_sync_pp(struct libie_rq_stats *stats,
+			    struct page_pool *pool);
+#else
+static inline void libie_rq_stats_sync_pp(struct libie_rq_stats *stats,
+					  struct page_pool *pool)
+{
+}
+#endif
+
 #endif /* __LIBIE_INTERNAL_H */
