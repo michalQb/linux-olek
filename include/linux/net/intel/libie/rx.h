@@ -164,7 +164,11 @@ static inline void libie_skb_set_hash(struct sk_buff *skb, u32 hash,
 #define LIBIE_RX_DMA_ATTR						    \
 	(DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING)
 
+struct libie_rq_stats;
+
 struct page_pool *libie_rx_page_pool_create(const struct net_device *dev,
 					    u32 size);
+void libie_rx_page_pool_destroy(struct page_pool *pool,
+				struct libie_rq_stats *stats);
 
 #endif /* __LIBIE_RX_H */
