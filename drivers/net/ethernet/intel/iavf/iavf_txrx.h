@@ -87,19 +87,17 @@ enum iavf_dyn_idx_t {
 
 /**
  * iavf_test_staterr - tests bits in Rx descriptor status and error fields
- * @rx_desc: pointer to receive descriptor (in le64 format)
- * @stat_err_bits: value to mask
+ * @qword: `wb.qword1.status_error_len` from the descriptor
+ * @stat_err: bit number to mask
  *
  * This function does some fast chicanery in order to return the
  * value of the mask which is really only used for boolean tests.
  * The status_error_len doesn't need to be shifted because it begins
  * at offset zero.
  */
-static inline bool iavf_test_staterr(union iavf_rx_desc *rx_desc,
-				     const u64 stat_err_bits)
+static inline bool iavf_test_staterr(u64 qword, const u64 stat_err)
 {
-	return !!(rx_desc->wb.qword1.status_error_len &
-		  cpu_to_le64(stat_err_bits));
+	return !!(qword & BIT_ULL(stat_err));
 }
 
 /* How many Rx Buffers do we bundle into one write to the hardware ? */

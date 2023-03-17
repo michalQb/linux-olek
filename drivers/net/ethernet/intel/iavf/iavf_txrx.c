@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright(c) 2013 - 2018 Intel Corporation. */
 
+#include <linux/bitfield.h>
 #include <linux/net/intel/libie/rx.h>
 #include <linux/prefetch.h>
 
@@ -902,29 +903,21 @@ void iavf_alloc_rx_pages(struct iavf_ring *rxr)
  * iavf_rx_checksum - Indicate in skb if hw indicated a good cksum
  * @vsi: the VSI we care about
  * @skb: skb currently being received and modified
- * @rx_desc: the receive descriptor
+ * @qword: `wb.qword1.status_error_len` from the descriptor
  **/
 static inline void iavf_rx_checksum(struct iavf_vsi *vsi,
 				    struct sk_buff *skb,
-				    union iavf_rx_desc *rx_desc)
+				    u64 qword)
 {
 	struct libie_rx_ptype_parsed parsed;
-	u32 rx_error, rx_status;
-	bool ipv4, ipv6;
-	u8 ptype;
-	u64 qword;
+	u32 ptype, rx_error, rx_status;
 
-	skb->ip_summed = CHECKSUM_NONE;
-
-	qword = le64_to_cpu(rx_desc->wb.qword1.status_error_len);
 	ptype = (qword & IAVF_RXD_QW1_PTYPE_MASK) >> IAVF_RXD_QW1_PTYPE_SHIFT;
 
 	parsed = libie_parse_rx_ptype(ptype);
 	if (!libie_has_rx_checksum(vsi->netdev, parsed))
 		return;
 
-	rx_error = (qword & IAVF_RXD_QW1_ERROR_MASK) >>
-		   IAVF_RXD_QW1_ERROR_SHIFT;
 	rx_status = (qword & IAVF_RXD_QW1_STATUS_MASK) >>
 		    IAVF_RXD_QW1_STATUS_SHIFT;
 
@@ -932,17 +925,17 @@ static inline void iavf_rx_checksum(struct iavf_vsi *vsi,
 	if (!(rx_status & BIT(IAVF_RX_DESC_STATUS_L3L4P_SHIFT)))
 		return;
 
-	ipv4 = parsed.outer_ip == LIBIE_RX_PTYPE_OUTER_IPV4;
-	ipv6 = parsed.outer_ip == LIBIE_RX_PTYPE_OUTER_IPV6;
+	rx_error = (qword & IAVF_RXD_QW1_ERROR_MASK) >>
+		   IAVF_RXD_QW1_ERROR_SHIFT;
 
-	if (ipv4 &&
+	if (parsed.outer_ip == LIBIE_RX_PTYPE_OUTER_IPV4 &&
 	    (rx_error & (BIT(IAVF_RX_DESC_ERROR_IPE_SHIFT) |
 			 BIT(IAVF_RX_DESC_ERROR_EIPE_SHIFT))))
 		goto checksum_fail;
 
 	/* likely incorrect csum if alternate IP extension headers found */
-	if (ipv6 &&
-	    rx_status & BIT(IAVF_RX_DESC_STATUS_IPV6EXADD_SHIFT))
+	else if (parsed.outer_ip == LIBIE_RX_PTYPE_OUTER_IPV6 &&
+		 (rx_status & BIT(IAVF_RX_DESC_STATUS_IPV6EXADD_SHIFT)))
 		/* don't increment checksum err here, non-fatal err */
 		return;
 
@@ -969,27 +962,26 @@ checksum_fail:
  * @ring: descriptor ring
  * @rx_desc: specific descriptor
  * @skb: skb currently being received and modified
- * @rx_ptype: Rx packet type
+ * @qword: `wb.qword1.status_error_len` from the descriptor
  **/
 static inline void iavf_rx_hash(struct iavf_ring *ring,
 				union iavf_rx_desc *rx_desc,
 				struct sk_buff *skb,
-				u8 rx_ptype)
+				u64 qword)
 {
+	const u64 rss_mask = (u64)IAVF_RX_DESC_FLTSTAT_RSS_HASH <<
+			     IAVF_RX_DESC_STATUS_FLTSTAT_SHIFT;
 	struct libie_rx_ptype_parsed parsed;
-	u32 hash;
-	const __le64 rss_mask =
-		cpu_to_le64((u64)IAVF_RX_DESC_FLTSTAT_RSS_HASH <<
-			    IAVF_RX_DESC_STATUS_FLTSTAT_SHIFT);
+	u32 rx_ptype, hash;
+
+	rx_ptype = FIELD_GET(IAVF_RXD_QW1_PTYPE_MASK, qword);
 
 	parsed = libie_parse_rx_ptype(rx_ptype);
-	if (!libie_has_rx_hash(ring->netdev, parsed))
+	if (!libie_has_rx_hash(ring->netdev, parsed) ||
+	    (qword & rss_mask) != rss_mask)
 		return;
-
-	if ((rx_desc->wb.qword1.status_error_len & rss_mask) == rss_mask) {
-		hash = le32_to_cpu(rx_desc->wb.qword0.hi_dword.rss);
-		libie_skb_set_hash(skb, hash, parsed);
-	}
+	hash = le32_to_cpu(rx_desc->wb.qword0.hi_dword.rss);
+	libie_skb_set_hash(skb, hash, parsed);
 }
 
 /**
@@ -997,7 +989,7 @@ static inline void iavf_rx_hash(struct iavf_ring *ring,
  * @rx_ring: rx descriptor ring packet is being transacted on
  * @rx_desc: pointer to the EOP Rx descriptor
  * @skb: pointer to current skb being populated
- * @rx_ptype: the packet type decoded by hardware
+ * @qword: `wb.qword1.status_error_len` from the descriptor
  *
  * This function checks the ring, descriptor, and packet information in
  * order to populate the hash, checksum, VLAN, protocol, and
@@ -1006,38 +998,16 @@ static inline void iavf_rx_hash(struct iavf_ring *ring,
 static inline
 void iavf_process_skb_fields(struct iavf_ring *rx_ring,
 			     union iavf_rx_desc *rx_desc, struct sk_buff *skb,
-			     u8 rx_ptype)
+			     u64 qword)
 {
-	iavf_rx_hash(rx_ring, rx_desc, skb, rx_ptype);
+	iavf_rx_hash(rx_ring, rx_desc, skb, qword);
 
-	iavf_rx_checksum(rx_ring->vsi, skb, rx_desc);
+	iavf_rx_checksum(rx_ring->vsi, skb, qword);
 
 	skb_record_rx_queue(skb, rx_ring->queue_index);
 
 	/* modifies the skb - consumes the enet header */
 	skb->protocol = eth_type_trans(skb, rx_ring->netdev);
-}
-
-/**
- * iavf_cleanup_headers - Correct empty headers
- * @rx_ring: rx descriptor ring packet is being transacted on
- * @skb: pointer to current skb being fixed
- *
- * Also address the case where we are pulling data in on pages only
- * and as such no data is present in the skb header.
- *
- * In addition if skb is not at least 60 bytes we need to pad it so that
- * it is large enough to qualify as a valid Ethernet frame.
- *
- * Returns true if an error was encountered and skb was freed.
- **/
-static bool iavf_cleanup_headers(struct iavf_ring *rx_ring, struct sk_buff *skb)
-{
-	/* if eth_skb_pad returns an error the skb was freed */
-	if (eth_skb_pad(skb))
-		return true;
-
-	return false;
 }
 
 /**
@@ -1089,21 +1059,14 @@ static struct sk_buff *iavf_build_skb(struct page *page, u32 size)
 }
 
 /**
- * iavf_is_non_eop - process handling of non-EOP buffers
- * @rx_desc: Rx descriptor for current buffer
+ * iavf_is_non_eop - check whether a buffer is non-EOP
+ * @qword: `wb.qword1.status_error_len` from the descriptor
  * @stats: NAPI poll local stats to update
- *
- * This function updates next to clean.  If the buffer is an EOP buffer
- * this function exits returning false, otherwise it will place the
- * sk_buff in the next buffer to be chained and return true indicating
- * that this is in fact a non-EOP buffer.
  **/
-static bool iavf_is_non_eop(union iavf_rx_desc *rx_desc,
-			    struct libie_rq_onstack_stats *stats)
+static bool iavf_is_non_eop(u64 qword, struct libie_rq_onstack_stats *stats)
 {
 	/* if we are the last buffer then there is nothing else to do */
-#define IAVF_RXD_EOF BIT(IAVF_RX_DESC_STATUS_EOF_SHIFT)
-	if (likely(iavf_test_staterr(rx_desc, IAVF_RXD_EOF)))
+	if (likely(iavf_test_staterr(qword, IAVF_RX_DESC_STATUS_EOF_SHIFT)))
 		return false;
 
 	stats->fragments++;
@@ -1139,7 +1102,6 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 		struct page *page;
 		unsigned int size;
 		u16 vlan_tag = 0;
-		u8 rx_ptype;
 		u64 qword;
 
 		/* return some buffers to hardware, one at a time is too slow */
@@ -1159,15 +1121,14 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 		 * hardware wrote DD then the length will be non-zero
 		 */
 		qword = le64_to_cpu(rx_desc->wb.qword1.status_error_len);
+		if (!iavf_test_staterr(qword, IAVF_RX_DESC_STATUS_DD_SHIFT))
+			break;
 
 		/* This memory barrier is needed to keep us from reading
 		 * any other fields out of the rx_desc until we have
 		 * verified the descriptor has been written back.
 		 */
 		dma_rmb();
-#define IAVF_RXD_DD BIT(IAVF_RX_DESC_STATUS_DD_SHIFT)
-		if (!iavf_test_staterr(rx_desc, IAVF_RXD_DD))
-			break;
 
 		size = (qword & IAVF_RXD_QW1_LENGTH_PBUF_MASK) >>
 		       IAVF_RXD_QW1_LENGTH_PBUF_SHIFT;
@@ -1208,23 +1169,19 @@ skip_data:
 		if (unlikely(++ntc == ring_size))
 			ntc = 0;
 
-		prefetch(IAVF_RX_DESC(rx_ring, ntc));
-
-		if (iavf_is_non_eop(rx_desc, &stats))
+		if (iavf_is_non_eop(qword, &stats))
 			continue;
+
+		prefetch(rx_desc);
 
 		/* ERR_MASK will only have valid bits if EOP set, and
 		 * what we are doing here is actually checking
 		 * IAVF_RX_DESC_ERROR_RXE_SHIFT, since it is the zeroth bit in
 		 * the error field
 		 */
-		if (unlikely(iavf_test_staterr(rx_desc, BIT(IAVF_RXD_QW1_ERROR_SHIFT)))) {
-			dev_kfree_skb_any(skb);
-			skb = NULL;
-			continue;
-		}
-
-		if (iavf_cleanup_headers(rx_ring, skb)) {
+		if (unlikely(iavf_test_staterr(qword,
+					       IAVF_RXD_QW1_ERROR_SHIFT))) {
+			dev_kfree_skb(skb);
 			skb = NULL;
 			continue;
 		}
@@ -1232,12 +1189,8 @@ skip_data:
 		/* probably a little skewed due to removing CRC */
 		stats.bytes += skb->len;
 
-		qword = le64_to_cpu(rx_desc->wb.qword1.status_error_len);
-		rx_ptype = (qword & IAVF_RXD_QW1_PTYPE_MASK) >>
-			   IAVF_RXD_QW1_PTYPE_SHIFT;
-
 		/* populate checksum, VLAN, and protocol */
-		iavf_process_skb_fields(rx_ring, rx_desc, skb, rx_ptype);
+		iavf_process_skb_fields(rx_ring, rx_desc, skb, qword);
 
 		if (qword & BIT(IAVF_RX_DESC_STATUS_L2TAG1P_SHIFT) &&
 		    rx_ring->flags & IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1)
