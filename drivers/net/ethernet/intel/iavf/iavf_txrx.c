@@ -932,7 +932,6 @@ static inline void iavf_rx_checksum(struct iavf_vsi *vsi,
 	    (rx_error & (BIT(IAVF_RX_DESC_ERROR_IPE_SHIFT) |
 			 BIT(IAVF_RX_DESC_ERROR_EIPE_SHIFT))))
 		goto checksum_fail;
-
 	/* likely incorrect csum if alternate IP extension headers found */
 	else if (parsed.outer_ip == LIBIE_RX_PTYPE_OUTER_IPV6 &&
 		 (rx_status & BIT(IAVF_RX_DESC_STATUS_IPV6EXADD_SHIFT)))
@@ -980,6 +979,7 @@ static inline void iavf_rx_hash(struct iavf_ring *ring,
 	if (!libie_has_rx_hash(ring->netdev, parsed) ||
 	    (qword & rss_mask) != rss_mask)
 		return;
+
 	hash = le32_to_cpu(rx_desc->wb.qword0.hi_dword.rss);
 	libie_skb_set_hash(skb, hash, parsed);
 }
