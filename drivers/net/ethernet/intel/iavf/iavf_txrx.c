@@ -958,13 +958,10 @@ static void iavf_rx_checksum(struct iavf_vsi *vsi, struct sk_buff *skb,
 			     u64 qword, struct libie_rx_ptype_parsed parsed)
 {
 	u32 rx_error, rx_status;
-	bool ipv4, ipv6;
 
 	if (!libie_has_rx_checksum(vsi->netdev, parsed))
 		return;
 
-	rx_error = (qword & IAVF_RXD_QW1_ERROR_MASK) >>
-		   IAVF_RXD_QW1_ERROR_SHIFT;
 	rx_status = (qword & IAVF_RXD_QW1_STATUS_MASK) >>
 		    IAVF_RXD_QW1_STATUS_SHIFT;
 
@@ -972,17 +969,16 @@ static void iavf_rx_checksum(struct iavf_vsi *vsi, struct sk_buff *skb,
 	if (!(rx_status & BIT(IAVF_RX_DESC_STATUS_L3L4P_SHIFT)))
 		return;
 
-	ipv4 = parsed.outer_ip == LIBIE_RX_PTYPE_OUTER_IPV4;
-	ipv6 = parsed.outer_ip == LIBIE_RX_PTYPE_OUTER_IPV6;
+	rx_error = (qword & IAVF_RXD_QW1_ERROR_MASK) >>
+		   IAVF_RXD_QW1_ERROR_SHIFT;
 
-	if (ipv4 &&
+	if (parsed.outer_ip == LIBIE_RX_PTYPE_OUTER_IPV4 &&
 	    (rx_error & (BIT(IAVF_RX_DESC_ERROR_IPE_SHIFT) |
 			 BIT(IAVF_RX_DESC_ERROR_EIPE_SHIFT))))
 		goto checksum_fail;
-
 	/* likely incorrect csum if alternate IP extension headers found */
-	if (ipv6 &&
-	    rx_status & BIT(IAVF_RX_DESC_STATUS_IPV6EXADD_SHIFT))
+	else if (parsed.outer_ip == LIBIE_RX_PTYPE_OUTER_IPV6 &&
+		 (rx_status & BIT(IAVF_RX_DESC_STATUS_IPV6EXADD_SHIFT)))
 		/* don't increment checksum err here, non-fatal err */
 		return;
 
@@ -1021,36 +1017,40 @@ static void iavf_rx_hash(const struct iavf_ring *ring,
 			     IAVF_RX_DESC_STATUS_FLTSTAT_SHIFT;
 	u32 hash;
 
-	if (!libie_has_rx_hash(ring->netdev, parsed))
+	if (!libie_has_rx_hash(ring->netdev, parsed) ||
+	    (qword & rss_mask) != rss_mask)
 		return;
 
-	if ((qword & rss_mask) == rss_mask) {
-		hash = le32_to_cpu(rx_desc->wb.qword0.hi_dword.rss);
-		libie_skb_set_hash(skb, hash, parsed);
-	}
+	hash = le32_to_cpu(rx_desc->wb.qword0.hi_dword.rss);
+	libie_skb_set_hash(skb, hash, parsed);
 }
 
 static void iavf_rx_vlan(const struct iavf_ring *rx_ring,
 			 const union iavf_rx_desc *rx_desc,
 			 struct sk_buff *skb, u64 qword)
 {
-	u16 vlan_tag = 0;
+	u16 vlan_tag;
+	__be16 prot;
+
+	if (rx_ring->netdev->features & NETIF_F_HW_VLAN_CTAG_RX)
+		prot = htons(ETH_P_8021Q);
+	else if (rx_ring->netdev->features & NETIF_F_HW_VLAN_STAG_RX)
+		prot = htons(ETH_P_8021AD);
+	else
+		return;
 
 	if ((qword & BIT(IAVF_RX_DESC_STATUS_L2TAG1P_SHIFT)) &&
 	    (rx_ring->flags & IAVF_TXRX_FLAGS_VLAN_TAG_LOC_L2TAG1))
 		vlan_tag = le16_to_cpu(rx_desc->wb.qword0.lo_dword.l2tag1);
-	if ((rx_desc->wb.qword2.ext_status &
-	     cpu_to_le16(BIT(IAVF_RX_DESC_EXT_STATUS_L2TAG2P_SHIFT))) &&
-	    (rx_ring->flags & IAVF_RXR_FLAGS_VLAN_TAG_LOC_L2TAG2_2))
+	else if ((rx_ring->flags & IAVF_RXR_FLAGS_VLAN_TAG_LOC_L2TAG2_2) &&
+		 (rx_desc->wb.qword2.ext_status &
+		  cpu_to_le16(BIT(IAVF_RX_DESC_EXT_STATUS_L2TAG2P_SHIFT))))
 		vlan_tag = le16_to_cpu(rx_desc->wb.qword2.l2tag2_2);
+	else
+		vlan_tag = 0;
 
-	if (!(vlan_tag & VLAN_VID_MASK))
-		return;
-
-	if (rx_ring->netdev->features & NETIF_F_HW_VLAN_CTAG_RX)
-		__vlan_hwaccel_put_tag(skb, htons(ETH_P_8021Q), vlan_tag);
-	else if (rx_ring->netdev->features & NETIF_F_HW_VLAN_STAG_RX)
-		__vlan_hwaccel_put_tag(skb, htons(ETH_P_8021AD), vlan_tag);
+	if (vlan_tag & VLAN_VID_MASK)
+		__vlan_hwaccel_put_tag(skb, prot, vlan_tag);
 }
 
 /**
