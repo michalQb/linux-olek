@@ -3683,7 +3683,6 @@ static int iavf_setup_all_rx_resources(struct iavf_adapter *adapter)
 	for (i = 0; i < adapter->num_active_queues; i++) {
 		rx_ring = &adapter->rx_rings[i];
 		rx_ring->count = adapter->rx_desc_count;
-		rx_ring->xsk_pool = iavf_rx_xsk_pool(rx_ring);
 
 		err = iavf_setup_rx_descriptors(&adapter->rx_rings[i]);
 		if (!err)

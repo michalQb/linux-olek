@@ -265,13 +265,6 @@ struct iavf_ring {
 	u16 next_to_use;
 	u16 next_to_clean;
 
-	u8 atr_sample_rate;
-	u8 atr_count;
-
-	bool ring_active;		/* is ring online or not */
-	bool arm_wb;		/* do something to arm write back */
-	u8 packet_stride;
-
 	u16 flags;
 #define IAVF_TXR_FLAGS_WB_ON_ITR		BIT(0)
 #define IAVF_TXRX_FLAGS_ARM_WB			BIT(1)
@@ -548,7 +541,7 @@ static inline u16 iavf_set_rs_bit(struct iavf_ring *xdp_ring)
  * @first_idx: index of the first frame in the transmitted batch on XDP queue
  */
 static inline void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring,
-					u16 rxq_xdp_act, u32 first_idx)
+					u32 rxq_xdp_act, u32 first_idx)
 {
 	struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[first_idx];
 

@@ -244,12 +244,12 @@ static int iavf_qp_ena(struct iavf_adapter *adapter, u16 q_idx)
 	tx_queues = rx_queues;
 
 	if (iavf_adapter_xdp_active(adapter)) {
-		struct iavf_ring *xdp_ring = &adapter->xdp_rings[q_idx];
+//		struct iavf_ring *xdp_ring = &adapter->xdp_rings[q_idx];
 
 		tx_queues |= BIT(xdp_ring->queue_index);
 
-		iavf_set_ring_xdp(xdp_ring);
-		xdp_ring->xsk_pool = iavf_tx_xsk_pool(xdp_ring);
+//		iavf_set_ring_xdp(xdp_ring);
+//		xdp_ring->xsk_pool = iavf_tx_xsk_pool(xdp_ring);
 	}
 
 	/* Use 'tx_queues' mask as a queue pair mask to configure
@@ -903,65 +903,6 @@ void iavf_xsk_clean_rx_ring(struct iavf_ring *rx_ring)
 	}
 }
 
-static int iavf_xmit_xdp_buff_zc(struct xdp_buff *xdp,
-				 struct iavf_ring *xdp_ring)
-{
-	u32 batch_sz = IAVF_RING_QUARTER(xdp_ring);
-	u32 size = xdp->data_end - xdp->data;
-	u32 ntu = xdp_ring->next_to_use;
-	struct iavf_tx_buffer *tx_buff;
-	struct iavf_tx_desc *tx_desc;
-	void *data = xdp->data;
-	dma_addr_t dma;
-
-	if (unlikely(IAVF_DESC_UNUSED(xdp_ring) < batch_sz))
-		iavf_clean_xdp_irq_zc(xdp_ring);
-
-	if (unlikely(!IAVF_DESC_UNUSED(xdp_ring))) {
-		xdp_ring->tx_stats.tx_busy++;
-		return -EBUSY;
-	}
-
-	dma = xsk_buff_xdp_get_dma(xdp);
-	xsk_buff_raw_dma_sync_for_device(xdp_ring->xsk_pool, dma, size);
-
-	tx_buff = &xdp_ring->tx_bi[ntu];
-	tx_buff->bytecount = size;
-	tx_buff->gso_segs = 1;
-	/* TODO: set type to XSK_TX or XDP_XMIT depending on @map and assign
-	 * @xdp here.
-	 */
-	tx_buff->raw_buf = data;
-
-	/* record length, and DMA address */
-	dma_unmap_len_set(tx_buff, len, size);
-	dma_unmap_addr_set(tx_buff, dma, dma);
-
-	tx_desc = IAVF_TX_DESC(xdp_ring, ntu);
-	tx_desc->buffer_addr = cpu_to_le64(dma);
-	tx_desc->cmd_type_offset_bsz = iavf_build_ctob(IAVF_TX_DESC_CMD_EOP, 0,
-						       size, 0);
-
-	ntu++;
-	if (ntu > xdp_ring->next_rs) {
-		tx_desc = IAVF_TX_DESC(xdp_ring, xdp_ring->next_rs);
-		tx_desc->cmd_type_offset_bsz |=
-			cpu_to_le64(IAVF_TX_DESC_CMD_RS <<
-				    IAVF_TXD_QW1_CMD_SHIFT);
-		xdp_ring->next_rs += batch_sz;
-	}
-
-	if (ntu == xdp_ring->count) {
-		ntu = 0;
-		xdp_ring->next_rs = batch_sz - 1;
-	}
-
-	xdp_ring->next_to_use = ntu;
-	xdp_ring->xdp_tx_active++;
-
-	return 0;
-}
-
 /**
  * iavf_xmit_xdp_tx_zc - AF_XDP ZC handler for XDP_TX
  * @xdp: XDP buffer to xmit
@@ -975,14 +916,14 @@ static int iavf_xmit_xdp_tx_zc(struct xdp_buff *xdp,
 {
 	u32 size = xdp->data_end - xdp->data;
 	u32 ntu = xdp_ring->next_to_use;
-	struct iavf_tx_desc *tx_desc;
 	struct iavf_tx_buffer *tx_buf;
+	struct iavf_tx_desc *tx_desc;
 	dma_addr_t dma;
 
 	if (IAVF_DESC_UNUSED(xdp_ring) < IAVF_RING_QUARTER(xdp_ring))
 		iavf_clean_xdp_irq_zc(xdp_ring);
 
-	if (!IAVF_DESC_UNUSED(xdp_ring)) {
+	if (unlikely(!IAVF_DESC_UNUSED(xdp_ring))) {
 		xdp_ring->tx_stats.tx_busy++;
 		return -EBUSY;
 	}
