@@ -543,11 +543,11 @@ static inline u16 iavf_set_rs_bit(struct iavf_ring *xdp_ring)
 static inline void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring,
 					u32 rxq_xdp_act, u32 first_idx)
 {
-	struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[first_idx];
-
 	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_REDIR)
 		xdp_do_flush_map();
 	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_TX) {
+		struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[first_idx];
+
 		if (static_branch_unlikely(&iavf_xdp_locking_key))
 			spin_lock(&xdp_ring->tx_lock);
 		tx_buf->rs_desc_idx = iavf_set_rs_bit(xdp_ring);

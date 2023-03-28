@@ -47,9 +47,12 @@ static void iavf_unmap_and_free_tx_resource(struct iavf_ring *ring,
  */
 static void iavf_free_xdp_resource(struct iavf_tx_buffer *tx_buffer)
 {
+	struct page *page;
+
 	switch (tx_buffer->xdp_type) {
 	case IAVF_XDP_BUFFER_TX:
-		page_frag_free(tx_buffer->raw_buf);
+		page = virt_to_head_page(tx_buffer->raw_buf);
+		page_pool_put_full_page(page->pp, page, true);
 		tx_buffer->raw_buf = NULL;
 		break;
 	case IAVF_XDP_BUFFER_FRAME:
@@ -2337,7 +2340,6 @@ static u32 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
 	struct libie_sq_onstack_stats stats = { };
 	struct iavf_tx_desc *last_rs_desc;
 	u32 ntc = xdp_ring->next_to_clean;
-	u32 next_dd = xdp_ring->next_dd;
 	u32 cnt = xdp_ring->count;
 	u16 done_frames = 0;
 	u16 rs_idx;

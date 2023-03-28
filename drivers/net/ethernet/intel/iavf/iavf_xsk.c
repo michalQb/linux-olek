@@ -200,20 +200,20 @@ iavf_realloc_rx_xdp_bufs(struct iavf_ring *rx_ring)
 	void *sw_ring;
 
 	elem_size = pool_present ? sizeof(*rx_ring->xdp_buff) :
-				   sizeof(*rx_ring->rx_bi);
+				   sizeof(*rx_ring->rx_pages);
 
 	sw_ring = kcalloc(rx_ring->count, elem_size, GFP_KERNEL);
 	if (!sw_ring)
 		return -ENOMEM;
 
 	if (pool_present) {
-		kfree(rx_ring->rx_bi);
-		rx_ring->rx_bi = NULL;
+		kfree(rx_ring->rx_pages);
+		rx_ring->rx_pages = NULL;
 		rx_ring->xdp_buff = sw_ring;
 	} else {
 		kfree(rx_ring->xdp_buff);
 		rx_ring->xdp_buff = NULL;
-		rx_ring->rx_bi = sw_ring;
+		rx_ring->rx_pages = sw_ring;
 	}
 
 	return 0;
@@ -244,7 +244,7 @@ static int iavf_qp_ena(struct iavf_adapter *adapter, u16 q_idx)
 	tx_queues = rx_queues;
 
 	if (iavf_adapter_xdp_active(adapter)) {
-//		struct iavf_ring *xdp_ring = &adapter->xdp_rings[q_idx];
+		struct iavf_ring *xdp_ring = &adapter->xdp_rings[q_idx];
 
 		tx_queues |= BIT(xdp_ring->queue_index);
 
@@ -849,6 +849,7 @@ void iavf_check_alloc_rx_buffers_zc(struct iavf_adapter *adapter,
 			    rx_ring->queue_index);
 }
 
+#if 0
 /**
  * iavf_rx_xsk_pool - Get a valid xsk pool for RX ring
  * @ring: Rx ring being configured
@@ -871,6 +872,8 @@ static struct xsk_buff_pool *iavf_rx_xsk_pool(struct iavf_ring *ring)
 
 	return pool;
 }
+
+#endif // 0
 
 void iavf_xsk_setup_rx_ring(struct iavf_ring *rx_ring)
 {
