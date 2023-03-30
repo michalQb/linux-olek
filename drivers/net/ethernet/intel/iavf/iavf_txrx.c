@@ -43,45 +43,31 @@ static void iavf_unmap_and_free_tx_resource(struct iavf_ring *ring,
 
 /**
  * iavf_free_xdp_resource - Correctly free XDP TX buffer
- * @tx_buffer: the buffer being released
+ * @ring:	XDP ring
+ * @tx_buffer: 	the buffer being released
  */
-static void iavf_free_xdp_resource(struct iavf_tx_buffer *tx_buffer)
+static void iavf_free_xdp_resource(struct iavf_ring *ring,
+				   struct iavf_tx_buffer *tx_buffer)
 {
 	struct page *page;
+	u32 put_size; 
 
 	switch (tx_buffer->xdp_type) {
 	case IAVF_XDP_BUFFER_TX:
-		page = virt_to_head_page(tx_buffer->raw_buf);
-		page_pool_put_full_page(page->pp, page, true);
-		tx_buffer->raw_buf = NULL;
+		page = tx_buffer->page;
+		put_size = dma_unmap_len(tx_buffer, len);
+		page_pool_put_page(page->pp, page, put_size, true);
 		break;
 	case IAVF_XDP_BUFFER_FRAME:
-		xdp_return_frame(tx_buffer->xdpf);
-		tx_buffer->xdpf = NULL;
-		break;
-	}
-
-	tx_buffer->xdp_type = IAVF_XDP_BUFFER_NONE;
-}
-
-/**
- * iavf_unmap_and_free_xdp_resource - Release a TX buffer on XDP ring
- * @ring: the ring that owns the buffer
- * @tx_buffer: the buffer to free
- */
-static void iavf_unmap_and_free_xdp_resource(struct iavf_ring *ring,
-					     struct iavf_tx_buffer *tx_buffer)
-{
-	if (dma_unmap_len(tx_buffer, len))
 		dma_unmap_page(ring->dev,
 			       dma_unmap_addr(tx_buffer, dma),
 			       dma_unmap_len(tx_buffer, len),
 			       DMA_TO_DEVICE);
+		xdp_return_frame(tx_buffer->xdpf);
+		break;
+	}
 
-	dma_unmap_len_set(tx_buffer, len, 0);
-
-	if (tx_buffer->raw_buf)
-		iavf_free_xdp_resource(tx_buffer);
+	tx_buffer->xdp_type = IAVF_XDP_BUFFER_NONE;
 }
 
 /**
@@ -95,7 +81,7 @@ static void iavf_release_tx_resources(struct iavf_ring *ring)
 
 	for (i = 0; i < ring->count; i++)
 		if (is_xdp)
-			iavf_unmap_and_free_xdp_resource(ring, &ring->tx_bi[i]);
+			iavf_free_xdp_resource(ring, &ring->tx_bi[i]);
 		else
 			iavf_unmap_and_free_tx_resource(ring, &ring->tx_bi[i]);
 }
@@ -2346,7 +2332,7 @@ static u32 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
 	u32 i;
 
 	/* Last RS index is invalid in xsk frames */
-	if (!xdp_ring->tx_bi[ntc].raw_buf)
+	if (!xdp_ring->tx_bi[ntc].page)
 		return 0;
 
 	rs_idx = xdp_ring->tx_bi[ntc].rs_desc_idx;
@@ -2367,10 +2353,7 @@ static u32 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
 		 */
 		stats.packets++;
 
-		dma_unmap_single(xdp_ring->dev, dma_unmap_addr(tx_buf, dma),
-				 dma_unmap_len(tx_buf, len), DMA_TO_DEVICE);
-		dma_unmap_len_set(tx_buf, len, 0);
-		iavf_free_xdp_resource(tx_buf);
+		iavf_free_xdp_resource(xdp_ring, tx_buf);
 
 		ntc++;
 		if (ntc >= xdp_ring->count)
@@ -2433,7 +2416,7 @@ static int iavf_xmit_xdp_buff(const struct xdp_buff *xdp,
 		tx_buff->xdpf = xdp->data_hard_start;
 	} else {
 		tx_buff->xdp_type = IAVF_XDP_BUFFER_TX;
-		tx_buff->raw_buf = data;
+		tx_buff->page = virt_to_page(data);
 	}
 
 	/* record length, and DMA address */

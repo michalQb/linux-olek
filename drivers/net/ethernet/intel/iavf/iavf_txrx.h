@@ -208,7 +208,7 @@ struct iavf_tx_buffer {
 	};
 	union {
 		struct sk_buff *skb;		/* used for .ndo_start_xmit() */
-		void *raw_buf;			/* used for XDP_TX */
+		struct page *page;		/* used for XDP_TX */
 		struct xdp_frame *xdpf;		/* used for .ndo_xdp_xmit() */
 		struct xdp_buff *xdp;		/* used for XDP_TX in ZC mode */
 	};

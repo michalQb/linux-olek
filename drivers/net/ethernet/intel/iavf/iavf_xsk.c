@@ -149,8 +149,8 @@ iavf_qvec_ena_irq(struct iavf_adapter *adapter, struct iavf_q_vector *q_vector)
 static int iavf_qp_dis(struct iavf_adapter *adapter, u16 q_idx)
 {
 	struct iavf_vsi *vsi = &adapter->vsi;
+	struct iavf_ring *rx_ring, *xdp_ring;
 	struct iavf_q_vector *q_vector;
-	struct iavf_ring *rx_ring;
 	u32 rx_queues, tx_queues;
 	int err;
 
@@ -168,55 +168,21 @@ static int iavf_qp_dis(struct iavf_adapter *adapter, u16 q_idx)
 	iavf_qvec_toggle_napi(adapter, q_vector, false);
 	iavf_qvec_dis_irq(adapter, q_vector);
 
-	if (iavf_adapter_xdp_active(adapter)) {
-		struct iavf_ring *xdp_ring = &adapter->xdp_rings[q_idx];
+	xdp_ring = &adapter->xdp_rings[q_idx];
 
-		tx_queues |= BIT(xdp_ring->queue_index);
-	}
+	tx_queues |= BIT(xdp_ring->queue_index);
 
 	err = iavf_disable_selected_queues(adapter, rx_queues, tx_queues, true);
 	if (err)
 		goto dis_exit;
 
+	iavf_free_tx_resources(xdp_ring);
+	iavf_free_rx_resources(rx_ring);
+
 	iavf_qp_clean_rings(adapter, q_idx);
 	iavf_qp_reset_stats(adapter, q_idx);
 dis_exit:
 	return err;
-}
-
-/**
- * iavf_realloc_rx_xdp_bufs - reallocate for either XSK or normal buffer
- * @rx_ring: Rx ring
- *
- * Try allocating memory and return ENOMEM, if failed to allocate.
- * If allocation was successful, substitute buffer with allocated one.
- * Returns 0 on success, negative on failure
- */
-static int
-iavf_realloc_rx_xdp_bufs(struct iavf_ring *rx_ring)
-{
-	bool pool_present = !!rx_ring->xsk_pool;
-	size_t elem_size;
-	void *sw_ring;
-
-	elem_size = pool_present ? sizeof(*rx_ring->xdp_buff) :
-				   sizeof(*rx_ring->rx_pages);
-
-	sw_ring = kcalloc(rx_ring->count, elem_size, GFP_KERNEL);
-	if (!sw_ring)
-		return -ENOMEM;
-
-	if (pool_present) {
-		kfree(rx_ring->rx_pages);
-		rx_ring->rx_pages = NULL;
-		rx_ring->xdp_buff = sw_ring;
-	} else {
-		kfree(rx_ring->xdp_buff);
-		rx_ring->xdp_buff = NULL;
-		rx_ring->rx_pages = sw_ring;
-	}
-
-	return 0;
 }
 
 /**
@@ -247,10 +213,11 @@ static int iavf_qp_ena(struct iavf_adapter *adapter, u16 q_idx)
 		struct iavf_ring *xdp_ring = &adapter->xdp_rings[q_idx];
 
 		tx_queues |= BIT(xdp_ring->queue_index);
-
-//		iavf_set_ring_xdp(xdp_ring);
-//		xdp_ring->xsk_pool = iavf_tx_xsk_pool(xdp_ring);
+		iavf_setup_tx_descriptors(xdp_ring);
 	}
+
+	iavf_setup_rx_descriptors(rx_ring);
+	iavf_configure_rx_ring(adapter, rx_ring);
 
 	/* Use 'tx_queues' mask as a queue pair mask to configure
 	 * also an extra XDP Tx queue.
@@ -258,18 +225,6 @@ static int iavf_qp_ena(struct iavf_adapter *adapter, u16 q_idx)
 	err = iavf_configure_selected_queues(adapter, tx_queues, true);
 	if (err)
 		goto ena_exit;
-
-	rx_ring->xsk_pool = iavf_rx_xsk_pool(rx_ring);
-
-	err = iavf_realloc_rx_xdp_bufs(rx_ring);
-	if (err) {
-		netdev_err(vsi->netdev,
-			   "Could not reallocate RX buffers after changing xsk_pool on queue %u, error: %d\n",
-			   q_idx, err);
-		goto ena_exit;
-	}
-
-	iavf_configure_rx_ring(adapter, rx_ring);
 
 	err = iavf_enable_selected_queues(adapter, rx_queues, tx_queues, true);
 	if (err)
@@ -689,12 +644,12 @@ void iavf_xsk_clean_xdp_ring(struct iavf_ring *xdp_ring)
 	while (ntc != ntu) {
 		struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[ntc];
 
-		if (tx_buf->raw_buf)
+		if (tx_buf->xdp_type)
 			iavf_clean_xdp_tx_buf(xdp_ring, tx_buf);
 		else
 			xsk_frames++;
 
-		tx_buf->raw_buf = NULL;
+		tx_buf->page = NULL;
 
 		ntc++;
 		if (ntc >= xdp_ring->count)
@@ -849,7 +804,6 @@ void iavf_check_alloc_rx_buffers_zc(struct iavf_adapter *adapter,
 			    rx_ring->queue_index);
 }
 
-#if 0
 /**
  * iavf_rx_xsk_pool - Get a valid xsk pool for RX ring
  * @ring: Rx ring being configured
@@ -872,8 +826,6 @@ static struct xsk_buff_pool *iavf_rx_xsk_pool(struct iavf_ring *ring)
 
 	return pool;
 }
-
-#endif // 0
 
 void iavf_xsk_setup_rx_ring(struct iavf_ring *rx_ring)
 {
