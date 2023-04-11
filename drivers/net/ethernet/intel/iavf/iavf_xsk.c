@@ -176,9 +176,6 @@ static int iavf_qp_dis(struct iavf_adapter *adapter, u16 q_idx)
 	if (err)
 		goto dis_exit;
 
-	iavf_free_tx_resources(xdp_ring);
-	iavf_free_rx_resources(rx_ring);
-
 	iavf_qp_clean_rings(adapter, q_idx);
 	iavf_qp_reset_stats(adapter, q_idx);
 dis_exit:
@@ -195,28 +192,35 @@ dis_exit:
 static int iavf_qp_ena(struct iavf_adapter *adapter, u16 q_idx)
 {
 	struct iavf_vsi *vsi = &adapter->vsi;
+	struct iavf_ring *rx_ring, *xdp_ring;
 	struct iavf_q_vector *q_vector;
-	struct iavf_ring *rx_ring;
 	u32 rx_queues, tx_queues;
-	int err = 0;
+	int ret, err = 0;
 
 	if (q_idx >= adapter->num_active_queues)
 		return -EINVAL;
 
+	xdp_ring = &adapter->xdp_rings[q_idx];
 	rx_ring = &adapter->rx_rings[q_idx];
 	q_vector = rx_ring->q_vector;
 
 	rx_queues = BIT(q_idx);
 	tx_queues = rx_queues;
+	tx_queues |= BIT(xdp_ring->queue_index);
 
-	if (iavf_adapter_xdp_active(adapter)) {
-		struct iavf_ring *xdp_ring = &adapter->xdp_rings[q_idx];
+	iavf_xsk_setup_xdp_ring(xdp_ring);
+	iavf_xsk_setup_rx_ring(rx_ring);
 
-		tx_queues |= BIT(xdp_ring->queue_index);
-		iavf_setup_tx_descriptors(xdp_ring);
+	if (!(rx_ring->flags & IAVF_TXRX_FLAGS_XSK)) {
+		rx_ring->pool = libie_rx_page_pool_create(rx_ring->netdev,
+							  rx_ring->count,
+							  true);
+		if (IS_ERR(rx_ring->pool)) {
+			err = PTR_ERR(rx_ring->pool);
+			goto ena_exit;
+		}
 	}
 
-	iavf_setup_rx_descriptors(rx_ring);
 	iavf_configure_rx_ring(adapter, rx_ring);
 
 	/* Use 'tx_queues' mask as a queue pair mask to configure
@@ -229,6 +233,19 @@ static int iavf_qp_ena(struct iavf_adapter *adapter, u16 q_idx)
 	err = iavf_enable_selected_queues(adapter, rx_queues, tx_queues, true);
 	if (err)
 		goto ena_exit;
+
+	ret = iavf_poll_for_link_status(adapter, IAVF_XDP_LINK_TIMEOUT_MS);
+	if (ret < 0) {
+		err = ret;
+		dev_err(&adapter->pdev->dev,
+			"cannot bring the link up, error: %d\n", err);
+		goto ena_exit;
+	} else if (!ret) {
+		err = -EBUSY;
+		dev_err(&adapter->pdev->dev,
+			"pf returned link down status, error: %d\n", err);
+		goto ena_exit;
+	}
 
 	iavf_qvec_toggle_napi(adapter, q_vector, true);
 	iavf_qvec_ena_irq(adapter, q_vector);
@@ -625,11 +642,13 @@ void iavf_xsk_setup_xdp_ring(struct iavf_ring *xdp_ring)
 	struct xsk_buff_pool *pool;
 
 	pool = iavf_tx_xsk_pool(xdp_ring);
-	if (!pool)
-		return;
-
-	xdp_ring->xsk_pool = pool;
-	xdp_ring->flags |= IAVF_TXRX_FLAGS_XSK;
+	if (pool) {
+		xdp_ring->xsk_pool = pool;
+		xdp_ring->flags |= IAVF_TXRX_FLAGS_XSK;
+	} else {
+		xdp_ring->dev = &xdp_ring->vsi->back->pdev->dev;
+		xdp_ring->flags &= ~IAVF_TXRX_FLAGS_XSK;
+	}
 }
 
 /**
@@ -832,11 +851,13 @@ void iavf_xsk_setup_rx_ring(struct iavf_ring *rx_ring)
 	struct xsk_buff_pool *pool;
 
 	pool = iavf_rx_xsk_pool(rx_ring);
-	if (!pool)
-		return;
-
-	rx_ring->xsk_pool = pool;
-	rx_ring->flags |= IAVF_TXRX_FLAGS_XSK;
+	if (pool) {
+		rx_ring->xsk_pool = pool;
+		rx_ring->flags |= IAVF_TXRX_FLAGS_XSK;
+	} else {
+		rx_ring->dev = &rx_ring->vsi->back->pdev->dev;
+		rx_ring->flags &= ~IAVF_TXRX_FLAGS_XSK;
+	}
 }
 
 /**

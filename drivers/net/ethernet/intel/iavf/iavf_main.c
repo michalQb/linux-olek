@@ -4991,7 +4991,6 @@ static void iavf_assign_bpf_prog(struct iavf_adapter *adapter,
 		bpf_prog_put(old_prog);
 }
 
-#define IAVF_XDP_LINK_TIMEOUT_MS	1000
 #define IAVF_XDP_LOCK_TIMEOUT_MS	5000
 
 /**
