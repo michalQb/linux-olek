@@ -3,7 +3,7 @@
 
 #include <linux/bpf_trace.h>
 #include <linux/filter.h>
-#include <linux/net/intel/libie.h>
+#include <linux/net/intel/libie/rx.h>
 #include <net/xdp_sock_drv.h>
 #include <net/xdp_sock.h>
 #include "iavf.h"
@@ -37,13 +37,13 @@ iavf_max_xdp_queues_count(struct iavf_adapter *adapter)
 static void
 iavf_qp_reset_stats(struct iavf_adapter *adapter, u16 q_idx)
 {
-	memset(&adapter->rx_rings[q_idx].stats, 0,
-	       sizeof(adapter->rx_rings[q_idx].stats));
-	memset(&adapter->tx_rings[q_idx].stats, 0,
-	       sizeof(adapter->tx_rings[q_idx].stats));
+	memset(&adapter->rx_rings[q_idx].rq_stats, 0,
+	       sizeof(adapter->rx_rings[q_idx].rq_stats));
+	memset(&adapter->tx_rings[q_idx].sq_stats, 0,
+	       sizeof(adapter->tx_rings[q_idx].sq_stats));
 	if (iavf_adapter_xdp_active(adapter))
-		memset(&adapter->xdp_rings[q_idx].stats, 0,
-		       sizeof(adapter->xdp_rings[q_idx].stats));
+		memset(&adapter->xdp_rings[q_idx].sq_stats, 0,
+		       sizeof(adapter->xdp_rings[q_idx].sq_stats));
 }
 
 /**
@@ -536,8 +536,8 @@ static void iavf_fill_tx_hw_ring(struct iavf_ring *xdp_ring,
 bool iavf_xmit_zc(struct iavf_ring *xdp_ring)
 {
 	struct xdp_desc *descs = xdp_ring->xsk_pool->tx_descs;
-	u32 nb_pkts, nb_processed = 0;
-	unsigned int total_bytes = 0;
+	struct libie_sq_onstack_stats stats = { };
+	u32 nb_processed = 0;
 	bool ret = true;
 	int budget;
 
@@ -549,28 +549,28 @@ bool iavf_xmit_zc(struct iavf_ring *xdp_ring)
 	budget = IAVF_DESC_UNUSED(xdp_ring);
 	budget = min_t(u16, budget, IAVF_RING_QUARTER(xdp_ring));
 
-	nb_pkts = xsk_tx_peek_release_desc_batch(xdp_ring->xsk_pool, budget);
-	if (!nb_pkts)
+	stats.packets = xsk_tx_peek_release_desc_batch(xdp_ring->xsk_pool, budget);
+	if (!stats.packets)
 		goto unlock;
 
-	if (xdp_ring->next_to_use + nb_pkts >= xdp_ring->count) {
+	if (xdp_ring->next_to_use + stats.packets >= xdp_ring->count) {
 		nb_processed = xdp_ring->count - xdp_ring->next_to_use;
 		iavf_fill_tx_hw_ring(xdp_ring, descs, nb_processed,
-				     &total_bytes);
+				     &stats.bytes);
 		xdp_ring->next_to_use = 0;
 	}
 
 	iavf_fill_tx_hw_ring(xdp_ring, &descs[nb_processed],
-			     nb_pkts - nb_processed, &total_bytes);
+			     stats.packets - nb_processed, &stats.bytes);
 
 	iavf_set_rs_bit(xdp_ring);
 	iavf_xdp_ring_update_tail(xdp_ring);
-	iavf_update_tx_ring_stats(xdp_ring, nb_pkts, total_bytes);
+	iavf_update_tx_ring_stats(xdp_ring, &stats);
 
 	if (xsk_uses_need_wakeup(xdp_ring->xsk_pool))
 		xsk_set_tx_need_wakeup(xdp_ring->xsk_pool);
 
-	ret = nb_pkts < budget;
+	ret = stats.packets < budget;
 unlock:
 	if (static_branch_unlikely(&iavf_xdp_locking_key))
 		spin_unlock(&xdp_ring->tx_lock);
@@ -900,7 +900,7 @@ static int iavf_xmit_xdp_tx_zc(struct xdp_buff *xdp,
 		iavf_clean_xdp_irq_zc(xdp_ring);
 
 	if (unlikely(!IAVF_DESC_UNUSED(xdp_ring))) {
-		xdp_ring->tx_stats.tx_busy++;
+		libie_stats_inc_one(&xdp_ring->sq_stats, busy);
 		return -EBUSY;
 	}
 
@@ -1047,7 +1047,7 @@ iavf_construct_skb_zc(struct iavf_ring *rx_ring, struct xdp_buff *xdp)
  */
 int iavf_clean_rx_irq_zc(struct iavf_ring *rx_ring, int budget)
 {
-	unsigned int total_rx_bytes = 0, total_rx_packets = 0;
+	struct libie_rq_onstack_stats stats = { };
 	u32 ntc = rx_ring->next_to_clean;
 	u32 ring_size = rx_ring->count;
 	struct iavf_ring *xdp_ring;
@@ -1109,8 +1109,8 @@ int iavf_clean_rx_irq_zc(struct iavf_ring *rx_ring, int budget)
 			break;
 		}
 
-		total_rx_bytes += size;
-		total_rx_packets++;
+		stats.bytes += size;
+		stats.packets++;
 
 next:
 		cleaned_count++;
@@ -1122,7 +1122,8 @@ next:
 construct_skb:
 		skb = iavf_construct_skb_zc(rx_ring, xdp);
 		if (!skb) {
-			rx_ring->rx_stats.alloc_buff_failed++;
+			libie_stats_inc_one(&rx_ring->rq_stats,
+					    build_skb_fail);
 			break;
 		}
 
@@ -1133,7 +1134,7 @@ construct_skb:
 		prefetch(rx_desc);
 
 		/* probably a little skewed due to removing CRC */
-		total_rx_bytes += skb->len;
+		stats.bytes += skb->len;
 
 		/* populate checksum, VLAN, and protocol */
 		iavf_process_skb_fields(rx_ring, rx_desc, skb, qword);
@@ -1142,7 +1143,7 @@ construct_skb:
 		skb->protocol = eth_type_trans(skb, rx_ring->netdev);
 		napi_gro_receive(&rx_ring->q_vector->napi, skb);
 
-		total_rx_packets++;
+		stats.packets++;
 	}
 
 	rx_ring->next_to_clean = ntc;
@@ -1153,7 +1154,7 @@ construct_skb:
 	if (to_refill > IAVF_RING_QUARTER(rx_ring))
 		failure |= !iavf_alloc_rx_buffers_zc(rx_ring, to_refill);
 
-	iavf_update_rx_ring_stats(rx_ring, total_rx_bytes, total_rx_packets);
+	iavf_update_rx_ring_stats(rx_ring, &stats);
 
 	if (xsk_uses_need_wakeup(rx_ring->xsk_pool)) {
 		if (failure || rx_ring->next_to_clean == rx_ring->next_to_use)
