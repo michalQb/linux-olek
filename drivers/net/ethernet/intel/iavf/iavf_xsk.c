@@ -30,23 +30,6 @@ iavf_max_xdp_queues_count(struct iavf_adapter *adapter)
 }
 
 /**
- * iavf_qp_reset_stats - Resets all stats for rings of given index
- * @adapter: adapter that contains rings of interest
- * @q_idx: ring index in array
- */
-static void
-iavf_qp_reset_stats(struct iavf_adapter *adapter, u16 q_idx)
-{
-	memset(&adapter->rx_rings[q_idx].rq_stats, 0,
-	       sizeof(adapter->rx_rings[q_idx].rq_stats));
-	memset(&adapter->tx_rings[q_idx].sq_stats, 0,
-	       sizeof(adapter->tx_rings[q_idx].sq_stats));
-	if (iavf_adapter_xdp_active(adapter))
-		memset(&adapter->xdp_rings[q_idx].sq_stats, 0,
-		       sizeof(adapter->xdp_rings[q_idx].sq_stats));
-}
-
-/**
  * iavf_qp_clean_rings - Cleans all the rings of a given index
  * @adapter: adapter that contains rings of interest
  * @q_idx: ring index in array
@@ -177,7 +160,12 @@ static int iavf_qp_dis(struct iavf_adapter *adapter, u16 q_idx)
 		goto dis_exit;
 
 	iavf_qp_clean_rings(adapter, q_idx);
-	iavf_qp_reset_stats(adapter, q_idx);
+	if (!(rx_ring->flags & IAVF_TXRX_FLAGS_XSK)) {
+		struct device *dev = rx_ring->pool->p.dev;
+
+		libie_rx_page_pool_destroy(rx_ring->pool, &rx_ring->rq_stats);
+		rx_ring->dev = dev;
+	}
 dis_exit:
 	return err;
 }
