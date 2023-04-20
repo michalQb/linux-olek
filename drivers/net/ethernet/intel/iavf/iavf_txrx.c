@@ -26,29 +26,64 @@ static bool iavf_xdp_xmit_back(const struct xdp_buff *buff,
 static void iavf_unmap_and_free_tx_resource(struct iavf_ring *ring,
 					    struct iavf_tx_buffer *tx_buffer)
 {
-	if (tx_buffer->skb) {
-		if (tx_buffer->tx_flags & IAVF_TX_FLAGS_FD_SB)
-			kfree(tx_buffer->raw_buf);
-		else if (ring->flags & IAVF_TXRX_FLAGS_XDP)
-			page_frag_free(tx_buffer->raw_buf);
-		else
-			dev_kfree_skb_any(tx_buffer->skb);
-		if (dma_unmap_len(tx_buffer, len))
-			dma_unmap_single(ring->dev,
-					 dma_unmap_addr(tx_buffer, dma),
-					 dma_unmap_len(tx_buffer, len),
-					 DMA_TO_DEVICE);
-	} else if (dma_unmap_len(tx_buffer, len)) {
+	if (tx_buffer->skb)
+		dev_kfree_skb_any(tx_buffer->skb);
+
+	if (dma_unmap_len(tx_buffer, len))
 		dma_unmap_page(ring->dev,
 			       dma_unmap_addr(tx_buffer, dma),
 			       dma_unmap_len(tx_buffer, len),
 			       DMA_TO_DEVICE);
-	}
 
 	tx_buffer->next_to_watch = NULL;
 	tx_buffer->skb = NULL;
 	dma_unmap_len_set(tx_buffer, len, 0);
 	/* tx_buffer must be completely set up in the transmit path */
+}
+
+/**
+ * iavf_free_xdp_resource - Correctly free XDP TX buffer
+ * @ring:	XDP ring
+ * @tx_buffer: 	the buffer being released
+ */
+static void iavf_free_xdp_resource(struct iavf_ring *ring,
+				   struct iavf_tx_buffer *tx_buffer)
+{
+	struct page *page;
+	u32 put_size; 
+
+	switch (tx_buffer->xdp_type) {
+	case IAVF_XDP_BUFFER_TX:
+		page = tx_buffer->page;
+		put_size = dma_unmap_len(tx_buffer, len);
+		page_pool_put_page(page->pp, page, put_size, true);
+		break;
+	case IAVF_XDP_BUFFER_FRAME:
+		dma_unmap_page(ring->dev,
+			       dma_unmap_addr(tx_buffer, dma),
+			       dma_unmap_len(tx_buffer, len),
+			       DMA_TO_DEVICE);
+		xdp_return_frame(tx_buffer->xdpf);
+		break;
+	}
+
+	tx_buffer->xdp_type = IAVF_XDP_BUFFER_NONE;
+}
+
+/**
+ * iavf_release_tx_resources - Release all Tx buffers on ring
+ * @ring: TX or XDP ring
+ */
+static void iavf_release_tx_resources(struct iavf_ring *ring)
+{
+	bool is_xdp = iavf_ring_is_xdp(ring);
+	u32 i;
+
+	for (i = 0; i < ring->count; i++)
+		if (is_xdp)
+			iavf_free_xdp_resource(ring, &ring->tx_bi[i]);
+		else
+			iavf_unmap_and_free_tx_resource(ring, &ring->tx_bi[i]);
 }
 
 /**
@@ -67,9 +102,7 @@ void iavf_clean_tx_ring(struct iavf_ring *tx_ring)
 		iavf_xsk_clean_xdp_ring(tx_ring);
 	} else {
 		/* Free all the Tx ring sk_buffs */
-		for (u32 i = 0; i < tx_ring->count; i++)
-			iavf_unmap_and_free_tx_resource(tx_ring,
-							&tx_ring->tx_bi[i]);
+		iavf_release_tx_resources(tx_ring);
 	}
 
 	bi_size = sizeof(struct iavf_tx_buffer) * tx_ring->count;
@@ -80,8 +113,6 @@ void iavf_clean_tx_ring(struct iavf_ring *tx_ring)
 
 	tx_ring->next_to_use = 0;
 	tx_ring->next_to_clean = 0;
-	tx_ring->next_rs = IAVF_RING_QUARTER(tx_ring) - 1;
-	tx_ring->next_dd = IAVF_RING_QUARTER(tx_ring) - 1;
 
 	if (!tx_ring->netdev)
 		return;
@@ -692,8 +723,6 @@ int iavf_setup_tx_descriptors(struct iavf_ring *tx_ring)
 
 	tx_ring->next_to_use = 0;
 	tx_ring->next_to_clean = 0;
-	tx_ring->next_rs = IAVF_RING_QUARTER(tx_ring) - 1;
-	tx_ring->next_dd = IAVF_RING_QUARTER(tx_ring) - 1;
 	tx_ring->prev_pkt_ctr = -1;
 	for (j = 0; j < tx_ring->count; j++) {
 		tx_desc = IAVF_TX_DESC(tx_ring, j);
@@ -1126,7 +1155,7 @@ static bool iavf_is_non_eop(u64 qword, struct libie_rq_onstack_stats *stats)
  * @rxq_xdp_act: Logical OR of flags of XDP actions that require finalization
  *
  * Returns resulting XDP action.
- **/
+ */
 static unsigned int
 iavf_run_xdp(struct iavf_ring *rx_ring, struct xdp_buff *xdp,
 	     struct bpf_prog *xdp_prog, struct iavf_ring *xdp_ring,
@@ -1194,10 +1223,13 @@ static int iavf_clean_rx_irq(struct iavf_ring *rx_ring, int budget)
 	unsigned int xdp_act;
 	struct xdp_buff xdp;
 	u32 rxq_xdp_act = 0;
+	u16 cached_ntu;
 
 	xdp_prog = rcu_dereference(rx_ring->xdp_prog);
-	if (xdp_prog)
+	if (xdp_prog) {
 		xdp_ring = rx_ring->xdp_ring;
+		cached_ntu = xdp_ring->next_to_use;
+	}
 	xdp_init_buff(&xdp, PAGE_SIZE, &rx_ring->xdp_rxq);
 
 	while (likely(cleaned_count < budget)) {
@@ -1328,7 +1360,7 @@ no_skb:
 	rx_ring->next_to_clean = ntc;
 	rx_ring->skb = skb;
 
-	iavf_finalize_xdp_rx(xdp_ring, rxq_xdp_act);
+	iavf_finalize_xdp_rx(xdp_ring, rxq_xdp_act, cached_ntu);
 
 	if (to_refill >= IAVF_RX_BUFFER_WRITE) {
 		to_refill = __iavf_alloc_rx_pages(rx_ring, to_refill, gfp);
@@ -2291,19 +2323,28 @@ netdev_tx_t iavf_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
  */
 static u32 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
 {
-	u32 batch_sz = IAVF_RING_QUARTER(xdp_ring);
 	struct libie_sq_onstack_stats stats = { };
-	struct iavf_tx_desc *next_dd_desc;
+	struct iavf_tx_desc *last_rs_desc;
 	u32 ntc = xdp_ring->next_to_clean;
-	u32 next_dd = xdp_ring->next_dd;
+	u32 cnt = xdp_ring->count;
+	u16 done_frames = 0;
+	u16 rs_idx;
 	u32 i;
 
-	next_dd_desc = IAVF_TX_DESC(xdp_ring, next_dd);
-	if (!(next_dd_desc->cmd_type_offset_bsz &
-	      cpu_to_le64(IAVF_TX_DESC_DTYPE_DESC_DONE)))
+	/* Last RS index is invalid in xsk frames */
+	if (!xdp_ring->tx_bi[ntc].page)
 		return 0;
 
-	for (i = 0; i < batch_sz; i++) {
+	rs_idx = xdp_ring->tx_bi[ntc].rs_desc_idx;
+	last_rs_desc = IAVF_TX_DESC(xdp_ring, rs_idx);
+	if (last_rs_desc->cmd_type_offset_bsz &
+	    cpu_to_le64(IAVF_TX_DESC_DTYPE_DESC_DONE)) {
+		done_frames = rs_idx >= ntc ? rs_idx - ntc + 1 :
+					      rs_idx + cnt - ntc + 1;
+		last_rs_desc->cmd_type_offset_bsz = 0;
+	}
+
+	for (i = 0; i < done_frames; i++) {
 		struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[ntc];
 
 		stats.bytes += tx_buf->bytecount;
@@ -2312,21 +2353,12 @@ static u32 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
 		 */
 		stats.packets++;
 
-		dma_unmap_single(xdp_ring->dev, dma_unmap_addr(tx_buf, dma),
-				 dma_unmap_len(tx_buf, len), DMA_TO_DEVICE);
-		dma_unmap_len_set(tx_buf, len, 0);
-		page_frag_free(tx_buf->raw_buf);
-		tx_buf->raw_buf = NULL;
+		iavf_free_xdp_resource(xdp_ring, tx_buf);
 
 		ntc++;
 		if (ntc >= xdp_ring->count)
 			ntc = 0;
 	}
-
-	next_dd_desc->cmd_type_offset_bsz = 0;
-	xdp_ring->next_dd = xdp_ring->next_dd + batch_sz;
-	if (xdp_ring->next_dd > xdp_ring->count)
-		xdp_ring->next_dd = batch_sz - 1;
 
 	xdp_ring->next_to_clean = ntc;
 	iavf_update_tx_ring_stats(xdp_ring, &stats);
@@ -2338,11 +2370,13 @@ static u32 iavf_clean_xdp_irq(struct iavf_ring *xdp_ring)
  * iavf_xmit_xdp_buff - submit single buffer to XDP ring for transmission
  * @xdp: XDP buffer pointer
  * @xdp_ring: XDP ring for transmission
- * @map: whether to map the buffer
+ * @frame: whether the function is called from .ndo_xdp_xmit()
+ *
+ * Returns negative on failure, 0 on success.
  */
 static int iavf_xmit_xdp_buff(const struct xdp_buff *xdp,
 			      struct iavf_ring *xdp_ring,
-			      bool map)
+			      bool frame)
 {
 	u32 batch_sz = IAVF_RING_QUARTER(xdp_ring);
 	u32 size = xdp->data_end - xdp->data;
@@ -2361,7 +2395,7 @@ static int iavf_xmit_xdp_buff(const struct xdp_buff *xdp,
 		return -EBUSY;
 	}
 
-	if (map) {
+	if (frame) {
 		dma = dma_map_single(xdp_ring->dev, data, size, DMA_TO_DEVICE);
 		if (dma_mapping_error(xdp_ring->dev, dma))
 			return -ENOMEM;
@@ -2377,11 +2411,13 @@ static int iavf_xmit_xdp_buff(const struct xdp_buff *xdp,
 	tx_buff = &xdp_ring->tx_bi[ntu];
 	tx_buff->bytecount = size;
 	tx_buff->gso_segs = 1;
-	/* TODO: set type to XDP_TX or XDP_XMIT depending on @map and assign
-	 * either ->data_hard_start (which is pointer to xdp_frame) or @page
-	 * above.
-	 */
-	tx_buff->raw_buf = data;
+	if (frame) {
+		tx_buff->xdp_type = IAVF_XDP_BUFFER_FRAME;
+		tx_buff->xdpf = xdp->data_hard_start;
+	} else {
+		tx_buff->xdp_type = IAVF_XDP_BUFFER_TX;
+		tx_buff->page = virt_to_page(data);
+	}
 
 	/* record length, and DMA address */
 	dma_unmap_len_set(tx_buff, len, size);
@@ -2392,19 +2428,11 @@ static int iavf_xmit_xdp_buff(const struct xdp_buff *xdp,
 	tx_desc->cmd_type_offset_bsz = iavf_build_ctob(IAVF_TX_DESC_CMD_EOP, 0,
 						       size, 0);
 
+	xdp_ring->xdp_tx_active++;
 	ntu++;
-	if (ntu > xdp_ring->next_rs) {
-		tx_desc = IAVF_TX_DESC(xdp_ring, xdp_ring->next_rs);
-		tx_desc->cmd_type_offset_bsz |=
-			cpu_to_le64(IAVF_TX_DESC_CMD_RS <<
-				    IAVF_TXD_QW1_CMD_SHIFT);
-		xdp_ring->next_rs += batch_sz;
-	}
 
-	if (ntu == xdp_ring->count) {
+	if (ntu == xdp_ring->count)
 		ntu = 0;
-		xdp_ring->next_rs = batch_sz - 1;
-	}
 
 	xdp_ring->next_to_use = ntu;
 
@@ -2432,6 +2460,7 @@ int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 		  u32 flags)
 {
 	struct iavf_adapter *adapter = netdev_priv(dev);
+	struct iavf_tx_buffer *tx_buf;
 	struct iavf_ring *xdp_ring;
 	u32 queue_index, nxmit = 0;
 	int err = 0;
@@ -2456,18 +2485,24 @@ int iavf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 	if (static_branch_unlikely(&iavf_xdp_locking_key))
 		spin_lock(&xdp_ring->tx_lock);
 
+	tx_buf = &xdp_ring->tx_bi[xdp_ring->next_to_use];
 	for (u32 i = 0; i < n; i++) {
 		struct xdp_frame *xdpf = frames[i];
 		struct xdp_buff xdp;
 
 		xdp_convert_frame_to_buff(xdpf, &xdp);
 		err = iavf_xmit_xdp_buff(&xdp, xdp_ring, true);
-		if (unlikely(err))
+		if (unlikely(err)) {
+			netdev_err(dev, "XDP frame TX failed, error: %d\n",
+				   err);
 			break;
+		}
 
 		nxmit++;
 	}
 
+	if (likely(nxmit))
+		tx_buf->rs_desc_idx = iavf_set_rs_bit(xdp_ring);
 	if (flags & XDP_XMIT_FLUSH)
 		iavf_xdp_ring_update_tail(xdp_ring);
 

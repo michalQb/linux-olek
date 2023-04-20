@@ -3,14 +3,13 @@
 
 #include <linux/bpf_trace.h>
 #include <linux/filter.h>
-#include <linux/net/intel/libie.h>
+#include <linux/net/intel/libie/rx.h>
 #include <net/xdp_sock_drv.h>
 #include <net/xdp_sock.h>
 #include "iavf.h"
 #include "iavf_trace.h"
 #include "iavf_xsk.h"
 
-#define IAVF_PF_REQ_TIMEOUT_MS		300
 #define IAVF_CRIT_LOCK_WAIT_TIMEOUT_MS	1000
 #define IAVF_VC_MSG_TIMEOUT_MS		3000
 
@@ -28,23 +27,6 @@ iavf_max_xdp_queues_count(struct iavf_adapter *adapter)
 
 	return num_active_queues * 2 > max_qp_num ? max_qp_num / 2 :
 						    num_active_queues;
-}
-
-/**
- * iavf_qp_reset_stats - Resets all stats for rings of given index
- * @adapter: adapter that contains rings of interest
- * @q_idx: ring index in array
- */
-static void
-iavf_qp_reset_stats(struct iavf_adapter *adapter, u16 q_idx)
-{
-	memset(&adapter->rx_rings[q_idx].stats, 0,
-	       sizeof(adapter->rx_rings[q_idx].stats));
-	memset(&adapter->tx_rings[q_idx].stats, 0,
-	       sizeof(adapter->tx_rings[q_idx].stats));
-	if (iavf_adapter_xdp_active(adapter))
-		memset(&adapter->xdp_rings[q_idx].stats, 0,
-		       sizeof(adapter->xdp_rings[q_idx].stats));
 }
 
 /**
@@ -141,51 +123,6 @@ iavf_qvec_ena_irq(struct iavf_adapter *adapter, struct iavf_q_vector *q_vector)
 }
 
 /**
- * iavf_cfg_qp_in_pf - Configure selected queue pairs in PF.
- * @adapter: adapter of interest
- * @qp_mask: mask of queue pairs that shall be configured
- *
- * Returns 0 on success, negative on failure or timeout.
- */
-static int
-iavf_cfg_qp_in_pf(struct iavf_adapter *adapter, u32 qp_mask)
-{
-	iavf_configure_selected_queues(adapter, qp_mask);
-	return iavf_get_configure_queues_result(adapter,
-						IAVF_PF_REQ_TIMEOUT_MS);
-}
-
-/**
- * iavf_ena_queues_in_pf - Enable selected queues in PF.
- * @adapter: adapter of interest
- * @rxq_mask: mask of Rx queues that shall be enabled
- * @txq_mask: mask of Tx queues that shall be enabled
- *
- * Returns 0 on success, negative on failure or timeout.
- */
-static int
-iavf_ena_queues_in_pf(struct iavf_adapter *adapter, u32 rxq_mask, u32 txq_mask)
-{
-	iavf_enable_selected_queues(adapter, rxq_mask, txq_mask);
-	return iavf_get_queue_enable_result(adapter, IAVF_PF_REQ_TIMEOUT_MS);
-}
-/**
- * iavf_dis_queues_in_pf - Disable selected queues in PF.
- * @adapter: adapter of interest
- * @rxq_mask: mask of Rx queues that shall be disabled
- * @txq_mask: mask of Tx queues that shall be disabled
- *
- * Returns 0 on success, negative on failure or timeout.
- */
-
-static int
-iavf_dis_queues_in_pf(struct iavf_adapter *adapter, u32 rxq_mask, u32 txq_mask)
-{
-	iavf_disable_selected_queues(adapter, rxq_mask, txq_mask);
-	return iavf_get_queue_disable_result(adapter, IAVF_PF_REQ_TIMEOUT_MS);
-}
-
-/**
  * iavf_qp_dis - Disables a queue pair
  * @adapter: adapter of interest
  * @q_idx: ring index in array
@@ -195,8 +132,8 @@ iavf_dis_queues_in_pf(struct iavf_adapter *adapter, u32 rxq_mask, u32 txq_mask)
 static int iavf_qp_dis(struct iavf_adapter *adapter, u16 q_idx)
 {
 	struct iavf_vsi *vsi = &adapter->vsi;
+	struct iavf_ring *rx_ring, *xdp_ring;
 	struct iavf_q_vector *q_vector;
-	struct iavf_ring *rx_ring;
 	u32 rx_queues, tx_queues;
 	int err;
 
@@ -214,15 +151,21 @@ static int iavf_qp_dis(struct iavf_adapter *adapter, u16 q_idx)
 	iavf_qvec_toggle_napi(adapter, q_vector, false);
 	iavf_qvec_dis_irq(adapter, q_vector);
 
-	if (iavf_adapter_xdp_active(adapter))
-		tx_queues |= BIT(q_idx + adapter->num_active_queues);
+	xdp_ring = &adapter->xdp_rings[q_idx];
 
-	err = iavf_dis_queues_in_pf(adapter, rx_queues, tx_queues);
+	tx_queues |= BIT(xdp_ring->queue_index);
+
+	err = iavf_disable_selected_queues(adapter, rx_queues, tx_queues, true);
 	if (err)
 		goto dis_exit;
 
 	iavf_qp_clean_rings(adapter, q_idx);
-	iavf_qp_reset_stats(adapter, q_idx);
+	if (!(rx_ring->flags & IAVF_TXRX_FLAGS_XSK)) {
+		struct device *dev = rx_ring->pool->p.dev;
+
+		libie_rx_page_pool_destroy(rx_ring->pool, &rx_ring->rq_stats);
+		rx_ring->dev = dev;
+	}
 dis_exit:
 	return err;
 }
@@ -237,35 +180,60 @@ dis_exit:
 static int iavf_qp_ena(struct iavf_adapter *adapter, u16 q_idx)
 {
 	struct iavf_vsi *vsi = &adapter->vsi;
+	struct iavf_ring *rx_ring, *xdp_ring;
 	struct iavf_q_vector *q_vector;
-	struct iavf_ring *rx_ring;
 	u32 rx_queues, tx_queues;
-	int err = 0;
+	int ret, err = 0;
 
 	if (q_idx >= adapter->num_active_queues)
 		return -EINVAL;
 
+	xdp_ring = &adapter->xdp_rings[q_idx];
 	rx_ring = &adapter->rx_rings[q_idx];
 	q_vector = rx_ring->q_vector;
 
 	rx_queues = BIT(q_idx);
 	tx_queues = rx_queues;
+	tx_queues |= BIT(xdp_ring->queue_index);
 
-	if (iavf_adapter_xdp_active(adapter))
-		tx_queues |= BIT(q_idx + adapter->num_active_queues);
+	iavf_xsk_setup_xdp_ring(xdp_ring);
+	iavf_xsk_setup_rx_ring(rx_ring);
+
+	if (!(rx_ring->flags & IAVF_TXRX_FLAGS_XSK)) {
+		rx_ring->pool = libie_rx_page_pool_create(rx_ring->netdev,
+							  rx_ring->count,
+							  true);
+		if (IS_ERR(rx_ring->pool)) {
+			err = PTR_ERR(rx_ring->pool);
+			goto ena_exit;
+		}
+	}
+
+	iavf_configure_rx_ring(adapter, rx_ring);
 
 	/* Use 'tx_queues' mask as a queue pair mask to configure
 	 * also an extra XDP Tx queue.
 	 */
-	err = iavf_cfg_qp_in_pf(adapter, tx_queues);
+	err = iavf_configure_selected_queues(adapter, tx_queues, true);
 	if (err)
 		goto ena_exit;
 
-	iavf_configure_rx_ring(adapter, rx_ring);
-
-	err = iavf_ena_queues_in_pf(adapter, rx_queues, tx_queues);
+	err = iavf_enable_selected_queues(adapter, rx_queues, tx_queues, true);
 	if (err)
 		goto ena_exit;
+
+	ret = iavf_poll_for_link_status(adapter, IAVF_XDP_LINK_TIMEOUT_MS);
+	if (ret < 0) {
+		err = ret;
+		dev_err(&adapter->pdev->dev,
+			"cannot bring the link up, error: %d\n", err);
+		goto ena_exit;
+	} else if (!ret) {
+		err = -EBUSY;
+		dev_err(&adapter->pdev->dev,
+			"pf returned link down status, error: %d\n", err);
+		goto ena_exit;
+	}
 
 	iavf_qvec_toggle_napi(adapter, q_vector, true);
 	iavf_qvec_ena_irq(adapter, q_vector);
@@ -349,8 +317,6 @@ int iavf_xsk_pool_setup(struct iavf_adapter *adapter,
 		     iavf_adapter_xdp_active(adapter);
 
 	if (if_running) {
-		struct iavf_ring *rx_ring = &adapter->rx_rings[qid];
-
 		if (iavf_lock_timeout(&adapter->crit_lock,
 				      IAVF_CRIT_LOCK_WAIT_TIMEOUT_MS))
 			return -EBUSY;
@@ -363,15 +329,6 @@ int iavf_xsk_pool_setup(struct iavf_adapter *adapter,
 		ret = iavf_qp_dis(adapter, qid);
 		if (ret) {
 			netdev_err(vsi->netdev, "iavf_qp_dis error = %d\n", ret);
-			goto xsk_pool_if_up;
-		}
-
-		iavf_free_rx_resources(rx_ring);
-
-		ret = iavf_setup_rx_descriptors(rx_ring);
-		if (ret) {
-			netdev_err(vsi->netdev,
-				   "iavf rx re-allocation error = %d\n", ret);
 			goto xsk_pool_if_up;
 		}
 	}
@@ -407,11 +364,21 @@ failure:
 static void
 iavf_clean_xdp_tx_buf(struct iavf_ring *xdp_ring, struct iavf_tx_buffer *tx_buf)
 {
-	xdp_return_frame((struct xdp_frame *)tx_buf->raw_buf);
+	switch (tx_buf->xdp_type) {
+	case IAVF_XDP_BUFFER_FRAME:
+		dma_unmap_single(xdp_ring->dev, dma_unmap_addr(tx_buf, dma),
+				 dma_unmap_len(tx_buf, len), DMA_TO_DEVICE);
+		dma_unmap_len_set(tx_buf, len, 0);
+		xdp_return_frame(tx_buf->xdpf);
+		tx_buf->xdpf = NULL;
+		break;
+	case IAVF_XDP_BUFFER_TX:
+		xsk_buff_free(tx_buf->xdp);
+		break;
+	}
+
 	xdp_ring->xdp_tx_active--;
-	dma_unmap_single(xdp_ring->xsk_pool->dev, dma_unmap_addr(tx_buf, dma),
-			 dma_unmap_len(tx_buf, len), DMA_TO_DEVICE);
-	dma_unmap_len_set(tx_buf, len, 0);
+	tx_buf->xdp_type = IAVF_XDP_BUFFER_NONE;
 }
 
 /**
@@ -424,6 +391,7 @@ static void iavf_clean_xdp_irq_zc(struct iavf_ring *xdp_ring)
 	struct iavf_tx_buffer *tx_buf;
 	struct iavf_tx_desc *tx_desc;
 	u16 cnt = xdp_ring->count;
+	u16 done_frames = 0;
 	u16 xsk_frames = 0;
 	u16 last_rs;
 	int i;
@@ -433,27 +401,27 @@ static void iavf_clean_xdp_irq_zc(struct iavf_ring *xdp_ring)
 	if ((tx_desc->cmd_type_offset_bsz &
 	    cpu_to_le64(IAVF_TX_DESC_DTYPE_DESC_DONE))) {
 		if (last_rs >= ntc)
-			xsk_frames = last_rs - ntc + 1;
+			done_frames = last_rs - ntc + 1;
 		else
-			xsk_frames = last_rs + cnt - ntc + 1;
+			done_frames = last_rs + cnt - ntc + 1;
 	}
 
-	if (!xsk_frames)
+	if (!done_frames)
 		return;
 
-	if (likely(!xdp_ring->xdp_tx_active))
+	if (likely(!xdp_ring->xdp_tx_active)) {
+		xsk_frames = done_frames;
 		goto skip;
+	}
 
 	ntc = xdp_ring->next_to_clean;
-	for (i = 0; i < xsk_frames; i++) {
+	for (i = 0; i < done_frames; i++) {
 		tx_buf = &xdp_ring->tx_bi[ntc];
 
-		if (tx_buf->raw_buf) {
+		if (tx_buf->xdp_type)
 			iavf_clean_xdp_tx_buf(xdp_ring, tx_buf);
-			tx_buf->raw_buf = NULL;
-		} else {
+		else
 			xsk_frames++;
-		}
 
 		ntc++;
 		if (ntc >= xdp_ring->count)
@@ -461,7 +429,7 @@ static void iavf_clean_xdp_irq_zc(struct iavf_ring *xdp_ring)
 	}
 skip:
 	tx_desc->cmd_type_offset_bsz = 0;
-	xdp_ring->next_to_clean += xsk_frames;
+	xdp_ring->next_to_clean += done_frames;
 	if (xdp_ring->next_to_clean >= cnt)
 		xdp_ring->next_to_clean -= cnt;
 	if (xsk_frames)
@@ -526,21 +494,6 @@ static void iavf_xmit_pkt_batch(struct iavf_ring *xdp_ring,
 }
 
 /**
- * iavf_set_rs_bit - set RS bit on last produced descriptor (one behind current NTU)
- * @xdp_ring: XDP ring to produce the HW Tx descriptors on
- */
-static void iavf_set_rs_bit(struct iavf_ring *xdp_ring)
-{
-	u16 ntu = xdp_ring->next_to_use ? xdp_ring->next_to_use - 1 :
-					  xdp_ring->count - 1;
-	struct iavf_tx_desc *tx_desc;
-
-	tx_desc = IAVF_TX_DESC(xdp_ring, ntu);
-	tx_desc->cmd_type_offset_bsz |=
-		cpu_to_le64(IAVF_TX_DESC_CMD_RS << IAVF_TXD_QW1_CMD_SHIFT);
-}
-
-/**
  * iavf_fill_tx_hw_ring - produce the number of Tx descriptors onto ring
  * @xdp_ring: XDP ring to produce the HW Tx descriptors on
  * @descs: AF_XDP descriptors to pull the DMA addresses and lengths from
@@ -551,7 +504,6 @@ static void iavf_fill_tx_hw_ring(struct iavf_ring *xdp_ring,
 				 struct xdp_desc *descs, u32 nb_pkts,
 				 unsigned int *total_bytes)
 {
-	u16 tx_thresh = IAVF_RING_QUARTER(xdp_ring);
 	u32 batched, leftover, i;
 
 	batched = ALIGN_DOWN(nb_pkts, PKTS_PER_BATCH);
@@ -561,16 +513,6 @@ static void iavf_fill_tx_hw_ring(struct iavf_ring *xdp_ring,
 		iavf_xmit_pkt_batch(xdp_ring, &descs[i], total_bytes);
 	for (; i < batched + leftover; i++)
 		iavf_xmit_pkt(xdp_ring, &descs[i], total_bytes);
-
-	if (xdp_ring->next_to_use > xdp_ring->next_rs) {
-		struct iavf_tx_desc *tx_desc;
-
-		tx_desc = IAVF_TX_DESC(xdp_ring, xdp_ring->next_rs);
-		tx_desc->cmd_type_offset_bsz |=
-			cpu_to_le64(IAVF_TX_DESC_CMD_RS <<
-					IAVF_TXD_QW1_CMD_SHIFT);
-		xdp_ring->next_rs += tx_thresh;
-	}
 }
 
 /**
@@ -582,37 +524,46 @@ static void iavf_fill_tx_hw_ring(struct iavf_ring *xdp_ring,
 bool iavf_xmit_zc(struct iavf_ring *xdp_ring)
 {
 	struct xdp_desc *descs = xdp_ring->xsk_pool->tx_descs;
-	u32 nb_pkts, nb_processed = 0;
-	unsigned int total_bytes = 0;
+	struct libie_sq_onstack_stats stats = { };
+	u32 nb_processed = 0;
+	bool ret = true;
 	int budget;
+
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_lock(&xdp_ring->tx_lock);
 
 	iavf_clean_xdp_irq_zc(xdp_ring);
 
 	budget = IAVF_DESC_UNUSED(xdp_ring);
 	budget = min_t(u16, budget, IAVF_RING_QUARTER(xdp_ring));
 
-	nb_pkts = xsk_tx_peek_release_desc_batch(xdp_ring->xsk_pool, budget);
-	if (!nb_pkts)
-		return true;
+	stats.packets = xsk_tx_peek_release_desc_batch(xdp_ring->xsk_pool, budget);
+	if (!stats.packets)
+		goto unlock;
 
-	if (xdp_ring->next_to_use + nb_pkts >= xdp_ring->count) {
+	if (xdp_ring->next_to_use + stats.packets >= xdp_ring->count) {
 		nb_processed = xdp_ring->count - xdp_ring->next_to_use;
 		iavf_fill_tx_hw_ring(xdp_ring, descs, nb_processed,
-				     &total_bytes);
+				     &stats.bytes);
 		xdp_ring->next_to_use = 0;
 	}
 
 	iavf_fill_tx_hw_ring(xdp_ring, &descs[nb_processed],
-			     nb_pkts - nb_processed, &total_bytes);
+			     stats.packets - nb_processed, &stats.bytes);
 
 	iavf_set_rs_bit(xdp_ring);
 	iavf_xdp_ring_update_tail(xdp_ring);
-	iavf_update_tx_ring_stats(xdp_ring, nb_pkts, total_bytes);
+	iavf_update_tx_ring_stats(xdp_ring, &stats);
 
 	if (xsk_uses_need_wakeup(xdp_ring->xsk_pool))
 		xsk_set_tx_need_wakeup(xdp_ring->xsk_pool);
 
-	return nb_pkts < budget;
+	ret = stats.packets < budget;
+unlock:
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_unlock(&xdp_ring->tx_lock);
+
+	return ret;
 }
 
 /**
@@ -629,7 +580,8 @@ int iavf_xsk_wakeup(struct net_device *netdev, u32 queue_id, u32 flags)
 	struct iavf_q_vector *q_vector;
 	struct iavf_ring *ring;
 
-	if (adapter->state == __IAVF_DOWN)
+	if (adapter->state == __IAVF_DOWN ||
+	    adapter->state == __IAVF_RESETTING)
 		return -ENETDOWN;
 
 	if (!iavf_adapter_xdp_active(adapter))
@@ -678,11 +630,13 @@ void iavf_xsk_setup_xdp_ring(struct iavf_ring *xdp_ring)
 	struct xsk_buff_pool *pool;
 
 	pool = iavf_tx_xsk_pool(xdp_ring);
-	if (!pool)
-		return;
-
-	xdp_ring->xsk_pool = pool;
-	xdp_ring->flags |= IAVF_TXRX_FLAGS_XSK;
+	if (pool) {
+		xdp_ring->xsk_pool = pool;
+		xdp_ring->flags |= IAVF_TXRX_FLAGS_XSK;
+	} else {
+		xdp_ring->dev = &xdp_ring->vsi->back->pdev->dev;
+		xdp_ring->flags &= ~IAVF_TXRX_FLAGS_XSK;
+	}
 }
 
 /**
@@ -697,12 +651,12 @@ void iavf_xsk_clean_xdp_ring(struct iavf_ring *xdp_ring)
 	while (ntc != ntu) {
 		struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[ntc];
 
-		if (tx_buf->raw_buf)
+		if (tx_buf->xdp_type)
 			iavf_clean_xdp_tx_buf(xdp_ring, tx_buf);
 		else
 			xsk_frames++;
 
-		tx_buf->raw_buf = NULL;
+		tx_buf->page = NULL;
 
 		ntc++;
 		if (ntc >= xdp_ring->count)
@@ -885,11 +839,13 @@ void iavf_xsk_setup_rx_ring(struct iavf_ring *rx_ring)
 	struct xsk_buff_pool *pool;
 
 	pool = iavf_rx_xsk_pool(rx_ring);
-	if (!pool)
-		return;
-
-	rx_ring->xsk_pool = pool;
-	rx_ring->flags |= IAVF_TXRX_FLAGS_XSK;
+	if (pool) {
+		rx_ring->xsk_pool = pool;
+		rx_ring->flags |= IAVF_TXRX_FLAGS_XSK;
+	} else {
+		rx_ring->dev = &rx_ring->vsi->back->pdev->dev;
+		rx_ring->flags &= ~IAVF_TXRX_FLAGS_XSK;
+	}
 }
 
 /**
@@ -911,63 +867,66 @@ void iavf_xsk_clean_rx_ring(struct iavf_ring *rx_ring)
 	}
 }
 
-static int iavf_xmit_xdp_buff_zc(struct xdp_buff *xdp,
-				 struct iavf_ring *xdp_ring)
+/**
+ * iavf_xmit_xdp_tx_zc - AF_XDP ZC handler for XDP_TX
+ * @xdp: XDP buffer to xmit
+ * @xdp_ring: XDP ring to produce descriptor onto
+ *
+ * Returns 0 for successfully produced desc,
+ * -EBUSY if there was not enough space on XDP ring.
+ */
+static int iavf_xmit_xdp_tx_zc(struct xdp_buff *xdp,
+			       struct iavf_ring *xdp_ring)
 {
-	u32 batch_sz = IAVF_RING_QUARTER(xdp_ring);
 	u32 size = xdp->data_end - xdp->data;
 	u32 ntu = xdp_ring->next_to_use;
-	struct iavf_tx_buffer *tx_buff;
+	struct iavf_tx_buffer *tx_buf;
 	struct iavf_tx_desc *tx_desc;
-	void *data = xdp->data;
 	dma_addr_t dma;
 
-	if (unlikely(IAVF_DESC_UNUSED(xdp_ring) < batch_sz))
+	if (IAVF_DESC_UNUSED(xdp_ring) < IAVF_RING_QUARTER(xdp_ring))
 		iavf_clean_xdp_irq_zc(xdp_ring);
 
 	if (unlikely(!IAVF_DESC_UNUSED(xdp_ring))) {
-		xdp_ring->tx_stats.tx_busy++;
+		libie_stats_inc_one(&xdp_ring->sq_stats, busy);
 		return -EBUSY;
 	}
 
 	dma = xsk_buff_xdp_get_dma(xdp);
 	xsk_buff_raw_dma_sync_for_device(xdp_ring->xsk_pool, dma, size);
 
-	tx_buff = &xdp_ring->tx_bi[ntu];
-	tx_buff->bytecount = size;
-	tx_buff->gso_segs = 1;
-	/* TODO: set type to XSK_TX or XDP_XMIT depending on @map and assign
-	 * @xdp here.
-	 */
-	tx_buff->raw_buf = data;
-
-	/* record length, and DMA address */
-	dma_unmap_len_set(tx_buff, len, size);
-	dma_unmap_addr_set(tx_buff, dma, dma);
+	tx_buf = &xdp_ring->tx_bi[ntu];
+	tx_buf->bytecount = size;
+	tx_buf->gso_segs = 1;
+	tx_buf->xdp_type = IAVF_XDP_BUFFER_TX;
+	tx_buf->xdp = xdp;
 
 	tx_desc = IAVF_TX_DESC(xdp_ring, ntu);
 	tx_desc->buffer_addr = cpu_to_le64(dma);
-	tx_desc->cmd_type_offset_bsz = iavf_build_ctob(IAVF_TX_DESC_CMD_EOP, 0,
-						       size, 0);
+	tx_desc->cmd_type_offset_bsz = iavf_build_ctob(IAVF_TX_DESC_CMD_EOP,
+						       0, size, 0);
 
-	ntu++;
-	if (ntu > xdp_ring->next_rs) {
-		tx_desc = IAVF_TX_DESC(xdp_ring, xdp_ring->next_rs);
-		tx_desc->cmd_type_offset_bsz |=
-			cpu_to_le64(IAVF_TX_DESC_CMD_RS <<
-				    IAVF_TXD_QW1_CMD_SHIFT);
-		xdp_ring->next_rs += batch_sz;
-	}
-
-	if (ntu == xdp_ring->count) {
-		ntu = 0;
-		xdp_ring->next_rs = batch_sz - 1;
-	}
-
-	xdp_ring->next_to_use = ntu;
 	xdp_ring->xdp_tx_active++;
 
+	if (++ntu == xdp_ring->count)
+		ntu = 0;
+	xdp_ring->next_to_use = ntu;
+
 	return 0;
+}
+
+static int iavf_xmit_xdp_tx_zc_locked(struct xdp_buff *xdp,
+				      struct iavf_ring *xdp_ring)
+{
+	int ret;
+
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_lock(&xdp_ring->tx_lock);
+	ret = iavf_xmit_xdp_tx_zc(xdp, xdp_ring);
+	if (static_branch_unlikely(&iavf_xdp_locking_key))
+		spin_unlock(&xdp_ring->tx_lock);
+
+	return ret;
 }
 
 /**
@@ -979,7 +938,7 @@ static int iavf_xmit_xdp_buff_zc(struct xdp_buff *xdp,
  * @rxq_xdp_act: Logical OR of flags of XDP actions that require finalization
  *
  * Returns resulting XDP action.
- **/
+ */
 static unsigned int
 iavf_run_xdp_zc(struct iavf_ring *rx_ring, struct xdp_buff *xdp,
 		struct bpf_prog *xdp_prog, struct iavf_ring *xdp_ring,
@@ -1007,7 +966,7 @@ iavf_run_xdp_zc(struct iavf_ring *rx_ring, struct xdp_buff *xdp,
 	case XDP_PASS:
 		break;
 	case XDP_TX:
-		err = iavf_xmit_xdp_buff_zc(xdp, xdp_ring);
+		err = iavf_xmit_xdp_tx_zc_locked(xdp, xdp_ring);
 		if (unlikely(err))
 			goto xdp_err;
 
@@ -1076,7 +1035,7 @@ iavf_construct_skb_zc(struct iavf_ring *rx_ring, struct xdp_buff *xdp)
  */
 int iavf_clean_rx_irq_zc(struct iavf_ring *rx_ring, int budget)
 {
-	unsigned int total_rx_bytes = 0, total_rx_packets = 0;
+	struct libie_rq_onstack_stats stats = { };
 	u32 ntc = rx_ring->next_to_clean;
 	u32 ring_size = rx_ring->count;
 	struct iavf_ring *xdp_ring;
@@ -1138,8 +1097,8 @@ int iavf_clean_rx_irq_zc(struct iavf_ring *rx_ring, int budget)
 			break;
 		}
 
-		total_rx_bytes += size;
-		total_rx_packets++;
+		stats.bytes += size;
+		stats.packets++;
 
 next:
 		cleaned_count++;
@@ -1151,7 +1110,8 @@ next:
 construct_skb:
 		skb = iavf_construct_skb_zc(rx_ring, xdp);
 		if (!skb) {
-			rx_ring->rx_stats.alloc_buff_failed++;
+			libie_stats_inc_one(&rx_ring->rq_stats,
+					    build_skb_fail);
 			break;
 		}
 
@@ -1162,7 +1122,7 @@ construct_skb:
 		prefetch(rx_desc);
 
 		/* probably a little skewed due to removing CRC */
-		total_rx_bytes += skb->len;
+		stats.bytes += skb->len;
 
 		/* populate checksum, VLAN, and protocol */
 		iavf_process_skb_fields(rx_ring, rx_desc, skb, qword);
@@ -1171,18 +1131,18 @@ construct_skb:
 		skb->protocol = eth_type_trans(skb, rx_ring->netdev);
 		napi_gro_receive(&rx_ring->q_vector->napi, skb);
 
-		total_rx_packets++;
+		stats.packets++;
 	}
 
 	rx_ring->next_to_clean = ntc;
 
-	iavf_finalize_xdp_rx(xdp_ring, rxq_xdp_act);
+	iavf_finalize_xdp_rx(xdp_ring, rxq_xdp_act, 0);
 
 	to_refill = IAVF_DESC_UNUSED(rx_ring);
 	if (to_refill > IAVF_RING_QUARTER(rx_ring))
 		failure |= !iavf_alloc_rx_buffers_zc(rx_ring, to_refill);
 
-	iavf_update_rx_ring_stats(rx_ring, total_rx_bytes, total_rx_packets);
+	iavf_update_rx_ring_stats(rx_ring, &stats);
 
 	if (xsk_uses_need_wakeup(rx_ring->xsk_pool)) {
 		if (failure || rx_ring->next_to_clean == rx_ring->next_to_use)

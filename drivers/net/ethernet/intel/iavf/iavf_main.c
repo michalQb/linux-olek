@@ -455,7 +455,7 @@ iavf_map_vector_to_rxq(struct iavf_adapter *adapter, int v_idx, int r_idx)
 	q_vector->rx.count++;
 	q_vector->rx.next_update = jiffies + 1;
 	q_vector->rx.target_itr = ITR_TO_REG(rx_ring->itr_setting);
-	q_vector->ring_mask |= BIT(r_idx);
+	q_vector->rx_ring_mask |= BIT(r_idx);
 	wr32(hw, IAVF_VFINT_ITRN1(IAVF_RX_ITR, q_vector->reg_idx),
 	     q_vector->rx.current_itr >> 1);
 	q_vector->rx.current_itr = q_vector->rx.target_itr;
@@ -467,7 +467,7 @@ iavf_map_vector_to_rxq(struct iavf_adapter *adapter, int v_idx, int r_idx)
  * @v_idx: interrupt number
  * @t_idx: queue number
  * @xdpq: set to true if Tx queue is XDP Tx queue
- **/
+ */
 static void
 iavf_map_vector_to_txq(struct iavf_adapter *adapter, int v_idx, int t_idx,
 		       bool xdpq)
@@ -484,7 +484,7 @@ iavf_map_vector_to_txq(struct iavf_adapter *adapter, int v_idx, int t_idx,
 	q_vector->tx.count++;
 	q_vector->tx.next_update = jiffies + 1;
 	q_vector->tx.target_itr = ITR_TO_REG(tx_ring->itr_setting);
-	q_vector->num_ringpairs++;
+	q_vector->tx_ring_mask |= BIT(tx_ring->queue_index);
 	wr32(hw, IAVF_VFINT_ITRN1(IAVF_TX_ITR, q_vector->reg_idx),
 	     q_vector->tx.target_itr >> 1);
 	q_vector->tx.current_itr = q_vector->tx.target_itr;
@@ -514,6 +514,8 @@ static void iavf_map_rings_to_vectors(struct iavf_adapter *adapter)
 		if (iavf_adapter_xdp_active(adapter))
 			iavf_map_vector_to_txq(adapter, vidx, ridx, true);
 
+		adapter->q_vectors[vidx].num_ringpairs++;
+
 		/* In the case where we have more queues than vectors, continue
 		 * round-robin on vectors until all queues are mapped.
 		 */
@@ -528,7 +530,7 @@ static void iavf_map_rings_to_vectors(struct iavf_adapter *adapter)
  * iavf_unmap_rings_from_vectors - Clear existing mapping for queues and vectors
  * @adapter: board private structure
  *
- **/
+ */
 static void iavf_unmap_rings_from_vectors(struct iavf_adapter *adapter)
 {
 	struct iavf_ring *rx_ring, *tx_ring;
@@ -550,7 +552,8 @@ static void iavf_unmap_rings_from_vectors(struct iavf_adapter *adapter)
 		q_vector->rx.next_update = 0;
 		q_vector->rx.target_itr = 0;
 		q_vector->rx.current_itr = 0;
-		q_vector->ring_mask = 0;
+		q_vector->rx_ring_mask = 0;
+		q_vector->tx_ring_mask = 0;
 	}
 
 	for (i = 0; i < adapter->num_active_queues; i++) {
@@ -709,6 +712,7 @@ static int iavf_request_misc_irq(struct iavf_adapter *adapter)
  **/
 static void iavf_free_traffic_irqs(struct iavf_adapter *adapter)
 {
+	struct iavf_q_vector *q_vector;
 	int vector, irq_num, q_vectors;
 
 	if (!adapter->msix_entries)
@@ -717,10 +721,14 @@ static void iavf_free_traffic_irqs(struct iavf_adapter *adapter)
 	q_vectors = adapter->num_msix_vectors - NONQ_VECS;
 
 	for (vector = 0; vector < q_vectors; vector++) {
+		q_vector = &adapter->q_vectors[vector];
+		if (!q_vector->tx.ring && !q_vector->rx.ring)
+			continue;
+
 		irq_num = adapter->msix_entries[vector + NONQ_VECS].vector;
 		irq_set_affinity_notifier(irq_num, NULL);
 		irq_update_affinity_hint(irq_num, NULL);
-		free_irq(irq_num, &adapter->q_vectors[vector]);
+		free_irq(irq_num, q_vector);
 	}
 }
 
@@ -763,8 +771,7 @@ static void iavf_configure_tx(struct iavf_adapter *adapter)
  * @adapter: board private structure
  * @rx_ring: Rx ring to be configured
  * @rx_buf_len: buffer length that shall be used for the given Rx ring.
- *
- **/
+ */
 void iavf_configure_rx_ring(struct iavf_adapter *adapter,
 			    struct iavf_ring *rx_ring)
 {
@@ -808,7 +815,7 @@ void iavf_configure_rx_ring(struct iavf_adapter *adapter,
  * @adapter: board private structure
  *
  * Configure the Rx unit of the MAC after a reset.
- **/
+ */
 static void iavf_configure_rx(struct iavf_adapter *adapter)
 {
 	for (u32 i = 0; i < adapter->num_active_queues; i++)
@@ -1442,23 +1449,47 @@ static void iavf_clear_adv_rss_conf(struct iavf_adapter *adapter)
 }
 
 /**
- * iavf_down - Shutdown the connection processing
+ * iavf_stop_traffic - Stop NAPI and interrupts before link down
  * @adapter: board private structure
- *
- * Expects to be called while holding the __IAVF_IN_CRITICAL_TASK bit lock.
- **/
-void iavf_down(struct iavf_adapter *adapter)
+ */
+void iavf_stop_traffic(struct iavf_adapter *adapter)
 {
 	struct net_device *netdev = adapter->netdev;
-
-	if (adapter->state <= __IAVF_DOWN_PENDING)
-		return;
 
 	netif_carrier_off(netdev);
 	netif_tx_disable(netdev);
 	adapter->link_up = false;
 	iavf_napi_disable_all(adapter);
 	iavf_irq_disable(adapter);
+}
+
+/**
+ * iavf_start_traffic - Start NAPI and interrupts after link up
+ * @adapter: board private structure
+ */
+void iavf_start_traffic(struct iavf_adapter *adapter)
+{
+	struct net_device *netdev = adapter->netdev;
+
+	iavf_napi_enable_all(adapter);
+	iavf_irq_enable(adapter, true);
+	adapter->link_up = true;
+	netif_tx_start_all_queues(netdev);
+	netif_carrier_on(netdev);
+}
+
+/**
+ * iavf_down - Shutdown the connection processing
+ * @adapter: board private structure
+ *
+ * Expects to be called while holding the __IAVF_IN_CRITICAL_TASK bit lock.
+ */
+void iavf_down(struct iavf_adapter *adapter)
+{
+	if (adapter->state <= __IAVF_DOWN_PENDING)
+		return;
+
+	iavf_stop_traffic(adapter);
 
 	iavf_clear_mac_vlan_filters(adapter);
 	iavf_clear_cloud_filters(adapter);
@@ -1536,7 +1567,7 @@ iavf_acquire_msix_vectors(struct iavf_adapter *adapter, int vectors)
  * @adapter: board private structure to update
  *
  * Free all of the memory associated with XDP queues.
- **/
+ */
 static void iavf_free_xdp_queues(struct iavf_adapter *adapter)
 {
 	adapter->num_xdp_tx_queues = 0;
@@ -1667,7 +1698,7 @@ void iavf_set_queue_vlan_tag_loc(struct iavf_adapter *adapter)
  * @ring_index: index of the ring to be initialized
  *
  * Init all basic pointers and flags in a newly allocated Rx ring.
- **/
+ */
 static void iavf_init_rx_ring(struct iavf_adapter *adapter,
 			      int ring_index)
 {
@@ -1688,7 +1719,7 @@ static void iavf_init_rx_ring(struct iavf_adapter *adapter,
  * @xdp_ring: set to true if the ring is XDP Tx queue
  *
  * Init all basic pointers and flags in a newly allocated Tx ring.
- **/
+ */
 static void iavf_init_tx_ring(struct iavf_adapter *adapter,
 			      int ring_index,
 			      bool xdp_ring)
@@ -1723,7 +1754,7 @@ static void iavf_init_tx_ring(struct iavf_adapter *adapter,
  *
  * If there is more CPUs than rings, sharing XDP TxQ allows us
  * to handle XDP_REDIRECT from other interfaces.
- **/
+ */
 static void iavf_xdp_cfg_tx_sharing(struct iavf_adapter *adapter)
 {
 	u32 num_active_queues = adapter->num_active_queues;
@@ -1741,22 +1772,20 @@ static void iavf_xdp_cfg_tx_sharing(struct iavf_adapter *adapter)
 /**
  * iavf_alloc_xdp_queues - Allocate memory for XDP rings
  * @adapter: board private structure to initialize
+ * @num_active_queues: number of exposed queue pairs
  *
  * Variation of iavf_alloc_queues(), which configures XDP queues only.
- **/
+ */
 static int iavf_alloc_xdp_queues(struct iavf_adapter *adapter, u32 num_active_queues)
 {
 	int i;
 
-	adapter->num_xdp_tx_queues = iavf_adapter_xdp_active(adapter) ?
-				     num_active_queues : 0;
-	if (!adapter->num_xdp_tx_queues)
-		return 0;
-
-	adapter->xdp_rings = kcalloc(adapter->num_xdp_tx_queues,
+	adapter->xdp_rings = kcalloc(num_active_queues,
 				     sizeof(struct iavf_ring), GFP_KERNEL);
 	if (!adapter->xdp_rings)
 		return -ENOMEM;
+
+	adapter->num_xdp_tx_queues = num_active_queues;
 
 	/* Setup extra XDP Tx queues if there are any */
 	for (i = 0; i < adapter->num_xdp_tx_queues; i++) {
@@ -1813,8 +1842,9 @@ static int iavf_alloc_queues(struct iavf_adapter *adapter)
 		iavf_init_rx_ring(adapter, i);
 	}
 
-	if (iavf_alloc_xdp_queues(adapter, num_active_queues))
-		goto err_out;
+	if (iavf_adapter_xdp_active(adapter))
+		if (iavf_alloc_xdp_queues(adapter, num_active_queues))
+			goto err_out;
 
 	iavf_set_queue_vlan_tag_loc(adapter);
 
@@ -2192,12 +2222,12 @@ static int iavf_process_aq_command(struct iavf_adapter *adapter)
 	if (adapter->aq_required & IAVF_FLAG_AQ_GET_OFFLOAD_VLAN_V2_CAPS)
 		return iavf_send_vf_offload_vlan_v2_msg(adapter);
 	if (adapter->aq_required & IAVF_FLAG_AQ_DISABLE_QUEUES) {
-		iavf_disable_queues(adapter);
+		iavf_disable_queues(adapter, false);
 		return 0;
 	}
 
 	if (adapter->aq_required & IAVF_FLAG_AQ_MAP_VECTORS) {
-		iavf_map_queues(adapter);
+		iavf_map_queues(adapter, false);
 		return 0;
 	}
 
@@ -2232,12 +2262,12 @@ static int iavf_process_aq_command(struct iavf_adapter *adapter)
 	}
 
 	if (adapter->aq_required & IAVF_FLAG_AQ_CONFIGURE_QUEUES) {
-		iavf_configure_queues(adapter);
+		iavf_configure_queues(adapter, false);
 		return 0;
 	}
 
 	if (adapter->aq_required & IAVF_FLAG_AQ_ENABLE_QUEUES) {
-		iavf_enable_queues(adapter);
+		iavf_enable_queues(adapter, false);
 		return 0;
 	}
 
@@ -2587,7 +2617,6 @@ int iavf_parse_vf_resource_msg(struct iavf_adapter *adapter)
 
 		return -EAGAIN;
 	}
-	adapter->num_req_queues = 0;
 	adapter->vsi.id = adapter->vsi_res->vsi_id;
 
 	adapter->vsi.back = adapter;
@@ -2782,6 +2811,9 @@ static void iavf_init_config_adapter(struct iavf_adapter *adapter)
 	netdev->netdev_ops = &iavf_netdev_ops;
 	iavf_set_ethtool_ops(netdev);
 	netdev->max_mtu = LIBIE_MAX_MTU;
+
+	netdev->xdp_features = NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT |
+			       NETDEV_XDP_ACT_XSK_ZEROCOPY;
 
 	if (!is_valid_ether_addr(adapter->hw.mac.addr)) {
 		dev_info(&pdev->dev, "Invalid MAC address %pM, using random\n",
@@ -3073,7 +3105,7 @@ restart_watchdog:
  * Returns pointer to the old XDP program.
  * adapter->xdp_prog is not used in packet processing, so it can be
  * safely set kinda like a flag before resource re-configuration (reset)
- **/
+ */
 static struct bpf_prog *iavf_xchg_xdp_prog(struct iavf_adapter *adapter,
 					   struct bpf_prog *prog)
 {
@@ -3085,7 +3117,7 @@ static struct bpf_prog *iavf_xchg_xdp_prog(struct iavf_adapter *adapter,
  * @adapter: board private structure
  *
  * Should be used when adapter is being removed.
- **/
+ */
 static void iavf_free_xdp_prog(struct iavf_adapter *adapter)
 {
 	struct bpf_prog *old_xdp_prog;
@@ -3602,7 +3634,7 @@ void iavf_free_all_tx_resources(struct iavf_adapter *adapter)
  * callers duty to clean those orphaned rings.
  *
  * Return 0 on success, negative on failure
- **/
+ */
 static int iavf_setup_all_tx_resources(struct iavf_adapter *adapter)
 {
 	struct iavf_ring *ring;
@@ -3645,10 +3677,13 @@ static int iavf_setup_all_tx_resources(struct iavf_adapter *adapter)
  **/
 static int iavf_setup_all_rx_resources(struct iavf_adapter *adapter)
 {
+	struct iavf_ring *rx_ring;
 	int i, err = 0;
 
 	for (i = 0; i < adapter->num_active_queues; i++) {
-		adapter->rx_rings[i].count = adapter->rx_desc_count;
+		rx_ring = &adapter->rx_rings[i];
+		rx_ring->count = adapter->rx_desc_count;
+
 		err = iavf_setup_rx_descriptors(&adapter->rx_rings[i]);
 		if (!err)
 			continue;
@@ -4928,7 +4963,7 @@ static netdev_features_t iavf_fix_features(struct net_device *netdev,
  *
  * If program change also requires XDP resources reconfiguration,
  * schedule a reset instead
- **/
+ */
 static void iavf_copy_xdp_prog_to_rings(const struct iavf_adapter *adapter)
 {
 	for (u32 i = 0; i < adapter->num_active_queues; i++)
@@ -4945,7 +4980,7 @@ static void iavf_copy_xdp_prog_to_rings(const struct iavf_adapter *adapter)
  * @prog: BPF program to be assigned to adapter
  *
  * Returns 0 on success, negative on failure
- **/
+ */
 static void iavf_assign_bpf_prog(struct iavf_adapter *adapter,
 				 struct bpf_prog *prog)
 {
@@ -4956,32 +4991,28 @@ static void iavf_assign_bpf_prog(struct iavf_adapter *adapter,
 		bpf_prog_put(old_prog);
 }
 
-#define IAVF_XDP_MSG_TIMEOUT_MS		300
 #define IAVF_XDP_LOCK_TIMEOUT_MS	5000
 
 /**
- * iavf_xdp_pause_if - Pause a working network interface for XDP setup
+ * iavf_close_sync - Synchronous version of 'iavf_close', dedicated to XDP setup
  * @adapter: board private structure
  *
+ * Caller of this function needs to lock 'adapter->crit_lock' in order
+ * to prevent race conditions with 'reset_task' and VIRTCHNL communication.
+ *
  * Returns 0 on success, negative on failure
- **/
-static int iavf_xdp_pause_if(struct iavf_adapter *adapter)
+ */
+static int iavf_close_sync(struct iavf_adapter *adapter)
 {
 	int err;
 
-	netif_carrier_off(adapter->netdev);
-	netif_tx_disable(adapter->netdev);
+	iavf_stop_traffic(adapter);
 
-	iavf_napi_disable_all(adapter);
-
-	iavf_irq_disable(adapter);
-	iavf_misc_irq_disable(adapter);
-
-	iavf_disable_queues(adapter);
-	err = iavf_get_queue_disable_result(adapter, IAVF_XDP_MSG_TIMEOUT_MS);
+	err = iavf_disable_queues(adapter, true);
 	if (err) {
-		dev_err(&adapter->pdev->dev, "cannot disable queues for XDP setup, error: %d\n", err);
-		return err;
+		dev_err(&adapter->pdev->dev, "cannot disable queues for XDP setup, error: %d\n",
+			err);
+		goto err_virtchnl;
 	}
 
 	iavf_free_all_tx_resources(adapter);
@@ -4990,58 +5021,93 @@ static int iavf_xdp_pause_if(struct iavf_adapter *adapter)
 	iavf_free_traffic_irqs(adapter);
 
 	return 0;
+
+err_virtchnl:
+	iavf_start_traffic(adapter);
+
+	return err;
 }
 
 /**
- * iavf_xdp_resume_if - Resume a stopped network interface after XDP setup
+ * iavf_open_sync - Synchronous version of 'iavf_open', dedicated to XDP setup
  * @adapter: board private structure
  *
+ * Caller of this function needs to lock 'adapter->crit_lock' in order
+ * to prevent race conditions with 'reset_task' and VIRTCHNL communication.
+ *
  * Returns 0 on success, negative on failure
- **/
-static int iavf_xdp_resume_if(struct iavf_adapter *adapter)
+ */
+static int iavf_open_sync(struct iavf_adapter *adapter)
 {
-	int err;
+	int err, ret;
 
 	err = iavf_setup_all_tx_resources(adapter);
 	if (err) {
-		dev_err(&adapter->pdev->dev, "cannot setup Tx resources, error: %d\n", err);
+		dev_err(&adapter->pdev->dev,
+			"cannot setup Tx resources, error: %d\n", err);
 		goto err_setup_tx_resources;
 	}
 
 	err = iavf_setup_all_rx_resources(adapter);
 	if (err) {
-		dev_err(&adapter->pdev->dev, "cannot setup Rx resources, error: %d\n", err);
+		dev_err(&adapter->pdev->dev,
+			"cannot setup Rx resources, error: %d\n", err);
 		goto err_setup_rx_resources;
 	}
 
-	iavf_request_traffic_irqs(adapter, adapter->netdev->name);
+	err = iavf_request_traffic_irqs(adapter, adapter->netdev->name);
+	if (err) {
+		dev_err(&adapter->pdev->dev,
+			"cannot request interrupts, error: %d\n", err);
+		goto err_request_irq;
+	}
 
 	iavf_configure_tx(adapter);
 	iavf_configure_rx(adapter);
 
-	iavf_configure_queues(adapter);
-	err = iavf_get_configure_queues_result(adapter,
-					       IAVF_XDP_MSG_TIMEOUT_MS);
+	err = iavf_configure_queues(adapter, true);
 	if (err) {
-		dev_err(&adapter->pdev->dev, "cannot configure queues in PF, error: %d\n", err);
-		goto err_setup_rx_resources;
+		dev_err(&adapter->pdev->dev,
+			"cannot configure queues in PF, error: %d\n", err);
+		goto err_virtchnl_req;
 	}
 
-	iavf_enable_queues(adapter);
-	err = iavf_get_queue_enable_result(adapter, IAVF_XDP_MSG_TIMEOUT_MS);
+	err = iavf_map_queues(adapter, true);
 	if (err) {
-		dev_err(&adapter->pdev->dev, "cannot enable queues in PF, error: %d\n", err);
-		goto err_setup_rx_resources;
+		dev_err(&adapter->pdev->dev,
+			"cannot map queues to vectors in PF, error: %d\n", err);
+		goto err_virtchnl_req;
 	}
 
-	iavf_napi_enable_all(adapter);
-	iavf_irq_enable(adapter, true);
+	err = iavf_enable_queues(adapter, true);
+	if (err) {
+		dev_err(&adapter->pdev->dev,
+			"cannot enable queues in PF, error: %d\n", err);
+		goto err_virtchnl_req;
+	}
 
-	netif_tx_start_all_queues(adapter->netdev);
-	netif_carrier_on(adapter->netdev);
+	ret = iavf_poll_for_link_status(adapter, IAVF_XDP_LINK_TIMEOUT_MS);
+	if (ret < 0) {
+		err = ret;
+		dev_err(&adapter->pdev->dev,
+			"cannot bring the link up, error: %d\n", err);
+		goto err_wrong_link_status;
+	} else if (!ret) {
+		err = -EBUSY;
+		dev_err(&adapter->pdev->dev,
+			"pf returned link down status, error: %d\n", err);
+		goto err_wrong_link_status;
+	}
+
+	iavf_start_traffic(adapter);
 
 	return 0;
 
+err_wrong_link_status:
+	iavf_close_sync(adapter);
+err_virtchnl_req:
+err_request_irq:
+	iavf_free_traffic_irqs(adapter);
 err_setup_rx_resources:
 	iavf_free_all_rx_resources(adapter);
 err_setup_tx_resources:
@@ -5051,19 +5117,30 @@ err_setup_tx_resources:
 }
 
 /**
+ * iavf_destroy_xdp_rings - remove XDP program from adapter and release
+ *			    XDP rings related to that program.
+ * @adapter: board private structure
+ */
+static void iavf_destroy_xdp_rings(struct iavf_adapter *adapter)
+{
+	iavf_unmap_rings_from_vectors(adapter);
+	iavf_free_xdp_queues(adapter);
+	iavf_assign_bpf_prog(adapter, NULL);
+	iavf_map_rings_to_vectors(adapter);
+}
+
+/**
  * iavf_prepare_xdp_rings - add XDP program to adapter and setup XDP rings
  *			    to handle that program.
  * @adapter: board private structure
  * @prog: XDP program
- **/
+ */
 static int iavf_prepare_xdp_rings(struct iavf_adapter *adapter,
 				  struct bpf_prog *prog)
 {
 	int i, err;
 
 	iavf_unmap_rings_from_vectors(adapter);
-	iavf_free_xdp_queues(adapter);
-
 	iavf_assign_bpf_prog(adapter, prog);
 
 	err = iavf_alloc_xdp_queues(adapter, adapter->num_active_queues);
@@ -5083,6 +5160,8 @@ static int iavf_prepare_xdp_rings(struct iavf_adapter *adapter,
 	return 0;
 
 err_alloc_queues:
+	iavf_assign_bpf_prog(adapter, NULL);
+
 	return err;
 }
 
@@ -5090,7 +5169,7 @@ err_alloc_queues:
  * iavf_xdp_can_create_queues - check if queue number is appropriate for XDP
  * @adapter: board private structure
  * @extack: netlink extended ack
- **/
+ */
 static bool iavf_xdp_can_create_queues(struct iavf_adapter *adapter,
 				       struct netlink_ext_ack *extack)
 {
@@ -5115,7 +5194,7 @@ static bool iavf_xdp_can_create_queues(struct iavf_adapter *adapter,
  * @adapter: board private structure
  * @prog: XDP program
  * @extack: netlink extended ack
- **/
+ */
 static int iavf_setup_xdp(struct iavf_adapter *adapter, struct bpf_prog *prog,
 			  struct netlink_ext_ack *extack)
 {
@@ -5130,47 +5209,53 @@ static int iavf_setup_xdp(struct iavf_adapter *adapter, struct bpf_prog *prog,
 	}
 
 	if (needs_reconfig) {
+		if (!iavf_xdp_can_create_queues(adapter, extack)) {
+			err = -EOPNOTSUPP;
+			goto err_no_queues;
+		}
+
 		if (iavf_lock_timeout(&adapter->crit_lock,
 				      IAVF_XDP_LOCK_TIMEOUT_MS)) {
+			err = -EBUSY;
 			dev_err(&adapter->pdev->dev,
-				"failed to acquire crit_lock in %s\n", __FUNCTION__);
-			return -EBUSY;
+				"failed to acquire crit_lock in %s\n",
+				__func__);
+			goto err_crit_lock;
 		}
 		err = iavf_process_pending_pf_msg(adapter,
 						  IAVF_XDP_LOCK_TIMEOUT_MS);
 		if (err)
-			goto err_pause_resume_if;
-
-		if (!iavf_xdp_can_create_queues(adapter, extack)) {
-			err = -EOPNOTSUPP;
-			goto err_pause_resume_if;
-		}
+			goto err_pending_pf_msg;
 
 		if (was_running) {
-			err = iavf_xdp_pause_if(adapter);
+			err = iavf_close_sync(adapter);
 			if (err) {
 				dev_err(&adapter->pdev->dev,
-					"cannot pause the interface to setup XDP, error: %d\n",
+					"cannot close the interface to setup XDP, error: %d\n",
 					err);
-				goto err_pause_resume_if;
+				goto err_close_if;
 			}
 		}
 
-		err = iavf_prepare_xdp_rings(adapter, prog);
-		if (err) {
-			dev_err(&adapter->pdev->dev,
-				"cannot prepare rings to support XDP, error: %d\n",
-				err);
-			goto err_pause_resume_if;
+		if (prog) {
+			err = iavf_prepare_xdp_rings(adapter, prog);
+			if (err) {
+				dev_err(&adapter->pdev->dev,
+					"cannot prepare rings to support XDP, error: %d\n",
+					err);
+				goto err_prepare_xdp_rings;
+			}
+		} else {
+			iavf_destroy_xdp_rings(adapter);
 		}
 
 		if (was_running) {
-			err = iavf_xdp_resume_if(adapter);
+			err = iavf_open_sync(adapter);
 			if (err) {
 				dev_err(&adapter->pdev->dev,
-					"cannot resume the interface after XDP setup, error: %d\n",
+					"cannot open the interface after XDP setup, error: %d\n",
 					err);
-				goto err_pause_resume_if;
+				goto err_open_if;
 			}
 		}
 		mutex_unlock(&adapter->crit_lock);
@@ -5181,15 +5266,21 @@ static int iavf_setup_xdp(struct iavf_adapter *adapter, struct bpf_prog *prog,
 
 	return 0;
 
-err_pause_resume_if:
+err_open_if:
+err_prepare_xdp_rings:
+	iavf_destroy_xdp_rings(adapter);
+	iavf_open_sync(adapter);
+err_close_if:
+err_pending_pf_msg:
 	mutex_unlock(&adapter->crit_lock);
-
+err_crit_lock:
+err_no_queues:
 	return err;
 }
 
 /**
  * iavf_xdp - XDP command handler
- * @dev: netdevice
+ * @netdev: netdevice
  * @xdp: XDP command
  */
 static int iavf_xdp(struct net_device *netdev, struct netdev_bpf *xdp)

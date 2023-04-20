@@ -88,10 +88,6 @@ struct iavf_vsi {
 
 #define MAXIMUM_ETHERNET_VLAN_SIZE (VLAN_ETH_FRAME_LEN + ETH_FCS_LEN)
 
-#define IAVF_RX_DESC(R, i) (&(((union iavf_32byte_rx_desc *)((R)->desc))[i]))
-#define IAVF_TX_DESC(R, i) (&(((struct iavf_tx_desc *)((R)->desc))[i]))
-#define IAVF_TX_CTXTDESC(R, i) \
-	(&(((struct iavf_tx_context_desc *)((R)->desc))[i]))
 #define IAVF_MAX_REQ_QUEUES 16
 
 #define IAVF_HKEY_ARRAY_SIZE ((IAVF_VFQF_HKEY_MAX_INDEX + 1) * 4)
@@ -112,7 +108,8 @@ struct iavf_q_vector {
 	struct napi_struct napi;
 	struct iavf_ring_container rx;
 	struct iavf_ring_container tx;
-	u32 ring_mask;
+	u32 rx_ring_mask;
+	u32 tx_ring_mask;
 	u8 itr_countdown;	/* when 0 should adjust adaptive ITR */
 	u8 num_ringpairs;	/* total number of ring pairs in vector */
 	u16 v_idx;		/* index in the vsi->q_vector array. */
@@ -247,6 +244,8 @@ struct iavf_cloud_filter {
 	bool del;		/* filter needs to be deleted */
 	bool add;		/* filter needs to be added */
 };
+
+#define IAVF_XDP_LINK_TIMEOUT_MS 1000
 
 #define IAVF_RESET_WAIT_MS 10
 #define IAVF_RESET_WAIT_DETECTED_COUNT 500
@@ -524,10 +523,23 @@ static inline void iavf_change_state(struct iavf_adapter *adapter,
  * @adapter: board private structure
  *
  * Returns true if XDP program is loaded on a given adapter.
- **/
+ */
 static inline bool iavf_adapter_xdp_active(struct iavf_adapter *adapter)
 {
 	return !!READ_ONCE(adapter->xdp_prog);
+}
+
+static inline struct xsk_buff_pool *iavf_xsk_pool(struct iavf_ring *ring)
+{
+	struct iavf_adapter *adapter = ring->vsi->back;
+	struct iavf_vsi *vsi = ring->vsi;
+	u16 qid = ring->queue_index;
+
+	if (!iavf_adapter_xdp_active(adapter) ||
+	    !test_bit(qid, adapter->af_xdp_zc_qps))
+		return NULL;
+
+	return xsk_get_pool_from_qid(vsi->netdev, qid);
 }
 
 int iavf_up(struct iavf_adapter *adapter);
@@ -557,22 +569,17 @@ int iavf_send_vf_offload_vlan_v2_msg(struct iavf_adapter *adapter);
 void iavf_set_queue_vlan_tag_loc(struct iavf_adapter *adapter);
 u16 iavf_get_num_vlans_added(struct iavf_adapter *adapter);
 void iavf_irq_enable(struct iavf_adapter *adapter, bool flush);
-void iavf_configure_selected_queues(struct iavf_adapter *adapter, u32 qp_mask);
-void iavf_configure_queues(struct iavf_adapter *adapter);
-int iavf_get_configure_queues_result(struct iavf_adapter *adapter,
-				    unsigned int msecs);
+int iavf_configure_selected_queues(struct iavf_adapter *adapter, u32 qp_mask,
+				   bool wait);
+int iavf_configure_queues(struct iavf_adapter *adapter, bool wait);
 void iavf_deconfigure_queues(struct iavf_adapter *adapter);
-void iavf_enable_queues(struct iavf_adapter *adapter);
-void iavf_disable_queues(struct iavf_adapter *adapter);
-void iavf_enable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
-				 u32 tx_queues);
-void iavf_disable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
-				  u32 tx_queues);
-int iavf_get_queue_enable_result(struct iavf_adapter *adapter, unsigned int msecs);
-int iavf_get_queue_disable_result(struct iavf_adapter *adapter, unsigned int msecs);
-void iavf_map_queues(struct iavf_adapter *adapter);
-int iavf_get_map_queues_result(struct iavf_adapter *adapter,
-			       unsigned int msecs);
+int iavf_enable_queues(struct iavf_adapter *adapter, bool wait);
+int iavf_disable_queues(struct iavf_adapter *adapter, bool wait);
+int iavf_enable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
+				u32 tx_queues, bool wait);
+int iavf_disable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
+				 u32 tx_queues, bool wait);
+int iavf_map_queues(struct iavf_adapter *adapter, bool wait);
 int iavf_request_queues(struct iavf_adapter *adapter, int num);
 void iavf_add_ether_addrs(struct iavf_adapter *adapter);
 void iavf_del_ether_addrs(struct iavf_adapter *adapter);
@@ -585,10 +592,9 @@ void iavf_get_hena(struct iavf_adapter *adapter);
 void iavf_set_hena(struct iavf_adapter *adapter);
 void iavf_set_rss_key(struct iavf_adapter *adapter);
 void iavf_set_rss_lut(struct iavf_adapter *adapter);
-int iavf_get_setting_rss_lut_result(struct iavf_adapter *adapter,
-				    unsigned int msecs);
 void iavf_enable_vlan_stripping(struct iavf_adapter *adapter);
 void iavf_disable_vlan_stripping(struct iavf_adapter *adapter);
+int iavf_poll_for_link_status(struct iavf_adapter *adapter, unsigned int msecs);
 void iavf_virtchnl_completion(struct iavf_adapter *adapter,
 			      enum virtchnl_ops v_opcode,
 			      enum iavf_status v_retval, u8 *msg, u16 msglen);

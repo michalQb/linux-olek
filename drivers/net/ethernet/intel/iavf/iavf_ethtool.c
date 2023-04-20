@@ -1644,6 +1644,7 @@ static int iavf_set_channels(struct net_device *netdev,
 			     struct ethtool_channels *ch)
 {
 	struct iavf_adapter *adapter = netdev_priv(netdev);
+	u32 num_allowed = adapter->vsi_res->num_queue_pairs;
 	u32 num_req = ch->combined_count;
 	int i;
 
@@ -1656,8 +1657,14 @@ static int iavf_set_channels(struct net_device *netdev,
 	/* All of these should have already been checked by ethtool before this
 	 * even gets to us, but just to be sure.
 	 */
-	if (num_req == 0 || num_req > adapter->vsi_res->num_queue_pairs)
+	if (num_req == 0 || num_req > num_allowed)
 		return -EINVAL;
+
+	if (iavf_adapter_xdp_active(adapter) && num_req * 2 > num_allowed) {
+		netdev_err(netdev, "XDP is enabled, so maximum allowed queue number is reduced to %u, %u queues where requested\n",
+			   num_allowed / 2, num_allowed);
+		return -EINVAL;
+	}
 
 	if (num_req == adapter->num_active_queues)
 		return 0;

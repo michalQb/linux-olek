@@ -179,7 +179,7 @@ static inline unsigned int iavf_txd_use_count(unsigned int size)
 #define IAVF_TX_FLAGS_IPV6			BIT(5)
 #define IAVF_TX_FLAGS_FCCRC			BIT(6)
 #define IAVF_TX_FLAGS_FSO			BIT(7)
-#define IAVF_TX_FLAGS_FD_SB			BIT(9)
+/* BIT(9) is free, was IAVF_TX_FLAGS_FD_SB */
 #define IAVF_TX_FLAGS_VXLAN_TUNNEL		BIT(10)
 #define IAVF_TX_FLAGS_HW_OUTER_SINGLE_VLAN	BIT(11)
 #define IAVF_TX_FLAGS_VLAN_MASK			0xffff0000
@@ -187,14 +187,34 @@ static inline unsigned int iavf_txd_use_count(unsigned int size)
 #define IAVF_TX_FLAGS_VLAN_PRIO_SHIFT		29
 #define IAVF_TX_FLAGS_VLAN_SHIFT		16
 
+/**
+ * enum iavf_xdp_buffer_type - type of &iavf_tx_buffer on XDP queue
+ * @IAVF_XDP_BUFFER_NONE: unused, no action required
+ * @IAVF_XDP_BUFFER_TX: free according to our memory model
+ * @IAVF_XDP_BUFFER_FRAME: use xdp_return_frame()
+ */
+enum iavf_xdp_buffer_type {
+	IAVF_XDP_BUFFER_NONE	= 0U,
+	IAVF_XDP_BUFFER_TX,
+	IAVF_XDP_BUFFER_FRAME,
+};
+
 struct iavf_tx_buffer {
-	struct iavf_tx_desc *next_to_watch;
+
+	/* Track the last frame in batch/packet */
 	union {
-		struct sk_buff *skb;
-		void *raw_buf;
+		struct iavf_tx_desc *next_to_watch;	/* on skb TX queue */
+		u16 rs_desc_idx;			/* on XDP queue */
+	};
+	union {
+		struct sk_buff *skb;		/* used for .ndo_start_xmit() */
+		struct page *page;		/* used for XDP_TX */
+		struct xdp_frame *xdpf;		/* used for .ndo_xdp_xmit() */
+		struct xdp_buff *xdp;		/* used for XDP_TX in ZC mode */
 	};
 	unsigned int bytecount;
 	unsigned short gso_segs;
+	unsigned short xdp_type;
 
 	DEFINE_DMA_UNMAP_ADDR(dma);
 	DEFINE_DMA_UNMAP_LEN(len);
@@ -245,10 +265,6 @@ struct iavf_ring {
 	u16 next_to_use;
 	u16 next_to_clean;
 
-	/* used for XDP rings only */
-	u16 next_dd;
-	u16 next_rs;
-
 	u16 flags;
 #define IAVF_TXR_FLAGS_WB_ON_ITR		BIT(0)
 #define IAVF_TXRX_FLAGS_ARM_WB			BIT(1)
@@ -293,6 +309,10 @@ struct iavf_ring {
 } ____cacheline_internodealigned_in_smp;
 
 #define IAVF_RING_QUARTER(R)		((R)->count >> 2)
+#define IAVF_RX_DESC(R, i) (&(((union iavf_32byte_rx_desc *)((R)->desc))[i]))
+#define IAVF_TX_DESC(R, i) (&(((struct iavf_tx_desc *)((R)->desc))[i]))
+#define IAVF_TX_CTXTDESC(R, i) \
+	(&(((struct iavf_tx_context_desc *)((R)->desc))[i]))
 
 #define IAVF_ITR_ADAPTIVE_MIN_INC	0x0002
 #define IAVF_ITR_ADAPTIVE_MIN_USECS	0x0002
@@ -355,7 +375,7 @@ static inline __le64 iavf_build_ctob(u32 td_cmd, u32 td_offset,
  * Returns number of data descriptors needed for this skb. Returns 0 to indicate
  * there is not enough descriptors available in this ring since we need at least
  * one descriptor.
- **/
+ */
 static inline int iavf_xmit_descriptor_count(struct sk_buff *skb)
 {
 	const skb_frag_t *frag = &skb_shinfo(skb)->frags[0];
@@ -380,7 +400,7 @@ static inline int iavf_xmit_descriptor_count(struct sk_buff *skb)
  * @size:    the size buffer we want to assure is available
  *
  * Returns 0 if stop is not needed
- **/
+ */
 static inline int iavf_maybe_stop_tx(struct iavf_ring *tx_ring, int size)
 {
 	if (likely(IAVF_DESC_UNUSED(tx_ring) >= size))
@@ -396,7 +416,7 @@ static inline int iavf_maybe_stop_tx(struct iavf_ring *tx_ring, int size)
  * Note: Our HW can't scatter-gather more than 8 fragments to build
  * a packet on the wire and so we need to figure out the cases where we
  * need to linearize the skb.
- **/
+ */
 static inline bool iavf_chk_linearize(struct sk_buff *skb, int count)
 {
 	/* Both TSO and single send will work if count is less than 8 */
@@ -412,7 +432,7 @@ static inline bool iavf_chk_linearize(struct sk_buff *skb, int count)
 /**
  * txring_txq - helper to convert from a ring to a queue
  * @ring: Tx ring to find the netdev equivalent of
- **/
+ */
 static inline struct netdev_queue *txring_txq(const struct iavf_ring *ring)
 {
 	return netdev_get_tx_queue(ring->netdev, ring->queue_index);
@@ -439,7 +459,7 @@ static inline void iavf_xdp_ring_update_tail(const struct iavf_ring *xdp_ring)
  * @tc: TODO
  * @total_pkts: Number of packets transmitted since the last update
  * @total_bytes: Number of bytes transmitted since the last update
- **/
+ */
 static inline void
 __iavf_update_tx_ring_stats(struct iavf_ring *tx_ring,
 			    struct iavf_ring_container *tc,
@@ -459,7 +479,7 @@ __iavf_update_tx_ring_stats(struct iavf_ring *tx_ring,
  * @rc: TODO
  * @rx_bytes: number of bytes processed since last update
  * @rx_packets: number of packets processed since last update
- **/
+ */
 static inline void
 __iavf_update_rx_ring_stats(struct iavf_ring *rx_ring,
 			    struct iavf_ring_container *rc,
@@ -477,7 +497,7 @@ __iavf_update_rx_ring_stats(struct iavf_ring *rx_ring,
  * iavf_release_rx_desc - Store the new tail and head values
  * @rx_ring: ring to bump
  * @val: new head index
- **/
+ */
 static inline void iavf_release_rx_desc(struct iavf_ring *rx_ring, u32 val)
 {
 	rx_ring->next_to_use = val;
@@ -496,23 +516,50 @@ static inline void iavf_release_rx_desc(struct iavf_ring *rx_ring, u32 val)
 #define IAVF_RXQ_XDP_ACT_STOP_NOW	BIT(2)
 
 /**
+ * iavf_set_rs_bit - set RS bit on last produced descriptor.
+ * @xdp_ring: XDP ring to produce the HW Tx descriptors on
+ *
+ * Returns the index of descriptor RS bit was set on (one behind current NTU).
+ */
+static inline u16 iavf_set_rs_bit(struct iavf_ring *xdp_ring)
+{
+	u16 rs_idx = xdp_ring->next_to_use ? xdp_ring->next_to_use - 1 :
+					     xdp_ring->count - 1;
+	struct iavf_tx_desc *tx_desc;
+
+	tx_desc = IAVF_TX_DESC(xdp_ring, rs_idx);
+	tx_desc->cmd_type_offset_bsz |=
+		cpu_to_le64(IAVF_TX_DESC_CMD_RS << IAVF_TXD_QW1_CMD_SHIFT);
+
+	return rs_idx;
+}
+
+/**
  * iavf_finalize_xdp_rx - Finalize XDP actions once per RX ring clean
  * @xdp_ring: XDP TX queue assigned to a given RX ring
  * @rxq_xdp_act: Logical OR of flags of XDP actions that require finalization
- **/
+ * @first_idx: index of the first frame in the transmitted batch on XDP queue
+ */
 static inline void iavf_finalize_xdp_rx(struct iavf_ring *xdp_ring,
-					u32 rxq_xdp_act)
+					u32 rxq_xdp_act, u32 first_idx)
 {
 	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_REDIR)
-		xdp_do_flush();
-
+		xdp_do_flush_map();
 	if (rxq_xdp_act & IAVF_RXQ_XDP_ACT_FINALIZE_TX) {
+		struct iavf_tx_buffer *tx_buf = &xdp_ring->tx_bi[first_idx];
+
 		if (static_branch_unlikely(&iavf_xdp_locking_key))
 			spin_lock(&xdp_ring->tx_lock);
+		tx_buf->rs_desc_idx = iavf_set_rs_bit(xdp_ring);
 		iavf_xdp_ring_update_tail(xdp_ring);
 		if (static_branch_unlikely(&iavf_xdp_locking_key))
 			spin_unlock(&xdp_ring->tx_lock);
 	}
+}
+
+static inline bool iavf_ring_is_xdp(struct iavf_ring *ring)
+{
+	return !!(ring->flags & IAVF_TXRX_FLAGS_XDP);
 }
 
 #endif /* _IAVF_TXRX_H_ */

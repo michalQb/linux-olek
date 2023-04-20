@@ -7,6 +7,8 @@
 #include "iavf_prototype.h"
 #include "iavf_client.h"
 
+#define IAVF_VC_MSG_TIMEOUT_MS		300
+
 /**
  * iavf_send_pf_msg
  * @adapter: adapter structure
@@ -143,7 +145,7 @@ iavf_poll_virtchnl_msg(struct iavf_hw *hw, struct iavf_arq_event_info *event,
 /**
  * iavf_process_pending_pf_msg
  * @adapter: adapter structure
- * @timeout_msec: timeout in milliseconds
+ * @timeout_msecs: timeout in milliseconds
  *
  * Check if any VIRTCHNL message is currently pending and process it
  * if needed.
@@ -196,7 +198,7 @@ free_exit:
  *
  * Return a result of a given operation returned by PF
  * or exit with timeout.
- **/
+ */
 static int iavf_get_vf_op_result(struct iavf_adapter *adapter,
 				 enum virtchnl_ops op,
 				 unsigned int msecs)
@@ -406,7 +408,7 @@ int iavf_get_vf_vlan_v2_caps(struct iavf_adapter *adapter)
  * with data. Because of virtchnl protocol can operate on queue pairs only,
  * associate each extra Tx queue with an empty Rx queue
  * (with zero length).
- **/
+ */
 static void iavf_set_qp_config_info(struct virtchnl_queue_pair_info *vqpi,
 				    struct iavf_adapter *adapter,
 				    int queue_index, u32 max_frame,
@@ -452,28 +454,19 @@ static void iavf_set_qp_config_info(struct virtchnl_queue_pair_info *vqpi,
 }
 
 /**
- * iavf_get_configure_queues_result
- * @adapter: adapter structure
- * @msecs: timeout in milliseconds
- *
- * Return a result of CONFIG_VSI_QUEUES command returned by PF
- * or exit with timeout.
- **/
-int iavf_get_configure_queues_result(struct iavf_adapter *adapter,
-				    unsigned int msecs)
-{
-	return iavf_get_vf_op_result(adapter, VIRTCHNL_OP_CONFIG_VSI_QUEUES,
-				     msecs);
-}
-
-/**
  * iavf_configure_selected_queues
  * @adapter: adapter structure
  * @qp_mask: mask of queue pairs to configure
+ * @wait: if true, wait until the request is completed
  *
- * Request that the PF set up our selected (previously allocated) queues.
- **/
-void iavf_configure_selected_queues(struct iavf_adapter *adapter, u32 qp_mask)
+ * Request PF to set up our selected (previously allocated) queues.
+ * Returns 0 if the command succeeds or negative value in case of error.
+ *
+ * Note: The caller must ensure that the calling context has taken
+ *	 'adapter->crit_lock' mutex when 'wait' parameter is set to true.
+ */
+int iavf_configure_selected_queues(struct iavf_adapter *adapter, u32 qp_mask,
+				   bool wait)
 {
 	int pairs = adapter->num_active_queues + adapter->num_xdp_tx_queues;
 	unsigned long num_qps_to_config, mask = qp_mask;
@@ -484,16 +477,17 @@ void iavf_configure_selected_queues(struct iavf_adapter *adapter, u32 qp_mask)
 
 	if (adapter->current_op != VIRTCHNL_OP_UNKNOWN) {
 		/* bail because we already have a command pending */
-		dev_err(&adapter->pdev->dev, "Cannot configure queues, command %d pending\n",
+		dev_err(&adapter->pdev->dev,
+			"Cannot configure queues, command %d pending\n",
 			adapter->current_op);
-		return;
+		return -EBUSY;
 	}
 	num_qps_to_config = hweight_long(mask);
 	adapter->current_op = VIRTCHNL_OP_CONFIG_VSI_QUEUES;
 	len = struct_size(vqci, qpair, num_qps_to_config);
 	vqci = kzalloc(len, GFP_KERNEL);
 	if (!vqci)
-		return;
+		return -ENOMEM;
 
 	vqci->vsi_id = adapter->vsi_res->vsi_id;
 	vqci->num_queue_pairs = num_qps_to_config;
@@ -516,50 +510,31 @@ void iavf_configure_selected_queues(struct iavf_adapter *adapter, u32 qp_mask)
 	iavf_send_pf_msg(adapter, VIRTCHNL_OP_CONFIG_VSI_QUEUES,
 			 (u8 *)vqci, len);
 	kfree(vqci);
+
+	if (wait)
+		return iavf_get_vf_op_result(adapter,
+					     VIRTCHNL_OP_CONFIG_VSI_QUEUES,
+					     IAVF_VC_MSG_TIMEOUT_MS);
+	return 0;
 }
 
 /**
  * iavf_configure_queues
  * @adapter: adapter structure
+ * @wait: if true, wait until the request is completed
  *
  * Send a request to PF to set up all allocated queues.
- **/
-void iavf_configure_queues(struct iavf_adapter *adapter)
+ * Returns 0 if the command succeeds or negative value in case of error.
+ *
+ * Note: The caller must ensure that the calling context has taken
+ *	 'adapter->crit_lock' mutex when 'wait' parameter is set to true.
+ */
+int iavf_configure_queues(struct iavf_adapter *adapter, bool wait)
 {
 	int pairs = adapter->num_active_queues + adapter->num_xdp_tx_queues;
 	u32 qpair_mask = BIT(pairs) - 1;
 
-	iavf_configure_selected_queues(adapter, qpair_mask);
-}
-
-/**
- * iavf_get_queue_disable_result
- * @adapter: adapter structure
- * @msecs: timeout in milliseconds
- *
- * Return a result DISABLE_QUEUES command result returned by PF or exit
- * with timeout.
- **/
-int iavf_get_queue_disable_result(struct iavf_adapter *adapter,
-				  unsigned int msecs)
-{
-	return iavf_get_vf_op_result(adapter, VIRTCHNL_OP_DISABLE_QUEUES,
-				     msecs);
-}
-
-/**
- * iavf_get_queue_enable_result
- * @adapter: adapter structure
- * @msecs: timeout in milliseconds
- *
- * Return a result ENABLE_QUEUES command result returned by PF or exit
- * with timeout.
- **/
-int iavf_get_queue_enable_result(struct iavf_adapter *adapter,
-				 unsigned int msecs)
-{
-	return iavf_get_vf_op_result(adapter, VIRTCHNL_OP_ENABLE_QUEUES,
-				     msecs);
+	return iavf_configure_selected_queues(adapter, qpair_mask, wait);
 }
 
 /**
@@ -567,19 +542,25 @@ int iavf_get_queue_enable_result(struct iavf_adapter *adapter,
  * @adapter: adapter structure
  * @rx_queues: mask of Rx queues
  * @tx_queues: mask of Tx queues
+ * @wait: if true, wait until the request is completed
  *
  * Send a request to PF to enable selected queues.
- **/
-void iavf_enable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
-				 u32 tx_queues)
+ * Returns 0 if the command succeeds or negative value in case of error.
+ *
+ * Note: The caller must ensure that the calling context has taken
+ *	 'adapter->crit_lock' mutex when 'wait' parameter is set to true.
+ */
+int iavf_enable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
+				u32 tx_queues, bool wait)
 {
 	struct virtchnl_queue_select vqs;
 
 	if (adapter->current_op != VIRTCHNL_OP_UNKNOWN) {
 		/* bail because we already have a command pending */
-		dev_err(&adapter->pdev->dev, "Cannot enable queues, command %d pending\n",
+		dev_err(&adapter->pdev->dev,
+			"Cannot enable queues, command %d pending\n",
 			adapter->current_op);
-		return;
+		return -EBUSY;
 	}
 	adapter->current_op = VIRTCHNL_OP_ENABLE_QUEUES;
 	vqs.vsi_id = adapter->vsi_res->vsi_id;
@@ -588,6 +569,11 @@ void iavf_enable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
 	adapter->aq_required &= ~IAVF_FLAG_AQ_ENABLE_QUEUES;
 	iavf_send_pf_msg(adapter, VIRTCHNL_OP_ENABLE_QUEUES,
 			 (u8 *)&vqs, sizeof(vqs));
+
+	if (wait)
+		return iavf_get_vf_op_result(adapter, VIRTCHNL_OP_ENABLE_QUEUES,
+					     IAVF_VC_MSG_TIMEOUT_MS);
+	return 0;
 }
 
 /**
@@ -595,19 +581,25 @@ void iavf_enable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
  * @adapter: adapter structure
  * @rx_queues: mask of Rx queues
  * @tx_queues: mask of Tx queues
+ * @wait: if true, wait until the request is completed
  *
  * Send a request to PF to disable selected queues.
- **/
-void iavf_disable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
-				  u32 tx_queues)
+ * Returns 0 if the command succeeds or negative value in case of error.
+ *
+ * Note: The caller must ensure that the calling context has taken
+ *	 'adapter->crit_lock' mutex when 'wait' parameter is set to true.
+ */
+int iavf_disable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
+				 u32 tx_queues, bool wait)
 {
 	struct virtchnl_queue_select vqs;
 
 	if (adapter->current_op != VIRTCHNL_OP_UNKNOWN) {
 		/* bail because we already have a command pending */
-		dev_err(&adapter->pdev->dev, "Cannot disable queues, command %d pending\n",
+		dev_err(&adapter->pdev->dev,
+			"Cannot disable queues, command %d pending\n",
 			adapter->current_op);
-		return;
+		return -EBUSY;
 	}
 	adapter->current_op = VIRTCHNL_OP_DISABLE_QUEUES;
 	vqs.vsi_id = adapter->vsi_res->vsi_id;
@@ -616,15 +608,26 @@ void iavf_disable_selected_queues(struct iavf_adapter *adapter, u32 rx_queues,
 	adapter->aq_required &= ~IAVF_FLAG_AQ_DISABLE_QUEUES;
 	iavf_send_pf_msg(adapter, VIRTCHNL_OP_DISABLE_QUEUES,
 			 (u8 *)&vqs, sizeof(vqs));
+
+	if (wait)
+		return iavf_get_vf_op_result(adapter,
+					     VIRTCHNL_OP_DISABLE_QUEUES,
+					     IAVF_VC_MSG_TIMEOUT_MS);
+	return 0;
 }
 
 /**
  * iavf_enable_queues
  * @adapter: adapter structure
+ * @wait: if true, wait until the request is completed
  *
  * Send a request to PF to enable all allocated queues.
- **/
-void iavf_enable_queues(struct iavf_adapter *adapter)
+ * Returns 0 if the command succeeds or negative value in case of error.
+ *
+ * Note: The caller must ensure that the calling context has taken
+ *	 'adapter->crit_lock' mutex when 'wait' parameter is set to true.
+ */
+int iavf_enable_queues(struct iavf_adapter *adapter, bool wait)
 {
 	u32 num_tx_queues = adapter->num_active_queues +
 			    adapter->num_xdp_tx_queues;
@@ -632,16 +635,21 @@ void iavf_enable_queues(struct iavf_adapter *adapter)
 	u32 rx_queues = BIT(adapter->num_active_queues) - 1;
 	u32 tx_queues = BIT(num_tx_queues) - 1;
 
-	iavf_enable_selected_queues(adapter, rx_queues, tx_queues);
+	return iavf_enable_selected_queues(adapter, rx_queues, tx_queues, wait);
 }
 
 /**
  * iavf_disable_queues
  * @adapter: adapter structure
+ * @wait: if true, wait until the request is completed
  *
  * Send a request to PF to disable all allocated queues.
- **/
-void iavf_disable_queues(struct iavf_adapter *adapter)
+ * Returns 0 if the command succeeds or negative value in case of error.
+ *
+ * Note: The caller must ensure that the calling context has taken
+ *	 'adapter->crit_lock' mutex when 'wait' parameter is set to true.
+ */
+int iavf_disable_queues(struct iavf_adapter *adapter, bool wait)
 {
 	u32 num_tx_queues = adapter->num_active_queues +
 			    adapter->num_xdp_tx_queues;
@@ -649,32 +657,23 @@ void iavf_disable_queues(struct iavf_adapter *adapter)
 	u32 rx_queues = BIT(adapter->num_active_queues) - 1;
 	u32 tx_queues = BIT(num_tx_queues) - 1;
 
-	iavf_disable_selected_queues(adapter, rx_queues, tx_queues);
-}
-
-/**
- * iavf_get_map_queues_result
- * @adapter: adapter structure
- * @msecs: timeout in milliseconds
- *
- * Return a result CONFIG_VSI_QUEUES command result returned by PF
- * or exit with timeout.
- **/
-int iavf_get_map_queues_result(struct iavf_adapter *adapter,
-			       unsigned int msecs)
-{
-	return iavf_get_vf_op_result(adapter, VIRTCHNL_OP_CONFIG_IRQ_MAP,
-				     msecs);
+	return iavf_disable_selected_queues(adapter, rx_queues, tx_queues,
+					    wait);
 }
 
 /**
  * iavf_map_queues
  * @adapter: adapter structure
+ * @wait: if true, wait until the request is completed
  *
- * Request that the PF map queues to interrupt vectors. Misc causes, including
- * admin queue, are always mapped to vector 0.
- **/
-void iavf_map_queues(struct iavf_adapter *adapter)
+ * Send a request to PF to update the mapping queues to interrupt vectors.
+ * Misc causes, including admin queue, are always mapped to vector 0.
+ * Returns 0 if the command succeeds or negative value in case of error.
+ *
+ * Note: The caller must ensure that the calling context has taken
+ *       'adapter->crit_lock' mutex when 'wait' parameter is set to true.
+ */
+int iavf_map_queues(struct iavf_adapter *adapter, bool wait)
 {
 	struct virtchnl_irq_map_info *vimi;
 	struct virtchnl_vector_map *vecmap;
@@ -686,7 +685,7 @@ void iavf_map_queues(struct iavf_adapter *adapter)
 		/* bail because we already have a command pending */
 		dev_err(&adapter->pdev->dev, "Cannot map queues to vectors, command %d pending\n",
 			adapter->current_op);
-		return;
+		return -EBUSY;
 	}
 	adapter->current_op = VIRTCHNL_OP_CONFIG_IRQ_MAP;
 
@@ -695,7 +694,7 @@ void iavf_map_queues(struct iavf_adapter *adapter)
 	len = struct_size(vimi, vecmap, adapter->num_msix_vectors);
 	vimi = kzalloc(len, GFP_KERNEL);
 	if (!vimi)
-		return;
+		return -ENOMEM;
 
 	vimi->num_vectors = adapter->num_msix_vectors;
 	/* Queue vectors first */
@@ -705,8 +704,8 @@ void iavf_map_queues(struct iavf_adapter *adapter)
 
 		vecmap->vsi_id = adapter->vsi_res->vsi_id;
 		vecmap->vector_id = v_idx + NONQ_VECS;
-		vecmap->txq_map = q_vector->ring_mask;
-		vecmap->rxq_map = q_vector->ring_mask;
+		vecmap->txq_map = q_vector->tx_ring_mask;
+		vecmap->rxq_map = q_vector->rx_ring_mask;
 		vecmap->rxitr_idx = IAVF_RX_ITR;
 		vecmap->txitr_idx = IAVF_TX_ITR;
 	}
@@ -721,6 +720,12 @@ void iavf_map_queues(struct iavf_adapter *adapter)
 	iavf_send_pf_msg(adapter, VIRTCHNL_OP_CONFIG_IRQ_MAP,
 			 (u8 *)vimi, len);
 	kfree(vimi);
+
+	if (wait)
+		return iavf_get_vf_op_result(adapter,
+					     VIRTCHNL_OP_CONFIG_IRQ_MAP,
+					     IAVF_VC_MSG_TIMEOUT_MS);
+	return 0;
 }
 
 /**
@@ -1382,21 +1387,6 @@ void iavf_set_rss_key(struct iavf_adapter *adapter)
 	adapter->aq_required &= ~IAVF_FLAG_AQ_SET_RSS_KEY;
 	iavf_send_pf_msg(adapter, VIRTCHNL_OP_CONFIG_RSS_KEY, (u8 *)vrk, len);
 	kfree(vrk);
-}
-
-/**
- * iavf_get_setting_rss_lut_result
- * @adapter: adapter structure
- * @msecs: timeout in milliseconds
- *
- * Return a result of CONFIG_VSI_QUEUES command returned by PF
- * or exit with timeout.
- **/
-int iavf_get_setting_rss_lut_result(struct iavf_adapter *adapter,
-				    unsigned int msecs)
-{
-	return iavf_get_vf_op_result(adapter, VIRTCHNL_OP_CONFIG_RSS_LUT,
-				     msecs);
 }
 
 /**
@@ -2194,6 +2184,52 @@ static void iavf_netdev_features_vlan_strip_set(struct net_device *netdev,
 		netdev->features |= NETIF_F_HW_VLAN_CTAG_RX;
 	else
 		netdev->features &= ~NETIF_F_HW_VLAN_CTAG_RX;
+}
+
+/**
+ * iavf_poll_for_link_status - poll for PF notification about link status
+ * @adapter: adapter structure
+ * @msecs: timeout in milliseconds
+ *
+ * Returns:
+ *   0 - if notification about link down was received,
+ *   1 - if notification about link up was received,
+ *   or negative error code in case of error.
+ */
+int iavf_poll_for_link_status(struct iavf_adapter *adapter, unsigned int msecs)
+{
+	struct iavf_hw *hw = &adapter->hw;
+	struct iavf_arq_event_info event;
+	struct virtchnl_pf_event *vpe;
+	int ret;
+
+	event.buf_len = IAVF_MAX_AQ_BUF_SIZE;
+	event.msg_buf = kzalloc(IAVF_MAX_AQ_BUF_SIZE, GFP_KERNEL);
+	if (!event.msg_buf)
+		return -ENOMEM;
+
+	ret = iavf_poll_virtchnl_msg_timeout(hw, &event, VIRTCHNL_OP_EVENT,
+					     msecs);
+	if (ret)
+		goto virtchnl_msg_err;
+
+	vpe = (struct virtchnl_pf_event *)event.msg_buf;
+	if (vpe->event == VIRTCHNL_EVENT_LINK_CHANGE) {
+		bool link_up = iavf_get_vpe_link_status(adapter, vpe);
+
+		iavf_set_adapter_link_speed_from_vpe(adapter, vpe);
+
+		ret = link_up ? 1 : 0;
+	} else {
+		iavf_virtchnl_completion(adapter, VIRTCHNL_OP_EVENT, 0,
+					 event.msg_buf, event.msg_len);
+		ret = -EBUSY;
+	}
+
+virtchnl_msg_err:
+	kfree(event.msg_buf);
+
+	return ret;
 }
 
 /**
