@@ -1299,13 +1299,18 @@ static void idpf_restore_features(struct idpf_vport *vport)
  */
 static int idpf_set_real_num_queues(struct idpf_vport *vport)
 {
-	int err;
+	int num_txq, err;
 
 	err = netif_set_real_num_rx_queues(vport->netdev, vport->num_rxq);
 	if (err)
 		return err;
 
-	return netif_set_real_num_tx_queues(vport->netdev, vport->num_txq);
+	if (idpf_xdp_is_prog_ena(vport))
+		num_txq = vport->num_txq - vport->num_xdp_txq;
+	else
+		num_txq = vport->num_txq;
+
+	return netif_set_real_num_tx_queues(vport->netdev, num_txq);
 }
 
 /**
@@ -1417,6 +1422,15 @@ static int idpf_vport_open(struct idpf_vport *vport, bool alloc_res)
 	}
 
 	idpf_rx_init_buf_tail(vport);
+
+	if (idpf_xdp_is_prog_ena(vport)) {
+		err = idpf_xdp_rxq_info_init_all(vport);
+		if (err) {
+			dev_err(&adapter->pdev->dev, "Failed to initialize XDP info for vport %u, %d\n",
+				vport->vport_id, err);
+			goto intr_deinit;
+		}
+	}
 
 	err = idpf_send_config_queues_msg(vport);
 	if (err) {
@@ -2257,10 +2271,18 @@ static int idpf_change_mtu(struct net_device *netdev, int new_mtu)
 	idpf_vport_ctrl_lock(netdev);
 	vport = idpf_netdev_to_vport(netdev);
 
+	if (idpf_xdp_is_prog_ena(vport) && new_mtu > IDPF_XDP_MAX_MTU) {
+		netdev_err(netdev, "New MTU value is not valid. The maximum MTU value is %d.\n",
+			   IDPF_XDP_MAX_MTU);
+		err = -EINVAL;
+		goto unlock_exit;
+	}
+
 	netdev->mtu = new_mtu;
 
 	err = idpf_initiate_soft_reset(vport, IDPF_SR_MTU_CHANGE);
 
+unlock_exit:
 	idpf_vport_ctrl_unlock(netdev);
 
 	return err;

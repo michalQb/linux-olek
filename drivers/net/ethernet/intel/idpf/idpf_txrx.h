@@ -164,6 +164,8 @@ do {								\
 #define IDPF_TX_FLAGS_IPV6		BIT(2)
 #define IDPF_TX_FLAGS_TUNNEL		BIT(3)
 
+#define IDPF_XDP_MAX_MTU		3046
+
 union idpf_tx_flex_desc {
 	struct idpf_flex_tx_desc q; /* queue based scheduling */
 	struct idpf_flex_tx_sched_desc flow; /* flow based scheduling */
@@ -463,6 +465,7 @@ enum idpf_queue_flags_t {
 	__IDPF_Q_FLOW_SCH_EN,
 	__IDPF_Q_SW_MARKER,
 	__IDPF_Q_POLL_MODE,
+	__IDPF_Q_XDP,
 
 	__IDPF_Q_FLAGS_NBITS,
 };
@@ -738,6 +741,9 @@ struct idpf_queue {
 	unsigned int size;
 	dma_addr_t dma;
 	void *desc_ring;
+
+	struct bpf_prog *xdp_prog;
+	struct xdp_rxq_info xdp_rxq;
 
 	u16 tx_max_bufs;
 	u8 tx_min_pkt_len;
@@ -1019,6 +1025,7 @@ int idpf_config_rss(struct idpf_vport *vport);
 int idpf_init_rss(struct idpf_vport *vport);
 void idpf_deinit_rss(struct idpf_vport *vport);
 int idpf_rx_bufs_init_all(struct idpf_vport *vport);
+int idpf_xdp_rxq_info_init_all(struct idpf_vport *vport);
 void idpf_rx_add_frag(struct idpf_rx_buf *rx_buf, struct sk_buff *skb,
 		      unsigned int size);
 struct sk_buff *idpf_rx_construct_skb(struct idpf_queue *rxq,
