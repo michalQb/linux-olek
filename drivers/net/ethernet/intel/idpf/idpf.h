@@ -423,6 +423,7 @@ struct idpf_vport {
  * @__IDPF_USER_FLAGS_NBITS: Must be last
  */
 enum idpf_user_flags {
+	__IDPF_PRIV_FLAGS_HDR_SPLIT = 0,
 	__IDPF_PROMISC_UC = 32,
 	__IDPF_PROMISC_MC,
 
@@ -939,6 +940,7 @@ int idpf_recv_mb_msg(struct idpf_adapter *adapter, u32 op,
 int idpf_send_mb_msg(struct idpf_adapter *adapter, u32 op,
 		     u16 msg_size, u8 *msg);
 void idpf_set_ethtool_ops(struct net_device *netdev);
+void idpf_vport_set_hsplit(struct idpf_vport *vport, bool ena);
 int idpf_vport_alloc_max_qs(struct idpf_adapter *adapter,
 			    struct idpf_vport_max_q *max_q);
 void idpf_vport_dealloc_max_qs(struct idpf_adapter *adapter,

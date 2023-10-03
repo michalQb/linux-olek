@@ -1058,6 +1058,27 @@ static void idpf_vport_dealloc(struct idpf_vport *vport)
 }
 
 /**
+ * idpf_vport_set_hsplit - enable or disable header split on a given vport
+ * @vport: virtual port
+ * @ena: flag controlling header split, On (true) or Off (false)
+ */
+void idpf_vport_set_hsplit(struct idpf_vport *vport, bool ena)
+{
+	struct idpf_vport_user_config_data *config_data;
+
+	config_data = &vport->adapter->vport_config[vport->idx]->user_config;
+	if (!ena) {
+		clear_bit(__IDPF_PRIV_FLAGS_HDR_SPLIT, config_data->user_flags);
+		return;
+	}
+
+	if (idpf_is_cap_ena_all(vport->adapter, IDPF_HSPLIT_CAPS,
+				IDPF_CAP_HSPLIT) &&
+	    idpf_is_queue_model_split(vport->rxq_model))
+		set_bit(__IDPF_PRIV_FLAGS_HDR_SPLIT, config_data->user_flags);
+}
+
+/**
  * idpf_vport_alloc - Allocates the next available struct vport in the adapter
  * @adapter: board private structure
  * @max_q: vport max queue info
