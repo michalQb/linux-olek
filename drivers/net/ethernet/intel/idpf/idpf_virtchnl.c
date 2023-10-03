@@ -3250,6 +3250,17 @@ int idpf_vport_alloc_vec_indexes(struct idpf_vport *vport)
 	vec_info.default_vport = vport->default_vport;
 	vec_info.index = vport->idx;
 
+	/* Additional XDP Tx queues share the q_vector with regular Tx and Rx
+	 * queues to which they are assigned. Also, XDP shall request additional
+	 * Tx queues via VIRTCHNL. Therefore, to avoid exceeding over
+	 * "vport->q_vector_idxs array", do not request empty q_vectors
+	 * for XDP Tx queues.
+	 */
+	if (idpf_xdp_is_prog_ena(vport))
+		vec_info.num_req_vecs = max_t(u16,
+					      vport->num_txq - vport->num_xdp_txq,
+					      vport->num_rxq);
+
 	num_alloc_vecs = idpf_req_rel_vector_indexes(vport->adapter,
 						     vport->q_vector_idxs,
 						     &vec_info);

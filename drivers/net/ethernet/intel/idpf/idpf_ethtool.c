@@ -185,22 +185,23 @@ static void idpf_get_channels(struct net_device *netdev,
 			      struct ethtool_channels *ch)
 {
 	struct idpf_netdev_priv *np = netdev_priv(netdev);
+	const struct idpf_vport_user_config_data *user;
 	struct idpf_vport_config *vport_config;
-	u16 num_txq, num_rxq;
+	u16 num_txq, num_rxq, num_xdpq;
 	u16 combined;
 
 	vport_config = np->adapter->vport_config[np->vport_idx];
+	user = &vport_config->user_config;
 
-	num_txq = vport_config->user_config.num_req_tx_qs;
-	num_rxq = vport_config->user_config.num_req_rx_qs;
-
+	num_xdpq = user->num_req_xdp_qs;
+	num_txq = user->num_req_tx_qs - num_xdpq;
+	num_rxq = user->num_req_rx_qs;
 	combined = min(num_txq, num_rxq);
 
 	/* Report maximum channels */
-	ch->max_combined = min_t(u16, vport_config->max_q.max_txq,
-				 vport_config->max_q.max_rxq);
 	ch->max_rx = vport_config->max_q.max_rxq;
-	ch->max_tx = vport_config->max_q.max_txq;
+	ch->max_tx = vport_config->max_q.max_txq - num_xdpq;
+	ch->max_combined = min(ch->max_rx, ch->max_tx);
 
 	ch->max_other = IDPF_MAX_MBXQ;
 	ch->other_count = IDPF_MAX_MBXQ;
