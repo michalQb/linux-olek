@@ -1947,20 +1947,27 @@ int idpf_send_map_unmap_queue_vector_msg(struct idpf_vport *vport, bool map)
 		struct idpf_txq_group *tx_qgrp = &vport->txq_grps[i];
 
 		for (j = 0; j < tx_qgrp->num_txq; j++, k++) {
+			const struct idpf_q_vector *vec;
+			u32 v_idx, tx_itr_idx;
+
 			vqv[k].queue_type = cpu_to_le32(tx_qgrp->txqs[j]->q_type);
 			vqv[k].queue_id = cpu_to_le32(tx_qgrp->txqs[j]->q_id);
 
-			if (idpf_is_queue_model_split(vport->txq_model)) {
-				vqv[k].vector_id =
-				cpu_to_le16(tx_qgrp->complq->q_vector->v_idx);
-				vqv[k].itr_idx =
-				cpu_to_le32(tx_qgrp->complq->q_vector->tx_itr_idx);
+			if (idpf_is_queue_model_split(vport->txq_model))
+				vec = tx_qgrp->complq->q_vector;
+			else
+				vec = tx_qgrp->txqs[j]->q_vector;
+
+			if (vec) {
+				v_idx = vec->v_idx;
+				tx_itr_idx = vec->tx_itr_idx;
 			} else {
-				vqv[k].vector_id =
-				cpu_to_le16(tx_qgrp->txqs[j]->q_vector->v_idx);
-				vqv[k].itr_idx =
-				cpu_to_le32(tx_qgrp->txqs[j]->q_vector->tx_itr_idx);
+				v_idx = 0;
+				tx_itr_idx = VIRTCHNL2_ITR_IDX_1;
 			}
+
+			vqv[k].vector_id = cpu_to_le16(v_idx);
+			vqv[k].itr_idx = cpu_to_le32(tx_itr_idx);
 		}
 	}
 
@@ -3252,6 +3259,17 @@ int idpf_vport_alloc_vec_indexes(struct idpf_vport *vport)
 	vec_info.num_req_vecs = max(vport->num_txq, vport->num_rxq);
 	vec_info.default_vport = vport->default_vport;
 	vec_info.index = vport->idx;
+
+	/* Additional XDP Tx queues share the q_vector with regular Tx and Rx
+	 * queues to which they are assigned. Also, XDP shall request additional
+	 * Tx queues via VIRTCHNL. Therefore, to avoid exceeding over
+	 * "vport->q_vector_idxs array", do not request empty q_vectors
+	 * for XDP Tx queues.
+	 */
+	if (idpf_xdp_is_prog_ena(vport))
+		vec_info.num_req_vecs = max_t(u16,
+					      vport->num_txq - vport->num_xdp_txq,
+					      vport->num_rxq);
 
 	num_alloc_vecs = idpf_req_rel_vector_indexes(vport->adapter,
 						     vport->q_vector_idxs,

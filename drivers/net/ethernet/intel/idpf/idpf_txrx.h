@@ -4,8 +4,7 @@
 #ifndef _IDPF_TXRX_H_
 #define _IDPF_TXRX_H_
 
-#include <linux/net/intel/libie/rx.h>
-#include <linux/net/intel/libie/tx.h>
+#include <linux/net/intel/libie/xdp.h>
 
 #include <net/page_pool/helpers.h>
 #include <net/tcp.h>
@@ -319,6 +318,7 @@ enum idpf_queue_flags_t {
 	__IDPF_Q_FLOW_SCH_EN,
 	__IDPF_Q_SW_MARKER,
 	__IDPF_Q_POLL_MODE,
+	__IDPF_Q_XDP,
 
 	__IDPF_Q_FLAGS_NBITS,
 };
@@ -554,13 +554,20 @@ struct idpf_queue {
 	};
 	void __iomem *tail;
 	union {
-		struct idpf_tx_buf *tx_buf;
+		struct {
+			struct idpf_tx_buf *tx_buf;
+			struct libie_xdp_sq_lock xdp_lock;
+		};
+		u32 num_xdp_txq;
 		struct {
 			struct libie_rx_buffer *hdr_buf;
 			struct idpf_rx_buf *buf;
 		} rx_buf;
 	};
-	struct page_pool *hdr_pp;
+	union {
+		struct page_pool *hdr_pp;
+		struct idpf_queue **xdpqs;
+	};
 	union {
 		struct page_pool *pp;
 		struct device *dev;
@@ -582,7 +589,10 @@ struct idpf_queue {
 		void *desc_ring;
 	};
 
-	u32 hdr_truesize;
+	union {
+		u32 hdr_truesize;
+		u32 xdp_tx_active;
+	};
 	u32 truesize;
 	u16 idx;
 	u16 q_type;
@@ -627,8 +637,12 @@ struct idpf_queue {
 	union {
 		/* Rx */
 		struct {
+			struct xdp_rxq_info xdp_rxq;
+
+			struct bpf_prog __rcu *xdp_prog;
 			struct sk_buff *skb;
 		};
+
 		/* Tx */
 		struct {
 			u16 compl_tag_bufid_m;

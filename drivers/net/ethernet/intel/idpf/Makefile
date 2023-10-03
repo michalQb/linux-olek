@@ -16,3 +16,5 @@ idpf-y := \
 	idpf_txrx.o		\
 	idpf_virtchnl.o 	\
 	idpf_vf_dev.o
+
+idpf-objs	+= idpf_xdp.o
