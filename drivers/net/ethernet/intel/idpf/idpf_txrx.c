@@ -966,6 +966,23 @@ void idpf_vport_init_num_qs(struct idpf_vport *vport,
 	if (idpf_is_queue_model_split(vport->rxq_model))
 		vport->num_bufq = le16_to_cpu(vport_msg->num_rx_bufq);
 
+	vport->num_xdp_rxq = 0;
+	vport->xdp_rxq_offset = 0;
+	if (!idpf_xdp_is_prog_ena(vport)) {
+		vport->num_xdp_txq = 0;
+		vport->xdp_txq_offset = 0;
+		goto adjust_bufqs;
+	}
+	/* Do not create dummy Rx queues by default */
+	vport->num_xdp_txq = le16_to_cpu(vport_msg->num_rx_q);
+	vport->xdp_txq_offset = le16_to_cpu(vport_msg->num_tx_q) -
+				le16_to_cpu(vport_msg->num_rx_q);
+
+	if (idpf_is_queue_model_split(vport->txq_model)) {
+		vport->num_xdp_complq = vport->num_xdp_txq;
+		vport->xdp_complq_offset = vport->xdp_txq_offset;
+	}
+adjust_bufqs:
 	/* Adjust number of buffer queues per Rx queue group. */
 	if (!idpf_is_queue_model_split(vport->rxq_model)) {
 		vport->num_bufqs_per_qgrp = 0;
@@ -974,12 +991,20 @@ void idpf_vport_init_num_qs(struct idpf_vport *vport,
 		return;
 	}
 
-	vport->num_bufqs_per_qgrp = IDPF_MAX_BUFQS_PER_RXQ_GRP;
-	/* Bufq[0] default buffer size is 4K
-	 * Bufq[1] default buffer size is 2K
-	 */
-	vport->bufq_size[0] = IDPF_RX_BUF_4096;
-	vport->bufq_size[1] = IDPF_RX_BUF_2048;
+	if (idpf_xdp_is_prog_ena(vport)) {
+		/* After loading the XDP program we will have only one buffer
+		 * queue per group with buffer size 4kB.
+		 */
+		vport->num_bufqs_per_qgrp = IDPF_SINGLE_BUFQ_PER_RXQ_GRP;
+		vport->bufq_size[0] = IDPF_RX_BUF_4096;
+	} else {
+		vport->num_bufqs_per_qgrp = IDPF_MAX_BUFQS_PER_RXQ_GRP;
+		/* Bufq[0] default buffer size is 4K
+		 * Bufq[1] default buffer size is 2K
+		 */
+		vport->bufq_size[0] = IDPF_RX_BUF_4096;
+		vport->bufq_size[1] = IDPF_RX_BUF_2048;
+	}
 }
 
 /**
@@ -1092,6 +1117,22 @@ int idpf_vport_calc_total_qs(struct idpf_adapter *adapter, u16 vport_idx,
 		vport_msg->num_rx_q = cpu_to_le16(num_qs);
 		vport_msg->num_rx_bufq = 0;
 	}
+	if (!vport_config || !vport_config->user_config.xdp_prog)
+		return 0;
+
+	/* As we now know new number of Rx and Tx queues, we can request
+	 * additional Tx queues for XDP. For each Rx queue request additional
+	 * Tx queue for XDP use.
+	 */
+	vport_msg->num_tx_q =
+		cpu_to_le16(le16_to_cpu(vport_msg->num_tx_q) +
+			    le16_to_cpu(vport_msg->num_rx_q));
+	if (idpf_is_queue_model_split(le16_to_cpu(vport_msg->txq_model)))
+		vport_msg->num_tx_complq = vport_msg->num_tx_q;
+
+	/* For XDP request only one bufq per Rx queue group */
+	if (idpf_is_queue_model_split(le16_to_cpu(vport_msg->rxq_model)))
+		vport_msg->num_rx_bufq = cpu_to_le16(num_rxq_grps);
 
 	return 0;
 }
@@ -1228,6 +1269,29 @@ static int idpf_txq_group_alloc(struct idpf_vport *vport, u16 num_txq)
 err_alloc:
 	idpf_txq_group_rel(vport);
 
+	return err;
+}
+
+/**
+ * idpf_xdp_rxq_init - Prepare and configure XDP structures on Rx queue
+ * @q: rx queue where XDP should be initialized
+ *
+ * Returns 0 on success or error code in case of any failure
+ */
+int idpf_xdp_rxq_init(struct idpf_queue *q)
+{
+	int err = 0;
+
+	if (!xdp_rxq_info_is_reg(&q->xdp_rxq))
+		xdp_rxq_info_reg(&q->xdp_rxq, q->vport->netdev,
+				 q->idx, q->q_vector->napi.napi_id);
+
+	err = xdp_rxq_info_reg_mem_model(&q->xdp_rxq,
+					 MEM_TYPE_PAGE_SHARED, NULL);
+	if (err)
+		goto err_alloc;
+
+err_alloc:
 	return err;
 }
 
@@ -1436,6 +1500,13 @@ int idpf_vport_queues_alloc(struct idpf_vport *vport)
 	err = idpf_vport_init_fast_path_txqs(vport);
 	if (err)
 		goto err_out;
+
+	if (idpf_xdp_is_prog_ena(vport)) {
+		int j;
+
+		for (j = vport->xdp_txq_offset; j < vport->num_txq; j++)
+			__set_bit(__IDPF_Q_XDP, vport->txqs[j]->flags);
+	}
 
 	return 0;
 
@@ -3963,12 +4034,23 @@ static int idpf_vport_splitq_napi_poll(struct napi_struct *napi, int budget)
  */
 static void idpf_vport_intr_map_vector_to_qs(struct idpf_vport *vport)
 {
+	bool is_xdp_prog_ena = idpf_xdp_is_prog_ena(vport);
 	u16 num_txq_grp = vport->num_txq_grp;
 	int i, j, qv_idx, bufq_vidx = 0;
 	struct idpf_rxq_group *rx_qgrp;
 	struct idpf_txq_group *tx_qgrp;
 	struct idpf_queue *q, *bufq;
+	int num_active_rxq;
 	u16 q_index;
+
+	if (is_xdp_prog_ena)
+		/* XDP Tx queues are handled within Rx loop,
+		 * correct num_txq_grp so that it stores number of
+		 * regular Tx queue groups. This way when we later assign Tx to
+		 * qvector, we go only through regular Tx queues.
+		 */
+		if (idpf_is_queue_model_split(vport->txq_model))
+			num_txq_grp = vport->xdp_txq_offset;
 
 	for (i = 0, qv_idx = 0; i < vport->num_rxq_grp; i++) {
 		u16 num_rxq;
@@ -3978,6 +4060,8 @@ static void idpf_vport_intr_map_vector_to_qs(struct idpf_vport *vport)
 			num_rxq = rx_qgrp->splitq.num_rxq_sets;
 		else
 			num_rxq = rx_qgrp->singleq.num_rxq;
+
+		num_active_rxq = num_rxq - vport->num_xdp_rxq;
 
 		for (j = 0; j < num_rxq; j++) {
 			if (qv_idx >= vport->num_q_vectors)
@@ -3991,6 +4075,30 @@ static void idpf_vport_intr_map_vector_to_qs(struct idpf_vport *vport)
 			q_index = q->q_vector->num_rxq;
 			q->q_vector->rx[q_index] = q;
 			q->q_vector->num_rxq++;
+
+			/* Do not setup XDP Tx queues for dummy Rx queues. */
+			if (j >= num_active_rxq)
+				goto skip_xdp_txq_config;
+
+			if (is_xdp_prog_ena) {
+				if (idpf_is_queue_model_split(vport->txq_model)) {
+					tx_qgrp = &vport->txq_grps[i + vport->xdp_txq_offset];
+					q = tx_qgrp->complq;
+					q->q_vector = &vport->q_vectors[qv_idx];
+					q_index = q->q_vector->num_txq;
+					q->q_vector->tx[q_index] = q;
+					q->q_vector->num_txq++;
+				} else {
+					tx_qgrp = &vport->txq_grps[i];
+					q = tx_qgrp->txqs[j + vport->xdp_txq_offset];
+					q->q_vector = &vport->q_vectors[qv_idx];
+					q_index = q->q_vector->num_txq;
+					q->q_vector->tx[q_index] = q;
+					q->q_vector->num_txq++;
+				}
+			}
+
+skip_xdp_txq_config:
 			qv_idx++;
 		}
 
@@ -4024,6 +4132,9 @@ static void idpf_vport_intr_map_vector_to_qs(struct idpf_vport *vport)
 			q->q_vector->num_txq++;
 			qv_idx++;
 		} else {
+			num_txq = is_xdp_prog_ena ? tx_qgrp->num_txq - vport->xdp_txq_offset
+						  : tx_qgrp->num_txq;
+
 			for (j = 0; j < num_txq; j++) {
 				if (qv_idx >= vport->num_q_vectors)
 					qv_idx = 0;
@@ -4124,6 +4235,13 @@ int idpf_vport_intr_alloc(struct idpf_vport *vport)
 	bufqs_per_vector = vport->num_bufqs_per_qgrp *
 			   DIV_ROUND_UP(vport->num_rxq_grp,
 					vport->num_q_vectors);
+
+	/* For XDP we assign both Tx and XDP Tx queues
+	 * to the same q_vector.
+	 * Reserve doubled number of Tx queues per vector.
+	 */
+	if (idpf_xdp_is_prog_ena(vport))
+		txqs_per_vector *= 2;
 
 	for (v_idx = 0; v_idx < vport->num_q_vectors; v_idx++) {
 		q_vector = &vport->q_vectors[v_idx];
@@ -4244,6 +4362,15 @@ static void idpf_fill_dflt_rss_lut(struct idpf_vport *vport)
 	int i;
 
 	rss_data = &adapter->vport_config[vport->idx]->user_config.rss_data;
+
+	/* When we use this code for legacy devices (e.g. in AVF driver), some
+	 * Rx queues may not be used because we would not be able to create XDP
+	 * Tx queues for them. In such a case do not add their queue IDs to the
+	 * RSS LUT by setting the number of active Rx queues to XDP Tx queues
+	 * count.
+	 */
+	if (idpf_xdp_is_prog_ena(vport))
+		num_active_rxq -= vport->num_xdp_rxq;
 
 	for (i = 0; i < rss_data->rss_lut_size; i++) {
 		rss_data->rss_lut[i] = i % num_active_rxq;

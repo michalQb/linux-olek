@@ -1255,13 +1255,18 @@ static void idpf_restore_features(struct idpf_vport *vport)
  */
 static int idpf_set_real_num_queues(struct idpf_vport *vport)
 {
-	int err;
+	int num_txq, err;
 
 	err = netif_set_real_num_rx_queues(vport->netdev, vport->num_rxq);
 	if (err)
 		return err;
 
-	return netif_set_real_num_tx_queues(vport->netdev, vport->num_txq);
+	if (idpf_xdp_is_prog_ena(vport))
+		num_txq = vport->num_txq - vport->num_xdp_txq;
+	else
+		num_txq = vport->num_txq;
+
+	return netif_set_real_num_tx_queues(vport->netdev, num_txq);
 }
 
 /**
@@ -1311,6 +1316,48 @@ static void idpf_rx_init_buf_tail(struct idpf_vport *vport)
 			}
 		}
 	}
+}
+
+/**
+ * idpf_vport_xdp_init - Prepare and configure XDP structures
+ * @vport: vport where XDP should be initialized
+ *
+ * returns 0 on success or error code in case of any failure
+ */
+static int idpf_vport_xdp_init(struct idpf_vport *vport)
+{
+	struct idpf_vport_user_config_data *config_data;
+	struct idpf_adapter *adapter;
+	u16 idx = vport->idx;
+	int i, err = 0;
+
+	adapter = vport->adapter;
+	config_data = &adapter->vport_config[idx]->user_config;
+
+	for (i = 0; i < vport->num_rxq_grp; i++) {
+		struct idpf_rxq_group *rx_qgrp = &vport->rxq_grps[i];
+		struct idpf_queue *q;
+		u16 j, num_rxq;
+
+		if (idpf_is_queue_model_split(vport->rxq_model))
+			num_rxq = rx_qgrp->splitq.num_rxq_sets;
+		else
+			num_rxq = rx_qgrp->singleq.num_rxq;
+
+		for (j = 0; j < num_rxq; j++) {
+			if (idpf_is_queue_model_split(vport->rxq_model))
+				q = &rx_qgrp->splitq.rxq_sets[j]->rxq;
+			else
+				q = rx_qgrp->singleq.rxqs[j];
+
+			WRITE_ONCE(q->xdp_prog, config_data->xdp_prog);
+			err = idpf_xdp_rxq_init(q);
+			if (err)
+				goto exit_xdp_init;
+		}
+	}
+exit_xdp_init:
+	return err;
 }
 
 /**
@@ -1373,6 +1420,8 @@ static int idpf_vport_open(struct idpf_vport *vport, bool alloc_res)
 	}
 
 	idpf_rx_init_buf_tail(vport);
+
+	idpf_vport_xdp_init(vport);
 
 	err = idpf_send_config_queues_msg(vport);
 	if (err) {
@@ -2213,10 +2262,18 @@ static int idpf_change_mtu(struct net_device *netdev, int new_mtu)
 	idpf_vport_ctrl_lock(netdev);
 	vport = idpf_netdev_to_vport(netdev);
 
+	if (idpf_xdp_is_prog_ena(vport) && new_mtu > IDPF_XDP_MAX_MTU) {
+		netdev_err(netdev, "New MTU value is not valid. The maximum MTU value is %d.\n",
+			   IDPF_XDP_MAX_MTU);
+		err = -EINVAL;
+		goto unlock_exit;
+	}
+
 	netdev->mtu = new_mtu;
 
 	err = idpf_initiate_soft_reset(vport, IDPF_SR_MTU_CHANGE);
 
+unlock_exit:
 	idpf_vport_ctrl_unlock(netdev);
 
 	return err;
