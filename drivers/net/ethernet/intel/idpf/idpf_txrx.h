@@ -489,6 +489,7 @@ struct idpf_txq_stash {
  * @rxdids: Supported RX descriptor ids
  * @rx_ptype_lkup: LUT of Rx ptypes
  * @xdp_rxq: XDP queue info
+ * @xdp_prog: attached XDP program
  * @xdpqs: shortcut for XDP Tx queues array
  * @num_xdp_txq: total number of XDP Tx queues
  * @truesize: data buffer truesize in singleq
@@ -515,13 +516,14 @@ struct idpf_rx_queue {
 		struct {
 			struct idpf_bufq_set *bufq_sets;
 			struct napi_struct *napi;
+			struct bpf_prog __rcu *xdp_prog;
 		};
 		struct {
 			struct libeth_fqe *rx_buf;
 			struct page_pool *pp;
+			void __iomem *tail;
 		};
 	};
-	void __iomem *tail;
 
 	DECLARE_BITMAP(flags, __IDPF_Q_FLAGS_NBITS);
 	u16 idx;
