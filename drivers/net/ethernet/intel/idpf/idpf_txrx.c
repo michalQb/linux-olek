@@ -703,6 +703,24 @@ int idpf_rx_bufs_init_all(struct idpf_vport *vport)
 }
 
 /**
+ * idpf_xdp_rxbufq_init - Prepare and configure XDP structures on Rx queue
+ * @q: rx queue where XDP should be initialized
+ *
+ * Returns 0 on success or error code in case of any failure
+ */
+static void idpf_xdp_rxbufq_init(struct idpf_queue *q)
+{
+	struct idpf_vport_user_config_data *config_data;
+	struct idpf_adapter *adapter;
+	int idx = q->vport->idx;
+
+	adapter = q->vport->adapter;
+	config_data = &adapter->vport_config[idx]->user_config;
+
+	WRITE_ONCE(q->xdp_prog, config_data->xdp_prog);
+}
+
+/**
  * idpf_xdp_rxq_info_init - Setup XDP for a given Rx queue
  * @rxq: Rx queue for which the resources are setup
  * @splitq: flag indicating if the HW works in split queue mode
@@ -802,6 +820,9 @@ static int idpf_rx_desc_alloc(struct idpf_queue *rxq, bool bufq, s32 q_model)
 	rxq->next_to_clean = 0;
 	rxq->next_to_use = 0;
 	set_bit(__IDPF_Q_GEN_CHK, rxq->flags);
+
+	if (idpf_xdp_is_prog_ena(rxq->vport))
+		idpf_xdp_rxbufq_init(rxq);
 
 	return 0;
 }
