@@ -975,6 +975,8 @@ int idpf_set_promiscuous(struct idpf_adapter *adapter,
 			 u32 vport_id);
 int idpf_send_disable_queues_msg(struct idpf_vport *vport);
 void idpf_vport_init(struct idpf_vport *vport, struct idpf_vport_max_q *max_q);
+int idpf_vport_open(struct idpf_vport *vport, bool alloc_res);
+void idpf_vport_stop(struct idpf_vport *vport);
 u32 idpf_get_vport_id(struct idpf_vport *vport);
 int idpf_vport_queue_ids_init(struct idpf_vport *vport);
 int idpf_queue_reg_init(struct idpf_vport *vport);

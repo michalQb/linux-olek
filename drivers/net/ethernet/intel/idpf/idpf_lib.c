@@ -889,7 +889,7 @@ static void idpf_remove_features(struct idpf_vport *vport)
  * idpf_vport_stop - Disable a vport
  * @vport: vport to disable
  */
-static void idpf_vport_stop(struct idpf_vport *vport)
+void idpf_vport_stop(struct idpf_vport *vport)
 {
 	struct idpf_netdev_priv *np = netdev_priv(vport->netdev);
 
@@ -1369,7 +1369,7 @@ static void idpf_rx_init_buf_tail(struct idpf_vport *vport)
  * @vport: vport to bring up
  * @alloc_res: allocate queue resources
  */
-static int idpf_vport_open(struct idpf_vport *vport, bool alloc_res)
+int idpf_vport_open(struct idpf_vport *vport, bool alloc_res)
 {
 	struct idpf_netdev_priv *np = netdev_priv(vport->netdev);
 	struct idpf_adapter *adapter = vport->adapter;
@@ -2444,6 +2444,7 @@ static const struct net_device_ops idpf_netdev_ops_splitq = {
 	.ndo_get_stats64 = idpf_get_stats64,
 	.ndo_set_features = idpf_set_features,
 	.ndo_tx_timeout = idpf_tx_timeout,
+	.ndo_bpf = idpf_xdp,
 };
 
 static const struct net_device_ops idpf_netdev_ops_singleq = {
