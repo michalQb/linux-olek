@@ -817,6 +817,33 @@ void idpf_xdp_rxq_info_deinit_all(const struct idpf_vport *vport)
 	idpf_rxq_for_each(vport, idpf_xdp_rxq_info_deinit, NULL);
 }
 
+static int idpf_xdp_rxq_assign_prog(struct idpf_queue *rxq, void *arg)
+{
+	struct mutex *lock = &rxq->vport->adapter->vport_ctrl_lock;
+	struct bpf_prog *prog = arg;
+	struct bpf_prog *old;
+
+	if (prog)
+		bpf_prog_inc(prog);
+
+	old = rcu_replace_pointer(rxq->xdp_prog, prog, lockdep_is_held(lock));
+	if (old)
+		bpf_prog_put(old);
+
+	return 0;
+}
+
+/**
+ * idpf_copy_xdp_prog_to_qs - set pointers to xdp program for each Rx queue
+ * @vport: vport to setup XDP for
+ * @xdp_prog: XDP program that should be copied to all Rx queues
+ */
+void idpf_copy_xdp_prog_to_qs(struct idpf_vport *vport,
+			      struct bpf_prog *xdp_prog)
+{
+	idpf_rxq_for_each(vport, idpf_xdp_rxq_assign_prog, xdp_prog);
+}
+
 /**
  * idpf_rx_desc_alloc - Allocate queue Rx resources
  * @rxq: Rx queue for which the resources are setup
@@ -1066,6 +1093,8 @@ static void idpf_vport_xdpq_put(const struct idpf_vport *vport)
 void idpf_vport_queues_rel(struct idpf_vport *vport)
 {
 	idpf_vport_xdpq_put(vport);
+	idpf_copy_xdp_prog_to_qs(vport, NULL);
+
 	idpf_tx_desc_rel_all(vport);
 	idpf_rx_desc_rel_all(vport);
 	idpf_vport_queue_grp_rel_all(vport);
@@ -1626,6 +1655,7 @@ err_out:
  */
 int idpf_vport_queues_alloc(struct idpf_vport *vport)
 {
+	struct bpf_prog *prog;
 	int err;
 
 	err = idpf_vport_queue_grp_alloc_all(vport);
@@ -1644,6 +1674,8 @@ int idpf_vport_queues_alloc(struct idpf_vport *vport)
 	if (err)
 		goto err_out;
 
+	prog = vport->adapter->vport_config[vport->idx]->user_config.xdp_prog;
+	idpf_copy_xdp_prog_to_qs(vport, prog);
 	idpf_vport_xdpq_get(vport);
 
 	return 0;
