@@ -706,6 +706,66 @@ int idpf_rx_bufs_init_all(struct idpf_vport *vport)
 }
 
 /**
+ * idpf_xdp_rxbufq_init - Prepare and configure XDP structures on Rx queue
+ * @q: rx queue where XDP should be initialized
+ *
+ * Returns 0 on success or error code in case of any failure
+ */
+static void idpf_xdp_rxbufq_init(struct idpf_queue *q)
+{
+	struct idpf_vport_user_config_data *config_data;
+	struct idpf_adapter *adapter;
+	int idx = q->vport->idx;
+
+	adapter = q->vport->adapter;
+	config_data = &adapter->vport_config[idx]->user_config;
+
+	WRITE_ONCE(q->xdp_prog, config_data->xdp_prog);
+}
+
+static int idpf_xdp_rxq_info_init(struct idpf_queue *rxq)
+{
+	int err;
+
+	if (!xdp_rxq_info_is_reg(&rxq->xdp_rxq))
+		xdp_rxq_info_reg(&rxq->xdp_rxq, rxq->vport->netdev,
+				 rxq->idx, rxq->q_vector->napi.napi_id);
+
+	err = xdp_rxq_info_reg_mem_model(&rxq->xdp_rxq,
+					 MEM_TYPE_PAGE_SHARED, NULL);
+
+	return err;
+}
+
+int idpf_xdp_rxq_info_init_all(struct idpf_vport *vport)
+{
+	struct idpf_rxq_group *rx_qgrp;
+	struct idpf_queue *q;
+	int i, j, err;
+	u16 num_rxq;
+
+	for (i = 0; i < vport->num_rxq_grp; i++) {
+		rx_qgrp = &vport->rxq_grps[i];
+		if (idpf_is_queue_model_split(vport->rxq_model))
+			num_rxq = rx_qgrp->splitq.num_rxq_sets;
+		else
+			num_rxq = rx_qgrp->singleq.num_rxq;
+
+		for (j = 0; j < num_rxq; j++) {
+			if (idpf_is_queue_model_split(vport->rxq_model))
+				q = &rx_qgrp->splitq.rxq_sets[j]->rxq;
+			else
+				q = rx_qgrp->singleq.rxqs[j];
+			err = idpf_xdp_rxq_info_init(q);
+			if (err)
+				return err;
+		}
+	}
+
+	return 0;
+}
+
+/**
  * idpf_rx_desc_alloc - Allocate queue Rx resources
  * @rxq: Rx queue for which the resources are setup
  * @bufq: buffer or completion queue
@@ -738,6 +798,9 @@ static int idpf_rx_desc_alloc(struct idpf_queue *rxq, bool bufq, s32 q_model)
 	rxq->next_to_clean = 0;
 	rxq->next_to_use = 0;
 	set_bit(__IDPF_Q_GEN_CHK, rxq->flags);
+
+	if (idpf_xdp_is_prog_ena(rxq->vport))
+		idpf_xdp_rxbufq_init(rxq);
 
 	return 0;
 }
@@ -1269,29 +1332,6 @@ static int idpf_txq_group_alloc(struct idpf_vport *vport, u16 num_txq)
 err_alloc:
 	idpf_txq_group_rel(vport);
 
-	return err;
-}
-
-/**
- * idpf_xdp_rxq_init - Prepare and configure XDP structures on Rx queue
- * @q: rx queue where XDP should be initialized
- *
- * Returns 0 on success or error code in case of any failure
- */
-int idpf_xdp_rxq_init(struct idpf_queue *q)
-{
-	int err = 0;
-
-	if (!xdp_rxq_info_is_reg(&q->xdp_rxq))
-		xdp_rxq_info_reg(&q->xdp_rxq, q->vport->netdev,
-				 q->idx, q->q_vector->napi.napi_id);
-
-	err = xdp_rxq_info_reg_mem_model(&q->xdp_rxq,
-					 MEM_TYPE_PAGE_SHARED, NULL);
-	if (err)
-		goto err_alloc;
-
-err_alloc:
 	return err;
 }
 
