@@ -2350,6 +2350,194 @@ unsupported:
 }
 
 /**
+ * idpf_copy_xdp_prog_to_qs - set pointers to xdp program for each Rx queue
+ * @vport: vport to setup XDP for
+ * @xdp_prog: XDP program that should be copied to all Rx queues
+ */
+static void
+idpf_copy_xdp_prog_to_qs(struct idpf_vport *vport, struct bpf_prog *xdp_prog)
+{
+	int i;
+
+	for (i = 0; i < vport->num_rxq_grp; i++) {
+		struct idpf_rxq_group *rx_qgrp = &vport->rxq_grps[i];
+		struct idpf_queue *q;
+		u16 j, num_rxq;
+
+		if (idpf_is_queue_model_split(vport->rxq_model))
+			num_rxq = rx_qgrp->splitq.num_rxq_sets;
+		else
+			num_rxq = rx_qgrp->singleq.num_rxq;
+
+		for (j = 0; j < num_rxq; j++) {
+			if (idpf_is_queue_model_split(vport->rxq_model))
+				q = &rx_qgrp->splitq.rxq_sets[j]->rxq;
+			else
+				q = rx_qgrp->singleq.rxqs[j];
+			WRITE_ONCE(q->xdp_prog, xdp_prog);
+		}
+
+		if (!idpf_is_queue_model_split(vport->rxq_model))
+			continue;
+
+		for (j = 0; j < vport->num_bufqs_per_qgrp; j++) {
+			q = &rx_qgrp->splitq.bufq_sets[j].bufq;
+			WRITE_ONCE(q->xdp_prog, xdp_prog);
+		}
+	}
+}
+
+/**
+ * idpf_xdp_reconfig_queues - reconfigure queues after the XDP setup
+ * @vport: vport to load or unload XDP for
+ */
+static int idpf_xdp_reconfig_queues(struct idpf_vport *vport)
+{
+	int err;
+
+	err = idpf_vport_adjust_qs(vport);
+	if (err) {
+		netdev_err(vport->netdev,
+			   "Could not adjust queue number for XDP\n");
+		return err;
+	}
+	idpf_vport_calc_num_q_desc(vport);
+
+	err = idpf_vport_queues_alloc(vport);
+	if (err) {
+		netdev_err(vport->netdev,
+			   "Could not allocate queues for XDP\n");
+		return err;
+	}
+
+	err = idpf_send_add_queues_msg(vport, vport->num_txq,
+				       vport->num_complq,
+				       vport->num_rxq, vport->num_bufq);
+	if (err) {
+		netdev_err(vport->netdev,
+			   "Could not add queues for XDP, VC message sent failed\n");
+		return err;
+	}
+
+	idpf_vport_alloc_vec_indexes(vport);
+
+	return 0;
+}
+
+/**
+ * idpf_assign_bpf_prog - Assign a given BPF program to vport
+ * @current_prog: pointer to XDP program in user config data
+ * @prog: BPF program to be assigned to vport
+ */
+static void idpf_assign_bpf_prog(struct bpf_prog **current_prog,
+				 struct bpf_prog *prog)
+{
+	struct bpf_prog *old_prog;
+
+	old_prog = xchg(current_prog, prog);
+	if (old_prog)
+		bpf_prog_put(old_prog);
+}
+
+/**
+ * idpf_xdp_setup_prog - Add or remove XDP eBPF program
+ * @vport: vport to setup XDP for
+ * @prog: XDP program
+ * @extack: netlink extended ack
+ */
+static int
+idpf_xdp_setup_prog(struct idpf_vport *vport, struct bpf_prog *prog,
+		    struct netlink_ext_ack *extack)
+{
+	struct idpf_netdev_priv *np = netdev_priv(vport->netdev);
+	int frame_size = vport->netdev->mtu;
+	bool needs_reconfig, vport_is_up;
+	struct bpf_prog **current_prog;
+	u16 idx = vport->idx;
+	int err;
+
+	if (frame_size > IDPF_XDP_MAX_MTU ||
+	    frame_size > vport->bufq_size[0]) {
+		NL_SET_ERR_MSG_MOD(extack, "MTU too large for loading XDP");
+		return -EOPNOTSUPP;
+	}
+
+	vport_is_up = np->state == __IDPF_VPORT_UP;
+
+	current_prog = &vport->adapter->vport_config[idx]->user_config.xdp_prog;
+	needs_reconfig = !!(*current_prog) != !!prog;
+
+	if (!needs_reconfig) {
+		idpf_copy_xdp_prog_to_qs(vport, prog);
+		idpf_assign_bpf_prog(current_prog, prog);
+
+		return 0;
+	}
+
+	if (!vport_is_up) {
+		idpf_send_delete_queues_msg(vport);
+	} else {
+		set_bit(IDPF_VPORT_DEL_QUEUES, vport->flags);
+		idpf_vport_stop(vport);
+	}
+
+	idpf_deinit_rss(vport);
+
+	if (!*current_prog && prog) {
+		netdev_warn(vport->netdev,
+			    "Setting up XDP disables header split\n");
+		idpf_vport_set_hsplit(vport, ETHTOOL_TCP_DATA_SPLIT_DISABLED);
+	} else {
+		idpf_vport_set_hsplit(vport, ETHTOOL_TCP_DATA_SPLIT_ENABLED);
+	}
+
+	idpf_assign_bpf_prog(current_prog, prog);
+
+	err = idpf_xdp_reconfig_queues(vport);
+	if (err) {
+		netdev_err(vport->netdev,
+			   "Could not reconfigure the queues after XDP setup\n");
+		return err;
+	}
+
+	if (vport_is_up) {
+		err = idpf_vport_open(vport, false);
+		if (err) {
+			netdev_err(vport->netdev,
+				   "Could not re-open the vport after XDP setup\n");
+			return err;
+		}
+	}
+
+	return 0;
+}
+
+/**
+ * idpf_xdp - implements XDP handler
+ * @netdev: netdevice
+ * @xdp: XDP command
+ */
+static int idpf_xdp(struct net_device *netdev, struct netdev_bpf *xdp)
+{
+	struct idpf_vport *vport;
+	int err;
+
+	idpf_vport_ctrl_lock(netdev);
+	vport = idpf_netdev_to_vport(netdev);
+
+	switch (xdp->command) {
+	case XDP_SETUP_PROG:
+		err = idpf_xdp_setup_prog(vport, xdp->prog, xdp->extack);
+		break;
+	default:
+		err = -EINVAL;
+	}
+
+	idpf_vport_ctrl_unlock(netdev);
+	return err;
+}
+
+/**
  * idpf_set_mac - NDO callback to set port mac address
  * @netdev: network interface device structure
  * @p: pointer to an address structure
@@ -2449,6 +2637,7 @@ static const struct net_device_ops idpf_netdev_ops_splitq = {
 	.ndo_get_stats64 = idpf_get_stats64,
 	.ndo_set_features = idpf_set_features,
 	.ndo_tx_timeout = idpf_tx_timeout,
+	.ndo_bpf = idpf_xdp,
 };
 
 static const struct net_device_ops idpf_netdev_ops_singleq = {
