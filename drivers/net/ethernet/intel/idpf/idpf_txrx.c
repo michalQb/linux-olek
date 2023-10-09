@@ -22,6 +22,17 @@ static int idpf_buf_lifo_push(struct idpf_buf_lifo *stack,
 }
 
 /**
+ * iavf_is_xdp_enabled - Check if XDP is enabled on the rx or buffer queue
+ * @rxbufq: rx or buffer queue
+ *
+ * Returns true, if the queue has been configured for XDP.
+ */
+static bool idpf_is_xdp_enabled(const struct idpf_queue *rxbufq)
+{
+	return !!rcu_access_pointer(rxbufq->xdp_prog);
+}
+
+/**
  * idpf_buf_lifo_pop - pop a buffer pointer from stack
  * @stack: pointer to stack struct
  **/
@@ -579,11 +590,14 @@ static bool idpf_rx_post_init_bufs(struct idpf_queue *bufq, u16 working_set)
 /**
  * idpf_rx_create_page_pool - Create a page pool
  * @rxbufq: RX queue to create page pool for
+ * @xdp: flag indicating if XDP program is loaded
  *
  * Returns &page_pool on success, casted -errno on failure
  */
-static struct page_pool *idpf_rx_create_page_pool(struct idpf_queue *rxbufq)
+static struct page_pool *idpf_rx_create_page_pool(struct idpf_queue *rxbufq,
+						  bool xdp)
 {
+	u32 hr = xdp ? XDP_PACKET_HEADROOM : 0;
 	struct page_pool_params pp = {
 		.flags		= PP_FLAG_DMA_MAP | PP_FLAG_DMA_SYNC_DEV,
 		.order		= 0,
@@ -591,8 +605,8 @@ static struct page_pool *idpf_rx_create_page_pool(struct idpf_queue *rxbufq)
 		.nid		= NUMA_NO_NODE,
 		.dev		= rxbufq->vport->netdev->dev.parent,
 		.max_len	= PAGE_SIZE,
-		.dma_dir	= DMA_FROM_DEVICE,
-		.offset		= 0,
+		.dma_dir	= xdp ? DMA_BIDIRECTIONAL : DMA_FROM_DEVICE,
+		.offset		= hr,
 	};
 
 	return page_pool_create(&pp);
@@ -652,7 +666,8 @@ static int idpf_rx_bufs_init(struct idpf_queue *rxbufq)
 {
 	struct page_pool *pool;
 
-	pool = idpf_rx_create_page_pool(rxbufq);
+	pool = idpf_rx_create_page_pool(rxbufq,
+					idpf_is_xdp_enabled(rxbufq));
 	if (IS_ERR(pool))
 		return PTR_ERR(pool);
 
@@ -3243,6 +3258,47 @@ static bool idpf_rx_splitq_is_eop(struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_de
 }
 
 /**
+ * idpf_run_xdp - Run XDP program and perform the resulting action
+ * @rx_bufq: Rx buffer queue
+ * @rx_buf: Rx buffer containing the packet
+ * @xdp: an initiated XDP buffer
+ * @xdp_prog: an XDP program assigned to the vport
+ * @size: size of the packet
+ *
+ * Returns the resulting XDP action.
+ */
+static unsigned int idpf_run_xdp(struct idpf_queue *rx_bufq,
+				 struct idpf_rx_buf *rx_buf,
+				 struct xdp_buff *xdp,
+				 struct bpf_prog *xdp_prog,
+				 unsigned int size)
+{
+	u32 hr = rx_bufq->pp->p.offset;
+	unsigned int xdp_act;
+
+	xdp_prepare_buff(xdp, page_address(rx_buf->page), hr, size, true);
+
+	xdp_act = bpf_prog_run_xdp(xdp_prog, xdp);
+	rx_buf->truesize = max_t(u32, xdp->data_end - xdp->data_hard_start - hr,
+				 rx_buf->truesize);
+	switch (xdp_act) {
+	case XDP_PASS:
+	case XDP_DROP:
+		break;
+	default:
+		bpf_warn_invalid_xdp_action(rx_bufq->vport->netdev, xdp_prog,
+					    xdp_act);
+		fallthrough;
+	case XDP_ABORTED:
+		trace_xdp_exception(rx_bufq->vport->netdev, xdp_prog, xdp_act);
+
+		return XDP_DROP;
+	}
+
+	return xdp_act;
+}
+
+/**
  * idpf_rx_splitq_clean - Clean completed descriptors from Rx queue
  * @rxq: Rx descriptor queue to retrieve receive buffer queue
  * @budget: Total limit on number of packets to process
@@ -3260,6 +3316,11 @@ static int idpf_rx_splitq_clean(struct idpf_queue *rxq, int budget)
 	struct idpf_queue *rx_bufq = NULL;
 	struct sk_buff *skb = rxq->skb;
 	u16 ntc = rxq->next_to_clean;
+	struct bpf_prog *xdp_prog;
+	struct xdp_buff xdp;
+
+	xdp_prog = rcu_dereference(rxq->xdp_prog);
+	xdp_init_buff(&xdp, PAGE_SIZE, &rxq->xdp_rxq);
 
 	/* Process Rx packets bounded by budget */
 	while (likely(total_rx_pkts < budget)) {
@@ -3267,11 +3328,12 @@ static int idpf_rx_splitq_clean(struct idpf_queue *rxq, int budget)
 		struct idpf_sw_queue *refillq = NULL;
 		struct idpf_rxq_set *rxq_set = NULL;
 		struct idpf_rx_buf *rx_buf = NULL;
+		unsigned int xdp_act = XDP_PASS;
 		union virtchnl2_rx_desc *desc;
 		unsigned int pkt_len = 0;
 		unsigned int hdr_len = 0;
 		u16 gen_id, buf_id = 0;
-		 /* Header buffer overflow only valid for header split */
+		/* Header buffer overflow only valid for header split */
 		bool hbo = false;
 		int bufq_id;
 		u8 rxdid;
@@ -3353,17 +3415,31 @@ bypass_hsplit:
 			u64_stats_update_end(&rxq->stats_sync);
 		}
 
-		if (pkt_len) {
-			idpf_rx_sync_for_cpu(rx_buf, pkt_len);
-			if (skb)
-				idpf_rx_add_frag(rx_buf, skb, pkt_len);
-			else
-				skb = idpf_rx_construct_skb(rxq, rx_buf,
-							    pkt_len);
-		} else {
+		if (!pkt_len) {
 			idpf_rx_put_page(rx_buf);
+			goto pkt_len_zero;
 		}
 
+		idpf_rx_sync_for_cpu(rx_buf, pkt_len);
+		if (xdp_prog)
+			xdp_act = idpf_run_xdp(rx_bufq, rx_buf, &xdp, xdp_prog,
+					       pkt_len);
+		if (xdp_act != XDP_PASS) {
+			idpf_rx_put_page(rx_buf);
+
+			total_rx_bytes += pkt_len;
+			total_rx_pkts++;
+			idpf_rx_post_buf_refill(refillq, buf_id);
+			IDPF_RX_BUMP_NTC(rxq, ntc);
+			continue;
+		}
+
+		if (skb)
+			idpf_rx_add_frag(rx_buf, skb, pkt_len);
+		else
+			skb = idpf_rx_construct_skb(rxq, rx_buf,
+						    pkt_len);
+pkt_len_zero:
 		/* exit if we failed to retrieve a buffer */
 		if (!skb)
 			break;
