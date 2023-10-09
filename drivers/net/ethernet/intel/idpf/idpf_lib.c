@@ -839,6 +839,14 @@ static int idpf_cfg_netdev(struct idpf_vport *vport)
 	netdev->features |= dflt_features;
 	netdev->hw_features |= dflt_features | offloads;
 	netdev->hw_enc_features |= dflt_features | offloads;
+	/* TODO: XDP_TX action has to be implemented before
+	 *       enabling 'NETDEV_XDP_ACT_BASIC'.
+	 *       Move the line below to the commit where XDP_TX
+	 *       action will be implemented.
+	 *       Now, it has just been added to support testing
+	 *       of 2 simplest XDP actions: XDP_PASS and XDP_DROP.
+	 */
+	netdev->xdp_features = NETDEV_XDP_ACT_BASIC;
 	idpf_set_ethtool_ops(netdev);
 	SET_NETDEV_DEV(netdev, &adapter->pdev->dev);
 
