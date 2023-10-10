@@ -2977,7 +2977,8 @@ void idpf_rx_add_frag(struct idpf_rx_buf *rx_buf, struct sk_buff *skb,
 		      unsigned int size)
 {
 	skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, rx_buf->page,
-			rx_buf->page_offset, size, rx_buf->truesize);
+			rx_buf->page_offset + rx_buf->page->pp->p.offset,
+			size, rx_buf->truesize);
 
 	rx_buf->page = NULL;
 }
@@ -3000,7 +3001,8 @@ struct sk_buff *idpf_rx_construct_skb(struct idpf_queue *rxq,
 	struct sk_buff *skb;
 	void *va;
 
-	va = page_address(rx_buf->page) + rx_buf->page_offset;
+	va = page_address(rx_buf->page) + rx_buf->page_offset +
+	     rx_buf->page->pp->p.offset;
 
 	/* prefetch first cache line of first page */
 	net_prefetch(va);
