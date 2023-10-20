@@ -127,6 +127,8 @@ do {								\
 	(&(((struct idpf_base_tx_ctx_desc *)((txq)->desc_ring))[i]))
 #define IDPF_SPLITQ_TX_COMPLQ_DESC(txcq, i)	\
 	(&(((struct idpf_splitq_tx_compl_desc *)((txcq)->desc_ring))[i]))
+#define IDPF_SPLITQ_4B_TX_COMPLQ_DESC(txcq, i)	\
+	(&(((struct idpf_splitq_4b_tx_compl_desc *)((txcq)->desc_ring))[i]))
 
 #define IDPF_FLEX_TX_DESC(txq, i) \
 	(&(((union idpf_tx_flex_desc *)((txq)->desc_ring))[i]))
