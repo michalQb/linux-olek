@@ -577,6 +577,7 @@ struct idpf_queue {
 		struct idpf_flex_tx_ctx_desc *flex_ctx;
 
 		struct idpf_splitq_tx_compl_desc *comp;
+		struct idpf_splitq_4b_tx_compl_desc *comp_4b;
 
 		void *desc_ring;
 	};
@@ -819,6 +820,44 @@ static inline void idpf_tx_splitq_build_desc(union idpf_tx_flex_desc *desc,
 		idpf_tx_splitq_build_ctb(desc, params, td_cmd, size);
 	else
 		idpf_tx_splitq_build_flow_desc(desc, params, td_cmd, size);
+}
+
+/**
+ * idpf_parse_compl_desc - Parse the completion descriptor
+ * @desc: completion descriptor to be parsed
+ * @complq: completion queue containing the descriptor
+ * @txq: returns corresponding Tx queue for a given descriptor
+ * @gen_flag: current generation flag in the completion queue
+ *
+ * Returns completion type from descriptor or negative value in case of error:
+ * 	-ENODATA if there is no completion descriptor to be cleaned
+ * 	-EINVAL  if no Tx queue has been found for the completion queue
+ */
+static inline int
+idpf_parse_compl_desc(const struct idpf_splitq_4b_tx_compl_desc *desc,
+		      const struct idpf_queue *complq, struct idpf_queue **txq,
+		      bool gen_flag)
+{
+	struct idpf_queue *target;
+	u32 rel_tx_qid, comptype;
+
+	/* if the descriptor isn't done, no work yet to do */
+	comptype = le16_to_cpu(desc->qid_comptype_gen);
+	if (!!(comptype & IDPF_TXD_COMPLQ_GEN_M) != gen_flag)
+		return -ENODATA;
+
+	/* Find necessary info of TX queue to clean buffers */
+	rel_tx_qid = FIELD_GET(IDPF_TXD_COMPLQ_QID_M, comptype);
+	target = likely(rel_tx_qid < complq->txq_grp->num_txq) ?
+		 complq->txq_grp->txqs[rel_tx_qid] : NULL;
+
+	if (!target)
+		return -EINVAL;
+
+	*txq = target;
+
+	/* Determine completion type */
+	return FIELD_GET(IDPF_TXD_COMPLQ_COMPL_TYPE_M, comptype);
 }
 
 /**
