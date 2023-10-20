@@ -577,6 +577,7 @@ struct idpf_queue {
 		struct idpf_flex_tx_ctx_desc *flex_ctx;
 
 		struct idpf_splitq_tx_compl_desc *comp;
+		struct idpf_splitq_4b_tx_compl_desc *comp_4b;
 
 		void *desc_ring;
 	};
