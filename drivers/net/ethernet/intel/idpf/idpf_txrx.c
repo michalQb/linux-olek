@@ -66,6 +66,23 @@ void idpf_tx_timeout(struct net_device *netdev, unsigned int txqueue)
 }
 
 /**
+ * idpf_xdp_buf_rel - Release an XDP Tx buffer
+ * @xdp_buf: the buffer to free
+ */
+static void idpf_xdp_buf_rel(struct idpf_tx_buf *xdp_buf)
+{
+	struct page *page;
+	u32 put_size;
+
+	page = xdp_buf->page;
+	put_size = dma_unmap_len(xdp_buf, len);
+	if (page) {
+		page_pool_put_page(page->pp, page, put_size, true);
+		xdp_buf->page = NULL;
+	}
+}
+
+/**
  * idpf_tx_buf_rel - Release a Tx buffer
  * @tx_q: the queue that owns the buffer
  * @tx_buf: the buffer to free
@@ -105,8 +122,12 @@ static void idpf_tx_buf_rel_all(struct idpf_queue *txq)
 		return;
 
 	/* Free all the Tx buffer sk_buffs */
-	for (i = 0; i < txq->desc_count; i++)
-		idpf_tx_buf_rel(txq, &txq->tx_buf[i]);
+	for (i = 0; i < txq->desc_count; i++) {
+		if (test_bit(__IDPF_Q_XDP, txq->flags))
+			idpf_xdp_buf_rel(&txq->tx_buf[i]);
+		else
+			idpf_tx_buf_rel(txq, &txq->tx_buf[i]);
+	}
 
 	kfree(txq->tx_buf);
 	txq->tx_buf = NULL;
@@ -764,6 +785,8 @@ static int idpf_xdp_rxq_info_init(struct idpf_queue *rxq, bool splitq)
 	err = xdp_rxq_info_reg_mem_model(&rxq->xdp_rxq,
 					 MEM_TYPE_PAGE_POOL, pp);
 
+	rxq->xdpq = rxq->vport->txqs[rxq->idx + rxq->vport->xdp_txq_offset];
+
 	return err;
 }
 
@@ -1342,6 +1365,11 @@ static int idpf_txq_group_alloc(struct idpf_vport *vport, u16 num_txq)
 
 			if (flow_sch_en)
 				set_bit(__IDPF_Q_FLOW_SCH_EN, q->flags);
+			if (idpf_xdp_is_prog_ena(vport) &&
+			    (q->idx >= vport->xdp_txq_offset)) {
+				clear_bit(__IDPF_Q_FLOW_SCH_EN, q->flags);
+				set_bit(__IDPF_Q_XDP, q->flags);
+			}
 		}
 
 		if (!idpf_is_queue_model_split(vport->txq_model))
@@ -1579,8 +1607,13 @@ int idpf_vport_queues_alloc(struct idpf_vport *vport)
 	if (idpf_xdp_is_prog_ena(vport)) {
 		int j;
 
-		for (j = vport->xdp_txq_offset; j < vport->num_txq; j++)
+		for (j = vport->xdp_txq_offset; j < vport->num_txq; j++) {
+			__clear_bit(__IDPF_Q_FLOW_SCH_EN,
+				    vport->txqs[j]->flags);
+			__clear_bit(__IDPF_Q_FLOW_SCH_EN,
+				    vport->txqs[j]->txq_grp->complq->flags);
 			__set_bit(__IDPF_Q_XDP, vport->txqs[j]->flags);
+		}
 	}
 
 	return 0;
@@ -2036,6 +2069,8 @@ static int idpf_parse_compl_desc(struct idpf_splitq_4b_tx_compl_desc *desc,
 	u8 ctype;	/* completion type */
 	u16 gen;
 
+	*txq = NULL;
+
 	/* if the descriptor isn't done, no work yet to do */
 	gen = (le16_to_cpu(desc->qid_comptype_gen) &
 	      IDPF_TXD_COMPLQ_GEN_M) >> IDPF_TXD_COMPLQ_GEN_S;
@@ -2096,8 +2131,8 @@ static bool idpf_tx_clean_qb_complq(struct idpf_queue *complq, int budget,
 	struct idpf_splitq_4b_tx_compl_desc *tx_desc;
 	struct idpf_vport *vport = complq->vport;
 	s16 ntc = complq->next_to_clean;
+	bool finalize = true, gen_flag;
 	unsigned int complq_budget;
-	bool gen_flag;
 
 	gen_flag = test_bit(__IDPF_Q_GEN_CHK, complq->flags);
 	complq_budget = vport->compln_clean_budget;
@@ -2112,6 +2147,10 @@ static bool idpf_tx_clean_qb_complq(struct idpf_queue *complq, int budget,
 		ctype = idpf_parse_compl_desc(tx_desc, complq, &tx_q, gen_flag);
 		switch (ctype) {
 		case IDPF_TXD_COMPLT_RS:
+			if (test_bit(__IDPF_Q_XDP, tx_q->flags)) {
+				finalize = false;
+				goto fetch_next_desc;
+			}
 			idpf_tx_handle_rs_cmpl_qb(tx_q, tx_desc,
 						  &cleaned_stats,
 						  budget);
@@ -2147,7 +2186,8 @@ fetch_next_desc:
 	} while (likely(complq_budget));
 
 exit_clean_complq:
-	idpf_tx_finalize_complq(complq, ntc, gen_flag, cleaned);
+	if (finalize)
+		idpf_tx_finalize_complq(complq, ntc, gen_flag, cleaned);
 	return !!complq_budget;
 }
 
@@ -3403,11 +3443,158 @@ static bool idpf_rx_splitq_is_eop(struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_de
 }
 
 /**
+ * idpf_clean_xdp_irq - Reclaim a batch of TX resources from completed XDP_TX
+ * @xdpq: XDP Tx queue
+ *
+ * Returns number of cleaned descriptors.
+ */
+static u32 idpf_clean_xdp_irq(struct idpf_queue *xdpq)
+{
+	struct idpf_queue *complq = xdpq->txq_grp->complq, *txq;
+	struct idpf_splitq_4b_tx_compl_desc *last_rs_desc;
+	int complq_budget = complq->desc_count;
+	u32 tx_ntc = xdpq->next_to_clean;
+	u32 ntc = complq->next_to_clean;
+	u32 cnt = xdpq->desc_count;
+	u32 done_frames = 0, i = 0;
+	int head = tx_ntc;
+	bool gen_flag;
+
+	last_rs_desc = IDPF_SPLITQ_4B_TX_COMPLQ_DESC(complq, ntc);
+	gen_flag = test_bit(__IDPF_Q_GEN_CHK, complq->flags);
+
+	do {
+		int ctype = idpf_parse_compl_desc(last_rs_desc, complq,
+						  &txq, gen_flag);
+		if (txq && txq != xdpq) {
+			dev_err(&xdpq->vport->adapter->pdev->dev,
+				"Found TxQ is not XDP queue\n");
+			goto fetch_next_desc;
+		}
+
+		switch (ctype) {
+		case IDPF_TXD_COMPLT_RS:
+			break;
+		case -ENODATA:
+			goto exit_xdp_irq;
+		case -EINVAL:
+			goto fetch_next_desc;
+		default:
+			dev_err(&xdpq->vport->adapter->pdev->dev,
+				"Unsupported completion type for XDP\n");
+			goto fetch_next_desc;
+		}
+
+		head = le16_to_cpu(last_rs_desc->q_head_compl_tag.q_head);
+fetch_next_desc:
+		last_rs_desc++;
+		ntc++;
+		if (unlikely(ntc == complq->desc_count)) {
+			ntc = 0;
+			last_rs_desc = IDPF_SPLITQ_4B_TX_COMPLQ_DESC(complq, 0);
+			gen_flag = !gen_flag;
+			change_bit(__IDPF_Q_GEN_CHK, complq->flags);
+		}
+		prefetch(last_rs_desc);
+		complq_budget--;
+	} while (likely(complq_budget));
+
+exit_xdp_irq:
+	complq->next_to_clean = ntc;
+	done_frames = head >= tx_ntc ? head - tx_ntc :
+				       head + cnt - tx_ntc;
+
+	for (i = 0; i < done_frames; i++) {
+		struct idpf_tx_buf *tx_buf = &xdpq->tx_buf[tx_ntc];
+
+		idpf_xdp_buf_rel(tx_buf);
+
+		tx_ntc++;
+		if (tx_ntc >= xdpq->desc_count)
+			tx_ntc = 0;
+	}
+
+	xdpq->next_to_clean = tx_ntc;
+
+	return i;
+}
+
+/**
+ * idpf_xmit_xdp_buff - submit single buffer to XDP queue for transmission
+ * @xdp: XDP buffer pointer
+ * @xdpq: XDP queue for transmission
+ * @map: whether to map the buffer
+ *
+ * Returns negative on failure, 0 on success.
+ */
+static int idpf_xmit_xdp_buff(const struct xdp_buff *xdp,
+			      struct idpf_queue *xdpq,
+			      bool map)
+{
+	struct idpf_tx_splitq_params tx_params = { };
+	u32 batch_sz = IDPF_QUEUE_QUARTER(xdpq);
+	u32 size = xdp->data_end - xdp->data;
+	union idpf_tx_flex_desc *tx_desc;
+	u32 ntu = xdpq->next_to_use;
+	struct idpf_tx_buf *tx_buf;
+	void *data = xdp->data;
+	dma_addr_t dma;
+	u32 free;
+
+	free = IDPF_DESC_UNUSED(xdpq);
+	if (unlikely(free < batch_sz))
+		free += idpf_clean_xdp_irq(xdpq);
+	if (unlikely(!free))
+		return -EBUSY;
+
+	if (map) {
+		dma = dma_map_single(xdpq->dev, data, size, DMA_TO_DEVICE);
+		if (dma_mapping_error(xdpq->dev, dma))
+			return -ENOMEM;
+	} else {
+		struct page *page = virt_to_page(data);
+		u32 hr = data - xdp->data_hard_start;
+
+		dma = page_pool_get_dma_addr(page) + hr;
+		dma_sync_single_for_device(xdpq->dev, dma, size,
+					   DMA_BIDIRECTIONAL);
+	}
+
+	tx_buf = &xdpq->tx_buf[ntu];
+	tx_buf->bytecount = size;
+	tx_buf->gso_segs = 1;
+	tx_buf->page = virt_to_page(data);
+
+	/* record length, and DMA address */
+	dma_unmap_len_set(tx_buf, len, size);
+	dma_unmap_addr_set(tx_buf, dma, dma);
+
+	tx_desc = IDPF_FLEX_TX_DESC(xdpq, ntu);
+	tx_desc->q.buf_addr = cpu_to_le64(dma);
+
+	tx_params.dtype = IDPF_TX_DESC_DTYPE_FLEX_L2TAG1_L2TAG2;
+	tx_params.eop_cmd = IDPF_TX_DESC_CMD_EOP;
+
+	idpf_tx_splitq_build_desc(tx_desc, &tx_params,
+				  tx_params.eop_cmd | tx_params.offload.td_cmd,
+				  size);
+	ntu++;
+	if (ntu == xdpq->desc_count)
+		ntu = 0;
+
+	xdpq->next_to_use = ntu;
+
+	return 0;
+}
+
+/**
  * idpf_run_xdp - Run XDP program and perform the resulting action
  * @rx_bufq: Rx buffer queue
  * @rx_buf: Rx buffer containing the packet
  * @xdp: an initiated XDP buffer
  * @xdp_prog: an XDP program assigned to the vport
+ * @xdpq: XDP Tx queue associated with the Rx queue
+ * @rxq_xdp_act: logical OR of flags of XDP actions that require finalization
  * @size: size of the packet
  *
  * Returns the resulting XDP action.
@@ -3416,6 +3603,8 @@ static unsigned int idpf_run_xdp(struct idpf_queue *rx_bufq,
 				 struct idpf_rx_buf *rx_buf,
 				 struct xdp_buff *xdp,
 				 struct bpf_prog *xdp_prog,
+				 struct idpf_queue *xdpq,
+				 u32 *rxq_xdp_act,
 				 unsigned int size)
 {
 	u32 hr = rx_bufq->pp->p.offset;
@@ -3430,11 +3619,18 @@ static unsigned int idpf_run_xdp(struct idpf_queue *rx_bufq,
 	case XDP_PASS:
 	case XDP_DROP:
 		break;
+	case XDP_TX:
+		if (unlikely(idpf_xmit_xdp_buff(xdp, xdpq, false)))
+			goto xdp_err;
+
+		*rxq_xdp_act |= IDPF_XDP_ACT_FINALIZE_TX;
+		break;
 	default:
 		bpf_warn_invalid_xdp_action(rx_bufq->vport->netdev, xdp_prog,
 					    xdp_act);
 		fallthrough;
 	case XDP_ABORTED:
+xdp_err:
 		trace_xdp_exception(rx_bufq->vport->netdev, xdp_prog, xdp_act);
 
 		return XDP_DROP;
@@ -3458,11 +3654,13 @@ static unsigned int idpf_run_xdp(struct idpf_queue *rx_bufq,
 static int idpf_rx_splitq_clean(struct idpf_queue *rxq, int budget)
 {
 	int total_rx_bytes = 0, total_rx_pkts = 0;
+	struct idpf_queue *xdpq = rxq->xdpq;
 	struct idpf_queue *rx_bufq = NULL;
 	struct sk_buff *skb = rxq->skb;
 	u16 ntc = rxq->next_to_clean;
 	struct bpf_prog *xdp_prog;
 	struct xdp_buff xdp;
+	u32 rxq_xdp_act = 0;
 
 	xdp_prog = rcu_dereference(rxq->xdp_prog);
 	xdp_init_buff(&xdp, PAGE_SIZE, &rxq->xdp_rxq);
@@ -3566,19 +3764,22 @@ bypass_hsplit:
 		}
 
 		idpf_rx_sync_for_cpu(rx_buf, pkt_len);
-		if (xdp_prog)
-			xdp_act = idpf_run_xdp(rx_bufq, rx_buf, &xdp, xdp_prog,
-					       pkt_len);
-		if (xdp_act != XDP_PASS) {
+		if (!xdp_prog)
+			goto construct_skb;
+
+		xdp_act = idpf_run_xdp(rx_bufq, rx_buf, &xdp, xdp_prog,
+				       xdpq, &rxq_xdp_act, pkt_len);
+		if (xdp_act == XDP_PASS)
+			goto construct_skb;
+		if (xdp_act == XDP_DROP)
 			idpf_rx_put_page(rx_buf);
 
-			total_rx_bytes += pkt_len;
-			total_rx_pkts++;
-			idpf_rx_post_buf_refill(refillq, buf_id);
-			IDPF_RX_BUMP_NTC(rxq, ntc);
-			continue;
-		}
-
+		total_rx_bytes += pkt_len;
+		total_rx_pkts++;
+		idpf_rx_post_buf_refill(refillq, buf_id);
+		IDPF_RX_BUMP_NTC(rxq, ntc);
+		continue;
+construct_skb:
 		if (skb)
 			idpf_rx_add_frag(rx_buf, skb, pkt_len);
 		else
@@ -3621,8 +3822,10 @@ pkt_len_zero:
 	}
 
 	rxq->next_to_clean = ntc;
-
 	rxq->skb = skb;
+
+	idpf_finalize_xdp_rx(xdpq, rxq_xdp_act);
+
 	u64_stats_update_begin(&rxq->stats_sync);
 	u64_stats_add(&rxq->q_stats.rx.packets, total_rx_pkts);
 	u64_stats_add(&rxq->q_stats.rx.bytes, total_rx_bytes);

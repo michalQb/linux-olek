@@ -159,12 +159,16 @@ do {								\
 	((++(txq)->compl_tag_cur_gen) >= (txq)->compl_tag_gen_max ? \
 	0 : (txq)->compl_tag_cur_gen)
 
+#define IDPF_QUEUE_QUARTER(Q)		((Q)->desc_count >> 2)
+
 #define IDPF_TXD_LAST_DESC_CMD (IDPF_TX_DESC_CMD_EOP | IDPF_TX_DESC_CMD_RS)
 
 #define IDPF_TX_FLAGS_TSO		BIT(0)
 #define IDPF_TX_FLAGS_IPV4		BIT(1)
 #define IDPF_TX_FLAGS_IPV6		BIT(2)
 #define IDPF_TX_FLAGS_TUNNEL		BIT(3)
+
+#define IDPF_XDP_ACT_FINALIZE_TX	BIT(0)
 
 #define IDPF_XDP_MAX_MTU		3046
 
@@ -197,7 +201,10 @@ union idpf_tx_flex_desc {
  */
 struct idpf_tx_buf {
 	void *next_to_watch;
-	struct sk_buff *skb;
+	union {
+		struct sk_buff *skb;
+		struct page *page;
+	};
 	DEFINE_DMA_UNMAP_ADDR(dma);
 	DEFINE_DMA_UNMAP_LEN(len);
 	unsigned int bytecount;
@@ -746,6 +753,7 @@ struct idpf_queue {
 
 	struct bpf_prog *xdp_prog;
 	struct xdp_rxq_info xdp_rxq;
+	struct idpf_queue *xdpq;
 
 	u16 tx_max_bufs;
 	u8 tx_min_pkt_len;
@@ -1054,5 +1062,56 @@ netdev_tx_t idpf_tx_singleq_start(struct sk_buff *skb,
 bool idpf_rx_singleq_buf_hw_alloc_all(struct idpf_queue *rxq,
 				      u16 cleaned_count);
 int idpf_tso(struct sk_buff *skb, struct idpf_tx_offload_params *off);
+
+/**
+ * idpf_xdpq_update_tail - Updates the XDP Tx queue tail register
+ * @xdpq: XDP Tx queue
+ *
+ * This function updates the XDP Tx queue tail register.
+ */
+static inline void idpf_xdpq_update_tail(struct idpf_queue *xdpq)
+{
+	/* Force memory writes to complete before letting h/w
+	 * know there are new descriptors to fetch.
+	 */
+	wmb();
+	writel_relaxed(xdpq->next_to_use, xdpq->tail);
+}
+
+/**
+ * idpf_set_rs_bit - set RS bit on last produced descriptor.
+ * @xdpq: XDP queue to produce the HW Tx descriptors on
+ *
+ * Returns the index of descriptor RS bit was set on (one behind current NTU).
+ */
+static inline void idpf_set_rs_bit(struct idpf_queue *xdpq)
+{
+	int rs_idx = xdpq->next_to_use ? xdpq->next_to_use - 1 :
+					 xdpq->desc_count - 1;
+	u32 last_desc = IDPF_TXD_LAST_DESC_CMD;
+	union idpf_tx_flex_desc *tx_desc;
+
+	tx_desc = IDPF_FLEX_TX_DESC(xdpq, rs_idx);
+	tx_desc->q.qw1.cmd_dtype |=
+		cpu_to_le16((last_desc << IDPF_FLEX_TXD_QW1_CMD_S) &
+			    IDPF_FLEX_TXD_QW1_CMD_M);
+}
+
+/**
+ * idpf_finalize_xdp_rx - Bump XDP Tx tail and/or flush redirect map
+ * @xdpq: XDP Tx queue
+ * @xdp_act: Logical OR of flags of XDP actions that require finalization
+ *
+ * This function bumps XDP Tx tail and/or flush redirect map, and
+ * should be called when a batch of packets has been processed in the
+ * napi loop.
+ */
+static inline void idpf_finalize_xdp_rx(struct idpf_queue *xdpq, u32 xdp_act)
+{
+	if (xdp_act & IDPF_XDP_ACT_FINALIZE_TX) {
+		idpf_set_rs_bit(xdpq);
+		idpf_xdpq_update_tail(xdpq);
+	}
+}
 
 #endif /* !_IDPF_TXRX_H_ */
