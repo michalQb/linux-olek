@@ -839,7 +839,7 @@ static int idpf_cfg_netdev(struct idpf_vport *vport)
 	netdev->features |= dflt_features;
 	netdev->hw_features |= dflt_features | offloads;
 	netdev->hw_enc_features |= dflt_features | offloads;
-	netdev->xdp_features = NETDEV_XDP_ACT_BASIC;
+	netdev->xdp_features = NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT;
 	idpf_set_ethtool_ops(netdev);
 	SET_NETDEV_DEV(netdev, &adapter->pdev->dev);
 
@@ -2456,6 +2456,10 @@ idpf_xdp_setup_prog(struct idpf_vport *vport, struct bpf_prog *prog,
 			   "Could not reconfigure the queues after XDP setup\n");
 		return err;
 	}
+	if (prog)
+		xdp_features_set_redirect_target(vport->netdev, true);
+	else
+		xdp_features_clear_redirect_target(vport->netdev);
 
 	if (vport_is_up) {
 		err = idpf_vport_open(vport, false);
@@ -2595,6 +2599,7 @@ static const struct net_device_ops idpf_netdev_ops_splitq = {
 	.ndo_set_features = idpf_set_features,
 	.ndo_tx_timeout = idpf_tx_timeout,
 	.ndo_bpf = idpf_xdp,
+	.ndo_xdp_xmit = idpf_xdp_xmit,
 };
 
 static const struct net_device_ops idpf_netdev_ops_singleq = {
