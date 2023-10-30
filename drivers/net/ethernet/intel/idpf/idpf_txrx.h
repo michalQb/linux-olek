@@ -169,12 +169,25 @@ do {								\
 #define IDPF_TX_FLAGS_TUNNEL		BIT(3)
 
 #define IDPF_XDP_ACT_FINALIZE_TX	BIT(0)
+#define IDPF_XDP_ACT_FINALIZE_REDIR	BIT(1)
 
 #define IDPF_XDP_MAX_MTU		3046
 
 union idpf_tx_flex_desc {
 	struct idpf_flex_tx_desc q; /* queue based scheduling */
 	struct idpf_flex_tx_sched_desc flow; /* flow based scheduling */
+};
+
+/**
+ * enum idpf_xdp_buffer_type - type of &idpf_tx_buf on XDP queue
+ * @IDPF_XDP_BUFFER_NONE: unused, no action required
+ * @IDPF_XDP_BUFFER_TX: free according to our memory model
+ * @IDPF_XDP_BUFFER_FRAME: use xdp_return_frame()
+ */
+enum idpf_xdp_buffer_type {
+	IDPF_XDP_BUFFER_NONE	= 0U,
+	IDPF_XDP_BUFFER_TX,
+	IDPF_XDP_BUFFER_FRAME,
 };
 
 /**
@@ -202,13 +215,15 @@ union idpf_tx_flex_desc {
 struct idpf_tx_buf {
 	void *next_to_watch;
 	union {
-		struct sk_buff *skb;
-		struct page *page;
+		struct sk_buff *skb;	/* used for .ndo_start_xmit() */
+		struct page *page;	/* used for XDP_TX */
+		struct xdp_frame *xdpf; /* used for .ndo_xdp_xmit() */
 	};
 	DEFINE_DMA_UNMAP_ADDR(dma);
 	DEFINE_DMA_UNMAP_LEN(len);
 	unsigned int bytecount;
 	unsigned short gso_segs;
+	unsigned short xdp_type;
 
 	union {
 		int compl_tag;
@@ -1062,6 +1077,8 @@ netdev_tx_t idpf_tx_singleq_start(struct sk_buff *skb,
 bool idpf_rx_singleq_buf_hw_alloc_all(struct idpf_queue *rxq,
 				      u16 cleaned_count);
 int idpf_tso(struct sk_buff *skb, struct idpf_tx_offload_params *off);
+int idpf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
+		  u32 flags);
 
 /**
  * idpf_xdpq_update_tail - Updates the XDP Tx queue tail register
@@ -1108,6 +1125,8 @@ static inline void idpf_set_rs_bit(struct idpf_queue *xdpq)
  */
 static inline void idpf_finalize_xdp_rx(struct idpf_queue *xdpq, u32 xdp_act)
 {
+	if (xdp_act & IDPF_XDP_ACT_FINALIZE_REDIR)
+		xdp_do_flush_map();
 	if (xdp_act & IDPF_XDP_ACT_FINALIZE_TX) {
 		idpf_set_rs_bit(xdpq);
 		idpf_xdpq_update_tail(xdpq);
