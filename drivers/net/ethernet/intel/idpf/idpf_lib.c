@@ -2446,6 +2446,11 @@ idpf_xdp_setup_prog(struct idpf_vport *vport, struct bpf_prog *prog,
 		return err;
 	}
 
+	if (prog)
+		xdp_features_set_redirect_target(vport->netdev, false);
+	else
+		xdp_features_clear_redirect_target(vport->netdev);
+
 	if (vport_is_up) {
 		err = idpf_vport_open(vport, false);
 		if (err) {
@@ -2583,6 +2588,7 @@ static const struct net_device_ops idpf_netdev_ops_splitq = {
 	.ndo_set_features = idpf_set_features,
 	.ndo_tx_timeout = idpf_tx_timeout,
 	.ndo_bpf = idpf_xdp,
+	.ndo_xdp_xmit = idpf_xdp_xmit,
 };
 
 static const struct net_device_ops idpf_netdev_ops_singleq = {

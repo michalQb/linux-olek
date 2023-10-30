@@ -3352,6 +3352,35 @@ static void idpf_xdp_finalize_rx(struct libie_xdp_tx_bulk *bq)
 }
 
 /**
+ * idpf_xdp_xmit - submit packets to xdp ring for transmission
+ * @dev: netdev
+ * @n: number of xdp frames to be transmitted
+ * @frames: xdp frames to be transmitted
+ * @flags: transmit flags
+ *
+ * Returns number of frames successfully sent. Frames that fail are
+ * free'ed via XDP return API.
+ * For error cases, a negative errno code is returned and no-frames
+ * are transmitted (caller must handle freeing frames).
+ */
+int idpf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
+		  u32 flags)
+{
+	struct idpf_netdev_priv *np = netdev_priv(dev);
+	struct idpf_vport *vport = np->vport;
+
+	if (unlikely(!netif_carrier_ok(dev) || !vport->link_up))
+		return -ENETDOWN;
+	if (unlikely(!idpf_xdp_is_prog_ena(vport)))
+		return -ENXIO;
+
+	return libie_xdp_xmit_do_bulk(dev, n, frames, flags,
+				      &vport->txqs[vport->xdp_txq_offset],
+				      vport->num_xdp_txq, idpf_xdp_tx_prep,
+				      idpf_xdp_tx_xmit, idpf_xdp_tx_finalize);
+}
+
+/**
  * idpf_rx_splitq_clean - Clean completed descriptors from Rx queue
  * @rxq: Rx descriptor queue to retrieve receive buffer queue
  * @budget: Total limit on number of packets to process
