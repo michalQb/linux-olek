@@ -2451,6 +2451,7 @@ static const struct net_device_ops idpf_netdev_ops_splitq = {
 	.ndo_set_features = idpf_set_features,
 	.ndo_tx_timeout = idpf_tx_timeout,
 	.ndo_bpf = idpf_xdp,
+	.ndo_xdp_xmit = idpf_xdp_xmit,
 };
 
 static const struct net_device_ops idpf_netdev_ops_singleq = {

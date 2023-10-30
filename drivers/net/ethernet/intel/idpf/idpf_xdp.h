@@ -31,6 +31,8 @@ static inline void idpf_xdp_finalize_rx(struct libie_xdp_tx_bulk *bq)
 		__idpf_xdp_finalize_rx(bq);
 }
 
+int idpf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
+		  u32 flags);
 int idpf_xdp(struct net_device *netdev, struct netdev_bpf *xdp);
 
 #endif /* _IDPF_XDP_H_ */
