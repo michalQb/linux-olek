@@ -67,19 +67,31 @@ void idpf_tx_timeout(struct net_device *netdev, unsigned int txqueue)
 
 /**
  * idpf_xdp_buf_rel - Release an XDP Tx buffer
+ * @xdpq: XDP Tx queue
  * @xdp_buf: the buffer to free
  */
-static void idpf_xdp_buf_rel(struct idpf_tx_buf *xdp_buf)
+static void idpf_xdp_buf_rel(struct idpf_queue *xdpq,
+			     struct idpf_tx_buf *xdp_buf)
 {
 	struct page *page;
 	u32 put_size;
 
-	page = xdp_buf->page;
-	put_size = dma_unmap_len(xdp_buf, len);
-	if (page) {
+	switch (xdp_buf->xdp_type) {
+	case IDPF_XDP_BUFFER_TX:
+		page = xdp_buf->page;
+		put_size = dma_unmap_len(xdp_buf, len);
 		page_pool_put_page(page->pp, page, put_size, true);
-		xdp_buf->page = NULL;
+		break;
+	case IDPF_XDP_BUFFER_FRAME:
+		dma_unmap_page(xdpq->dev,
+			       dma_unmap_addr(xdp_buf, dma),
+			       dma_unmap_len(xdp_buf, len),
+			       DMA_TO_DEVICE);
+		xdp_return_frame(xdp_buf->xdpf);
+		break;
 	}
+
+	xdp_buf->xdp_type = IDPF_XDP_BUFFER_NONE;
 }
 
 /**
@@ -124,7 +136,7 @@ static void idpf_tx_buf_rel_all(struct idpf_queue *txq)
 	/* Free all the Tx buffer sk_buffs */
 	for (i = 0; i < txq->desc_count; i++) {
 		if (test_bit(__IDPF_Q_XDP, txq->flags))
-			idpf_xdp_buf_rel(&txq->tx_buf[i]);
+			idpf_xdp_buf_rel(txq, &txq->tx_buf[i]);
 		else
 			idpf_tx_buf_rel(txq, &txq->tx_buf[i]);
 	}
@@ -3507,7 +3519,7 @@ exit_xdp_irq:
 	for (i = 0; i < done_frames; i++) {
 		struct idpf_tx_buf *tx_buf = &xdpq->tx_buf[tx_ntc];
 
-		idpf_xdp_buf_rel(tx_buf);
+		idpf_xdp_buf_rel(xdpq, tx_buf);
 
 		tx_ntc++;
 		if (tx_ntc >= xdpq->desc_count)
@@ -3523,13 +3535,13 @@ exit_xdp_irq:
  * idpf_xmit_xdp_buff - submit single buffer to XDP queue for transmission
  * @xdp: XDP buffer pointer
  * @xdpq: XDP queue for transmission
- * @map: whether to map the buffer
+ * @frame: whether the function is called from .ndo_xdp_xmit()
  *
  * Returns negative on failure, 0 on success.
  */
 static int idpf_xmit_xdp_buff(const struct xdp_buff *xdp,
 			      struct idpf_queue *xdpq,
-			      bool map)
+			      bool frame)
 {
 	struct idpf_tx_splitq_params tx_params = { };
 	u32 batch_sz = IDPF_QUEUE_QUARTER(xdpq);
@@ -3547,7 +3559,7 @@ static int idpf_xmit_xdp_buff(const struct xdp_buff *xdp,
 	if (unlikely(!free))
 		return -EBUSY;
 
-	if (map) {
+	if (frame) {
 		dma = dma_map_single(xdpq->dev, data, size, DMA_TO_DEVICE);
 		if (dma_mapping_error(xdpq->dev, dma))
 			return -ENOMEM;
@@ -3563,7 +3575,14 @@ static int idpf_xmit_xdp_buff(const struct xdp_buff *xdp,
 	tx_buf = &xdpq->tx_buf[ntu];
 	tx_buf->bytecount = size;
 	tx_buf->gso_segs = 1;
-	tx_buf->page = virt_to_page(data);
+
+	if (frame) {
+		tx_buf->xdp_type = IDPF_XDP_BUFFER_FRAME;
+		tx_buf->xdpf = xdp->data_hard_start;
+	} else {
+		tx_buf->xdp_type = IDPF_XDP_BUFFER_TX;
+		tx_buf->page = virt_to_page(data);
+	}
 
 	/* record length, and DMA address */
 	dma_unmap_len_set(tx_buf, len, size);
@@ -3588,6 +3607,62 @@ static int idpf_xmit_xdp_buff(const struct xdp_buff *xdp,
 }
 
 /**
+ * idpf_xdp_xmit - submit packets to xdp ring for transmission
+ * @dev: netdev
+ * @n: number of xdp frames to be transmitted
+ * @frames: xdp frames to be transmitted
+ * @flags: transmit flags
+ *
+ * Returns number of frames successfully sent. Frames that fail are
+ * free'ed via XDP return API.
+ * For error cases, a negative errno code is returned and no-frames
+ * are transmitted (caller must handle freeing frames).
+ */
+int idpf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
+		  u32 flags)
+{
+	struct idpf_netdev_priv *np = netdev_priv(dev);
+	struct idpf_vport *vport = np->vport;
+	u32 queue_index, nxmit = 0;
+	struct idpf_queue *xdpq;
+	int i, err = 0;
+
+	if (unlikely(flags & ~XDP_XMIT_FLAGS_MASK))
+		return -EINVAL;
+	if (unlikely(!netif_carrier_ok(dev) || !vport->link_up))
+		return -ENETDOWN;
+	if (unlikely(!idpf_xdp_is_prog_ena(vport)))
+		return -ENXIO;
+
+	queue_index = smp_processor_id();
+	if (queue_index >= vport->num_xdp_txq)
+		return -ENXIO;
+
+	xdpq = vport->txqs[queue_index + vport->xdp_txq_offset];
+
+	for (i = 0; i < n; i++) {
+		struct xdp_frame *xdpf = frames[i];
+		struct xdp_buff xdp;
+
+		xdp_convert_frame_to_buff(xdpf, &xdp);
+		err = idpf_xmit_xdp_buff(&xdp, xdpq, true);
+		if (unlikely(err)) {
+			netdev_err(dev, "XDP frame TX failed, error: %d\n",
+				   err);
+			break;
+		}
+		nxmit++;
+	}
+
+	if (likely(nxmit))
+		idpf_set_rs_bit(xdpq);
+	if (flags & XDP_XMIT_FLUSH)
+		idpf_xdpq_update_tail(xdpq);
+
+	return nxmit;
+}
+
+/**
  * idpf_run_xdp - Run XDP program and perform the resulting action
  * @rx_bufq: Rx buffer queue
  * @rx_buf: Rx buffer containing the packet
@@ -3607,6 +3682,7 @@ static unsigned int idpf_run_xdp(struct idpf_queue *rx_bufq,
 				 u32 *rxq_xdp_act,
 				 unsigned int size)
 {
+	struct net_device *netdev = rx_bufq->vport->netdev;
 	u32 hr = rx_bufq->pp->p.offset;
 	unsigned int xdp_act;
 
@@ -3624,6 +3700,12 @@ static unsigned int idpf_run_xdp(struct idpf_queue *rx_bufq,
 			goto xdp_err;
 
 		*rxq_xdp_act |= IDPF_XDP_ACT_FINALIZE_TX;
+		break;
+	case XDP_REDIRECT:
+		if (unlikely(xdp_do_redirect(netdev, xdp, xdp_prog)))
+			goto xdp_err;
+
+		*rxq_xdp_act |= IDPF_XDP_ACT_FINALIZE_REDIR;
 		break;
 	default:
 		bpf_warn_invalid_xdp_action(rx_bufq->vport->netdev, xdp_prog,
