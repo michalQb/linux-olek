@@ -738,7 +738,10 @@ struct idpf_queue {
 		} rx_buf;
 	};
 	struct page_pool *pp;
-	struct sk_buff *skb;
+	union {
+		struct sk_buff *skb;
+		spinlock_t tx_lock;
+	};
 	u16 q_type;
 	u32 q_id;
 	u16 desc_count;
@@ -1077,6 +1080,9 @@ netdev_tx_t idpf_tx_singleq_start(struct sk_buff *skb,
 bool idpf_rx_singleq_buf_hw_alloc_all(struct idpf_queue *rxq,
 				      u16 cleaned_count);
 int idpf_tso(struct sk_buff *skb, struct idpf_tx_offload_params *off);
+
+DECLARE_STATIC_KEY_FALSE(idpf_xdp_locking_key);
+
 int idpf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 		  u32 flags);
 
@@ -1128,8 +1134,12 @@ static inline void idpf_finalize_xdp_rx(struct idpf_queue *xdpq, u32 xdp_act)
 	if (xdp_act & IDPF_XDP_ACT_FINALIZE_REDIR)
 		xdp_do_flush_map();
 	if (xdp_act & IDPF_XDP_ACT_FINALIZE_TX) {
+		if (static_branch_unlikely(&idpf_xdp_locking_key))
+			spin_lock(&xdpq->tx_lock);
 		idpf_set_rs_bit(xdpq);
 		idpf_xdpq_update_tail(xdpq);
+		if (static_branch_unlikely(&idpf_xdp_locking_key))
+			spin_unlock(&xdpq->tx_lock);
 	}
 }
 

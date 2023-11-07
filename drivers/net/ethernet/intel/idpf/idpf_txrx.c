@@ -3,6 +3,8 @@
 
 #include "idpf.h"
 
+DEFINE_STATIC_KEY_FALSE(idpf_xdp_locking_key);
+
 /**
  * idpf_buf_lifo_push - push a buffer pointer onto stack
  * @stack: pointer to stack struct
@@ -188,6 +190,9 @@ static void idpf_tx_desc_rel_all(struct idpf_vport *vport)
 
 	if (!vport->txq_grps)
 		return;
+
+	if (static_key_enabled(&idpf_xdp_locking_key))
+		static_branch_dec(&idpf_xdp_locking_key);
 
 	for (i = 0; i < vport->num_txq_grp; i++) {
 		struct idpf_txq_group *txq_grp = &vport->txq_grps[i];
@@ -1595,6 +1600,26 @@ err_out:
 }
 
 /**
+ * idpf_xdp_cfg_tx_sharing - Enable XDP TxQ sharing, if needed
+ * @vport: vport where the XDP is being configured
+ *
+ * If there is more CPUs than rings, sharing XDP TxQ allows us
+ * to handle XDP_REDIRECT from other interfaces.
+ */
+static void idpf_xdp_cfg_tx_sharing(struct idpf_vport *vport)
+{
+	u32 num_xdpq = vport->num_xdp_txq;
+	u32 num_cpus = num_online_cpus();
+
+	if (num_xdpq >= num_cpus)
+		return;
+
+	netdev_warn(vport->netdev, "System has %u CPUs, but only %u XDP queues can be configured, entering XDP TxQ sharing mode, performance is decreased\n",
+		    num_cpus, num_xdpq);
+	static_branch_inc(&idpf_xdp_locking_key);
+}
+
+/**
  * idpf_vport_queues_alloc - Allocate memory for all queues
  * @vport: virtual port
  *
@@ -1630,7 +1655,9 @@ int idpf_vport_queues_alloc(struct idpf_vport *vport)
 			__clear_bit(__IDPF_Q_FLOW_SCH_EN,
 				    vport->txqs[j]->txq_grp->complq->flags);
 			__set_bit(__IDPF_Q_XDP, vport->txqs[j]->flags);
+			spin_lock_init(&vport->txqs[j]->tx_lock);
 		}
+		idpf_xdp_cfg_tx_sharing(vport);
 	}
 
 	return 0;
@@ -3612,6 +3639,22 @@ static int idpf_xmit_xdp_buff(const struct xdp_buff *xdp,
 	return 0;
 }
 
+static bool idpf_xdp_xmit_back(const struct xdp_buff *buff,
+			       struct idpf_queue *xdpq)
+{
+	bool ret;
+
+	if (static_branch_unlikely(&idpf_xdp_locking_key))
+		spin_lock(&xdpq->tx_lock);
+
+	ret = !idpf_xmit_xdp_buff(buff, xdpq, false);
+
+	if (static_branch_unlikely(&idpf_xdp_locking_key))
+		spin_unlock(&xdpq->tx_lock);
+
+	return ret;
+}
+
 /**
  * idpf_xdp_xmit - submit packets to xdp ring for transmission
  * @dev: netdev
@@ -3641,10 +3684,13 @@ int idpf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 		return -ENXIO;
 
 	queue_index = smp_processor_id();
-	if (queue_index >= vport->num_xdp_txq)
-		return -ENXIO;
+	if (static_branch_unlikely(&idpf_xdp_locking_key))
+		queue_index %= vport->num_xdp_txq;
 
 	xdpq = vport->txqs[queue_index + vport->xdp_txq_offset];
+
+	if (static_branch_unlikely(&idpf_xdp_locking_key))
+		spin_lock(&xdpq->tx_lock);
 
 	for (i = 0; i < n; i++) {
 		struct xdp_frame *xdpf = frames[i];
@@ -3664,6 +3710,8 @@ int idpf_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 		idpf_set_rs_bit(xdpq);
 	if (flags & XDP_XMIT_FLUSH)
 		idpf_xdpq_update_tail(xdpq);
+	if (static_branch_unlikely(&idpf_xdp_locking_key))
+		spin_unlock(&xdpq->tx_lock);
 
 	return nxmit;
 }
@@ -3702,7 +3750,7 @@ static unsigned int idpf_run_xdp(struct idpf_queue *rx_bufq,
 	case XDP_DROP:
 		break;
 	case XDP_TX:
-		if (unlikely(idpf_xmit_xdp_buff(xdp, xdpq, false)))
+		if (unlikely(!idpf_xdp_xmit_back(xdp, xdpq)))
 			goto xdp_err;
 
 		*rxq_xdp_act |= IDPF_XDP_ACT_FINALIZE_TX;
