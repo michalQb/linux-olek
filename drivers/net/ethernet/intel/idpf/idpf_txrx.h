@@ -661,6 +661,7 @@ union idpf_queue_stats {
  * @skb: Pointer to the skb
  * @q_type: Queue type (TX, RX, TX completion, RX buffer)
  * @q_id: Queue id
+ * @relative_q_id: Relative q_id in queue group
  * @desc_count: Number of descriptors
  * @next_to_use: Next descriptor to use. Relevant in both split & single txq
  *		 and bufq.
@@ -748,6 +749,7 @@ struct idpf_queue {
 	};
 	u16 q_type;
 	u32 q_id;
+	u16 relative_q_id;
 	u16 desc_count;
 
 	u16 next_to_use;
