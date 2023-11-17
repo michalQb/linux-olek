@@ -748,6 +748,7 @@ struct idpf_queue {
 	};
 	u16 q_type;
 	u32 q_id;
+	u16 relative_q_id;
 	u16 desc_count;
 
 	u16 next_to_use;
