@@ -1491,7 +1491,8 @@ static int idpf_send_config_tx_queues_msg(struct idpf_vport *vport)
 
 				qi[k].tx_compl_queue_id =
 					cpu_to_le16(tx_qgrp->complq->q_id);
-				qi[k].relative_queue_id = cpu_to_le16(j);
+				qi[k].relative_queue_id =
+					cpu_to_le16(q->relative_q_id);
 
 				if (test_bit(__IDPF_Q_FLOW_SCH_EN, q->flags))
 					qi[k].sched_mode =

@@ -1281,6 +1281,7 @@ static int idpf_txq_group_alloc(struct idpf_vport *vport, u16 num_txq)
 			q->tx_min_pkt_len = idpf_get_min_tx_pkt_len(adapter);
 			q->vport = vport;
 			q->txq_grp = tx_qgrp;
+			q->relative_q_id = j;
 
 			if (!flow_sch_en)
 				continue;

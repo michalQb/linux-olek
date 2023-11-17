@@ -665,6 +665,8 @@ struct idpf_queue {
 
 	dma_addr_t dma;
 	unsigned int size;
+
+	u32 relative_q_id;
 } ____cacheline_internodealigned_in_smp;
 
 /**
