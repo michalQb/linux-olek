@@ -637,6 +637,7 @@ __libeth_cacheline_set_assert(struct idpf_rx_queue,
  * @size: Length of descriptor ring in bytes
  * @dma: Physical address of ring
  * @q_vector: Backreference to associated vector
+ * @rel_q_id: relative virtchnl queue index
  */
 struct idpf_tx_queue {
 	__libeth_cacheline_group_begin(read_mostly);
@@ -711,6 +712,8 @@ struct idpf_tx_queue {
 	dma_addr_t dma;
 
 	struct idpf_q_vector *q_vector;
+
+	u32 rel_q_id;
 	__libeth_cacheline_group_end(cold);
 } ____cacheline_aligned;
 /* sizeof(spinlock_t) can take many values depending on the config, don't
