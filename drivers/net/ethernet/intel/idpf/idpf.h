@@ -982,6 +982,15 @@ int idpf_vport_queue_ids_init(struct idpf_vport *vport);
 int idpf_queue_reg_init(struct idpf_vport *vport);
 int idpf_send_config_queues_msg(struct idpf_vport *vport);
 int idpf_send_enable_queues_msg(struct idpf_vport *vport);
+int idpf_send_enable_selected_queues_msg(struct idpf_vport *vport,
+					 struct idpf_queue **qs,
+					 int num_q);
+int idpf_send_disable_selected_queues_msg(struct idpf_vport *vport,
+					  struct idpf_queue **qs,
+					  int num_q);
+int idpf_send_config_selected_queues_msg(struct idpf_vport *vport,
+					 struct idpf_queue **qs,
+					 int num_q);
 int idpf_send_create_vport_msg(struct idpf_adapter *adapter,
 			       struct idpf_vport_max_q *max_q);
 int idpf_check_supported_desc_ids(struct idpf_vport *vport);
