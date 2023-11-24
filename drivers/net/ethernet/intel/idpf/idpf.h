@@ -697,6 +697,47 @@ static inline int idpf_is_queue_model_split(u16 q_model)
 }
 
 /**
+ * idpf_find_rxq - find rxq from q index
+ * @vport: virtual port associated to queue
+ * @q_num: q index used to find queue
+ *
+ * returns pointer to rx queue
+ */
+static inline struct idpf_queue *
+idpf_find_rxq(struct idpf_vport *vport, int q_num)
+{
+	int q_grp, q_idx;
+
+	if (!idpf_is_queue_model_split(vport->rxq_model))
+		return vport->rxq_grps->singleq.rxqs[q_num];
+
+	q_grp = q_num / IDPF_DFLT_SPLITQ_RXQ_PER_GROUP;
+	q_idx = q_num % IDPF_DFLT_SPLITQ_RXQ_PER_GROUP;
+
+	return &vport->rxq_grps[q_grp].splitq.rxq_sets[q_idx]->rxq;
+}
+
+/**
+ * idpf_find_txq - find txq from q index
+ * @vport: virtual port associated to queue
+ * @q_num: q index used to find queue
+ *
+ * returns pointer to tx queue
+ */
+static inline struct idpf_queue *
+idpf_find_txq(struct idpf_vport *vport, int q_num)
+{
+	int q_grp;
+
+	if (!idpf_is_queue_model_split(vport->txq_model))
+		return vport->txqs[q_num];
+
+	q_grp = q_num / IDPF_DFLT_SPLITQ_TXQ_PER_GROUP;
+
+	return vport->txq_grps[q_grp].complq;
+}
+
+/**
  * idpf_xdp_is_prog_ena - check if there is an XDP program on adapter
  * @vport: vport to check
  */
