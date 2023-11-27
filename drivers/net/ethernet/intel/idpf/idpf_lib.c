@@ -1408,6 +1408,15 @@ static int idpf_vport_open(struct idpf_vport *vport, bool alloc_res)
 		goto intr_rel;
 	}
 
+	if (idpf_xdp_is_prog_ena(vport)) {
+		err = idpf_xdp_rxq_info_init_all(vport);
+		if (err) {
+			dev_err(&adapter->pdev->dev, "Failed to initialize XDP info for vport %u, %d\n",
+				vport->vport_id, err);
+			goto intr_deinit;
+		}
+	}
+
 	err = idpf_rx_bufs_init_all(vport);
 	if (err) {
 		dev_err(&adapter->pdev->dev, "Failed to initialize RX buffers for vport %u: %d\n",
@@ -1423,15 +1432,6 @@ static int idpf_vport_open(struct idpf_vport *vport, bool alloc_res)
 	}
 
 	idpf_rx_init_buf_tail(vport);
-
-	if (idpf_xdp_is_prog_ena(vport)) {
-		err = idpf_xdp_rxq_info_init_all(vport);
-		if (err) {
-			dev_err(&adapter->pdev->dev, "Failed to initialize XDP info for vport %u, %d\n",
-				vport->vport_id, err);
-			goto intr_deinit;
-		}
-	}
 
 	err = idpf_send_config_queues_msg(vport);
 	if (err) {
@@ -2533,6 +2533,10 @@ static int idpf_xdp(struct net_device *netdev, struct netdev_bpf *xdp)
 	switch (xdp->command) {
 	case XDP_SETUP_PROG:
 		err = idpf_xdp_setup_prog(vport, xdp->prog, xdp->extack);
+		break;
+	case XDP_SETUP_XSK_POOL:
+		err = idpf_xsk_pool_setup(vport, xdp->xsk.pool,
+					  xdp->xsk.queue_id);
 		break;
 	default:
 		err = -EINVAL;
