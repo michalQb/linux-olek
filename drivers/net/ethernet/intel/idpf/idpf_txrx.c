@@ -163,7 +163,7 @@ static void idpf_tx_buf_rel_all(struct idpf_queue *txq)
  *
  * Free all transmit software resources
  */
-static void idpf_tx_desc_rel(struct idpf_queue *txq, bool bufq)
+void idpf_tx_desc_rel(struct idpf_queue *txq, bool bufq)
 {
 	if (bufq)
 		idpf_tx_buf_rel_all(txq);
@@ -257,7 +257,7 @@ static int idpf_tx_buf_alloc_all(struct idpf_queue *tx_q)
  *
  * Returns 0 on success, negative on failure
  */
-static int idpf_tx_desc_alloc(struct idpf_queue *tx_q, bool bufq)
+int idpf_tx_desc_alloc(struct idpf_queue *tx_q, bool bufq)
 {
 	struct device *dev = tx_q->dev;
 	u32 desc_sz;
@@ -440,7 +440,7 @@ static void idpf_rx_buf_rel_all(struct idpf_queue *rxq)
  *
  * Free a specific rx queue resources
  */
-static void idpf_rx_desc_rel(struct idpf_queue *rxq, bool bufq, s32 q_model)
+void idpf_rx_desc_rel(struct idpf_queue *rxq, bool bufq, s32 q_model)
 {
 	if (!rxq)
 		return;
@@ -858,7 +858,7 @@ int idpf_xdp_rxq_info_init_all(struct idpf_vport *vport)
  *
  * Returns 0 on success, negative on failure
  */
-static int idpf_rx_desc_alloc(struct idpf_queue *rxq, bool bufq, s32 q_model)
+int idpf_rx_desc_alloc(struct idpf_queue *rxq, bool bufq, s32 q_model)
 {
 	struct device *dev = rxq->dev;
 
