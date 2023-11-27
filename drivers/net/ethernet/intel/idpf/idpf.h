@@ -25,6 +25,7 @@ struct idpf_vport_max_q;
 #include "virtchnl2.h"
 #include "idpf_lan_txrx.h"
 #include "idpf_txrx.h"
+#include "idpf_xsk.h"
 #include "idpf_controlq.h"
 
 #define GETMAXVAL(num_bits)		GENMASK((num_bits) - 1, 0)
@@ -479,6 +480,7 @@ struct idpf_vport_user_config_data {
 	u32 num_req_rxq_desc;
 	/* Duplicated in queue structure for performance reasons */
 	struct bpf_prog *xdp_prog;
+	DECLARE_BITMAP(af_xdp_zc_qps, IDPF_LARGE_MAX_Q);
 	DECLARE_BITMAP(user_flags, __IDPF_USER_FLAGS_NBITS);
 	struct list_head mac_filter_list;
 };

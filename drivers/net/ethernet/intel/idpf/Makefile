@@ -15,4 +15,5 @@ idpf-y := \
 	idpf_singleq_txrx.o	\
 	idpf_txrx.o		\
 	idpf_virtchnl.o 	\
-	idpf_vf_dev.o
+	idpf_vf_dev.o		\
+	idpf_xsk.o

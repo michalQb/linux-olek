@@ -783,7 +783,7 @@ static void idpf_xdp_rxbufq_init(struct idpf_queue *q)
  *
  * Returns 0 on success, negative on failure
  */
-static int idpf_xdp_rxq_info_init(struct idpf_queue *rxq, bool splitq)
+int idpf_xdp_rxq_info_init(struct idpf_queue *rxq, bool splitq)
 {
 	struct page_pool *pp;
 	int err;
@@ -804,7 +804,6 @@ static int idpf_xdp_rxq_info_init(struct idpf_queue *rxq, bool splitq)
 
 	err = xdp_rxq_info_reg_mem_model(&rxq->xdp_rxq,
 					 MEM_TYPE_PAGE_POOL, pp);
-
 	rxq->xdpq = rxq->vport->txqs[rxq->idx + rxq->vport->xdp_txq_offset];
 
 	return err;
@@ -819,10 +818,13 @@ static int idpf_xdp_rxq_info_init(struct idpf_queue *rxq, bool splitq)
 int idpf_xdp_rxq_info_init_all(struct idpf_vport *vport)
 {
 	bool splitq = idpf_is_queue_model_split(vport->rxq_model);
+	struct idpf_vport_user_config_data *config_data;
 	struct idpf_rxq_group *rx_qgrp;
+	u32 num_rxq, idx = vport->idx
 	struct idpf_queue *q;
 	int i, j, err;
-	u16 num_rxq;
+
+	config_data = &vport->adapter->vport_config[idx]->user_config;
 
 	for (i = 0; i < vport->num_rxq_grp; i++) {
 		rx_qgrp = &vport->rxq_grps[i];
@@ -839,6 +841,9 @@ int idpf_xdp_rxq_info_init_all(struct idpf_vport *vport)
 			err = idpf_xdp_rxq_info_init(q, splitq);
 			if (err)
 				return err;
+
+			if (test_bit(j, config_data->af_xdp_zc_qps))
+				napi_schedule(q->q_vector->napi);
 		}
 	}
 
