@@ -25,6 +25,7 @@ struct idpf_vport_max_q;
 #include "virtchnl2.h"
 #include "idpf_lan_txrx.h"
 #include "idpf_txrx.h"
+#include "idpf_xsk.h"
 #include "idpf_controlq.h"
 
 #define GETMAXVAL(num_bits)		GENMASK((num_bits) - 1, 0)
@@ -479,6 +480,7 @@ struct idpf_vport_user_config_data {
 	u32 num_req_rxq_desc;
 	/* Duplicated in queue structure for performance reasons */
 	struct bpf_prog *xdp_prog;
+	DECLARE_BITMAP(af_xdp_zc_qps, IDPF_LARGE_MAX_Q);
 	DECLARE_BITMAP(user_flags, __IDPF_USER_FLAGS_NBITS);
 	struct list_head mac_filter_list;
 };
@@ -958,6 +960,17 @@ static inline void idpf_vport_ctrl_unlock(struct net_device *netdev)
 	struct idpf_netdev_priv *np = netdev_priv(netdev);
 
 	mutex_unlock(&np->adapter->vport_ctrl_lock);
+}
+
+/**
+ * idpf_vport_ctrl_is_locked - Check if vport control lock is taken
+ * @netdev: Network interface device structure
+ */
+static inline bool idpf_vport_ctrl_is_locked(struct net_device *netdev)
+{
+	struct idpf_netdev_priv *np = netdev_priv(netdev);
+
+	return mutex_is_locked(&np->adapter->vport_ctrl_lock);
 }
 
 void idpf_statistics_task(struct work_struct *work);
