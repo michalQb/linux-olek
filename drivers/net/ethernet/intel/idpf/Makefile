@@ -19,3 +19,4 @@ idpf-y := \
 idpf-$(CONFIG_IDPF_SINGLEQ)	+= idpf_singleq_txrx.o
 
 idpf-objs			+= xdp.o
+idpf-objs			+= xsk.o
