@@ -519,6 +519,7 @@ union idpf_queue_stats {
  * @size: Length of descriptor ring in bytes
  * @dma: Physical address of ring
  * @desc_ring: Descriptor ring memory
+ * @xsk_pool: Pointer to a description of a buffer pool for AF_XDP socket
  * @tx_max_bufs: Max buffers that can be transmitted with scatter-gather
  * @tx_min_pkt_len: Min supported packet length
  * @num_completions: Only relevant for TX completion queue. It tracks the
@@ -943,6 +944,11 @@ bool idpf_rx_singleq_buf_hw_alloc_all(struct idpf_queue *rxq,
 				      u16 cleaned_count);
 int idpf_tso(struct sk_buff *skb, struct idpf_tx_offload_params *off);
 void idpf_tx_handle_sw_marker(struct idpf_queue *tx_q);
+int idpf_rx_desc_alloc(struct idpf_queue *rxq, bool bufq, s32 q_model);
+void idpf_rx_desc_rel(struct idpf_queue *rxq, bool bufq, s32 q_model);
+int idpf_tx_desc_alloc(struct idpf_queue *tx_q, bool bufq);
+void idpf_tx_desc_rel(struct idpf_queue *txq, bool bufq);
+int idpf_rx_bufs_init(struct idpf_queue *rxbufq, enum libie_rx_buf_type type);
 
 /**
  * idpf_xdpq_update_tail - Updates the XDP Tx queue tail register

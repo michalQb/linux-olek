@@ -102,7 +102,7 @@ static void idpf_tx_buf_rel_all(struct idpf_queue *txq)
  *
  * Free all transmit software resources
  */
-static void idpf_tx_desc_rel(struct idpf_queue *txq, bool bufq)
+void idpf_tx_desc_rel(struct idpf_queue *txq, bool bufq)
 {
 	if (bufq)
 		idpf_tx_buf_rel_all(txq);
@@ -199,7 +199,7 @@ static int idpf_tx_buf_alloc_all(struct idpf_queue *tx_q)
  *
  * Returns 0 on success, negative on failure
  */
-static int idpf_tx_desc_alloc(struct idpf_queue *tx_q, bool bufq)
+int idpf_tx_desc_alloc(struct idpf_queue *tx_q, bool bufq)
 {
 	struct device *dev = tx_q->dev;
 	u32 desc_sz;
@@ -390,7 +390,7 @@ static void idpf_rx_buf_rel_all(struct idpf_queue *rxq)
  *
  * Free a specific rx queue resources
  */
-static void idpf_rx_desc_rel(struct idpf_queue *rxq, bool bufq, s32 q_model)
+void idpf_rx_desc_rel(struct idpf_queue *rxq, bool bufq, s32 q_model)
 {
 	if (!rxq)
 		return;
@@ -654,8 +654,7 @@ rx_buf_alloc_all_out:
  *
  * Returns 0 on success, negative on failure
  */
-static int idpf_rx_bufs_init(struct idpf_queue *rxbufq,
-			     enum libie_rx_buf_type type)
+int idpf_rx_bufs_init(struct idpf_queue *rxbufq, enum libie_rx_buf_type type)
 {
 	struct libie_buf_queue bq = {
 		.truesize	= rxbufq->truesize,
@@ -735,7 +734,7 @@ int idpf_rx_bufs_init_all(struct idpf_vport *vport)
  *
  * Returns 0 on success, negative on failure
  */
-static int idpf_rx_desc_alloc(struct idpf_queue *rxq, bool bufq, s32 q_model)
+int idpf_rx_desc_alloc(struct idpf_queue *rxq, bool bufq, s32 q_model)
 {
 	struct device *dev = rxq->dev;
 
@@ -1875,7 +1874,8 @@ static void idpf_tx_finalize_complq(struct idpf_queue *complq, int ntc,
 
 		dont_wake = !complq_ok || IDPF_TX_BUF_RSV_LOW(tx_q) ||
 			    np->state != __IDPF_VPORT_UP ||
-			    !netif_carrier_ok(tx_q->vport->netdev);
+			    !netif_carrier_ok(tx_q->vport->netdev) ||
+			    idpf_vport_ctrl_is_locked(tx_q->vport->netdev);
 		/* Check if the TXQ needs to and can be restarted */
 		__netif_txq_completed_wake(nq, tx_q->cleaned_pkts, tx_q->cleaned_bytes,
 					   IDPF_DESC_UNUSED(tx_q), IDPF_TX_WAKE_THRESH,

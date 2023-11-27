@@ -3,6 +3,7 @@
 
 #include "idpf.h"
 #include "idpf_xdp.h"
+#include "idpf_xsk.h"
 
 static int idpf_rxq_for_each(const struct idpf_vport *vport,
 			     int (*fn)(struct idpf_queue *rxq, void *arg),
@@ -470,6 +471,10 @@ int idpf_xdp(struct net_device *netdev, struct netdev_bpf *xdp)
 	switch (xdp->command) {
 	case XDP_SETUP_PROG:
 		err = idpf_xdp_setup_prog(vport, xdp->prog, xdp->extack);
+		break;
+	case XDP_SETUP_XSK_POOL:
+		err = idpf_xsk_pool_setup(vport, xdp->xsk.pool,
+					  xdp->xsk.queue_id);
 		break;
 	default:
 		err = -EINVAL;

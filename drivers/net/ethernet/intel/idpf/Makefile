@@ -18,3 +18,4 @@ idpf-y := \
 	idpf_vf_dev.o
 
 idpf-objs	+= idpf_xdp.o
+idpf-objs	+= idpf_xsk.o
