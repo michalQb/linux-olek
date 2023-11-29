@@ -623,7 +623,6 @@ struct idpf_queue {
 		struct idpf_txq_group *txq_grp;
 		struct idpf_rxq_group *rxq_grp;
 	};
-	u16 idx;
 	void __iomem *tail;
 	union {
 		struct idpf_tx_buf *tx_buf;
@@ -634,7 +633,8 @@ struct idpf_queue {
 		} rx_buf;
 	};
 	struct page_pool *pp;
-	struct sk_buff *skb;
+	void *desc_ring;
+	u16 idx;
 	u16 q_type;
 	u32 q_id;
 	u16 desc_count;
@@ -644,38 +644,57 @@ struct idpf_queue {
 	u16 next_to_alloc;
 	DECLARE_BITMAP(flags, __IDPF_Q_FLAGS_NBITS);
 
+	struct idpf_q_vector *q_vector;
+
 	union idpf_queue_stats q_stats;
 	struct u64_stats_sync stats_sync;
 
-	u32 cleaned_bytes;
-	u16 cleaned_pkts;
+	union {
+		/* Rx */
+		struct {
+			u64 rxdids;
+			u8 rx_buffer_low_watermark;
+			bool rx_hsplit_en:1;
+			u16 rx_hbuf_size;
+			u16 rx_buf_size;
+			u16 rx_max_pkt_size;
+			u16 rx_buf_stride;
+		};
+		/* Tx */
+		struct {
+			u32 cleaned_bytes;
+			u16 cleaned_pkts;
 
-	bool rx_hsplit_en;
-	u16 rx_hbuf_size;
-	u16 rx_buf_size;
-	u16 rx_max_pkt_size;
-	u16 rx_buf_stride;
-	u8 rx_buffer_low_watermark;
-	u64 rxdids;
-	struct idpf_q_vector *q_vector;
-	unsigned int size;
+			u16 tx_max_bufs;
+			u8 tx_min_pkt_len;
+
+			u32 num_completions;
+
+			struct idpf_buf_lifo buf_stack;
+		};
+	};
+
+	union {
+		/* Rx */
+		struct {
+			struct sk_buff *skb;
+		};
+		/* Tx */
+		struct {
+			u16 compl_tag_bufid_m;
+			u16 compl_tag_gen_s;
+
+			u16 compl_tag_cur_gen;
+			u16 compl_tag_gen_max;
+
+			struct idpf_txq_hash *sched_buf_hash;
+		};
+	};
+
+	/* Slowpath */
+
 	dma_addr_t dma;
-	void *desc_ring;
-
-	u16 tx_max_bufs;
-	u8 tx_min_pkt_len;
-
-	u32 num_completions;
-
-	struct idpf_buf_lifo buf_stack;
-
-	u16 compl_tag_bufid_m;
-	u16 compl_tag_gen_s;
-
-	u16 compl_tag_cur_gen;
-	u16 compl_tag_gen_max;
-
-	DECLARE_HASHTABLE(sched_buf_hash, 12);
+	unsigned int size;
 } ____cacheline_internodealigned_in_smp;
 
 /**
@@ -768,6 +787,10 @@ struct idpf_rxq_group {
 	};
 };
 
+struct idpf_txq_hash {
+	DECLARE_HASHTABLE(hash, 12);
+};
+
 /**
  * struct idpf_txq_group
  * @vport: Vport back pointer
@@ -787,6 +810,7 @@ struct idpf_txq_group {
 
 	u16 num_txq;
 	struct idpf_queue *txqs[IDPF_LARGE_MAX_Q];
+	struct idpf_txq_hash *hashes;
 
 	struct idpf_queue *complq;
 
