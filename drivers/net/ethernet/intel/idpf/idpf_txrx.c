@@ -179,6 +179,9 @@ static int idpf_tx_buf_alloc_all(struct idpf_queue *tx_q)
 	for (i = 0; i < tx_q->desc_count; i++)
 		tx_q->tx_buf[i].compl_tag = IDPF_SPLITQ_TX_INVAL_COMPL_TAG;
 
+	if (!test_bit(__IDPF_Q_FLOW_SCH_EN, tx_q->flags))
+		return 0;
+
 	/* Initialize tx buf stack for out-of-order completions if
 	 * flow scheduling offload is enabled
 	 */
@@ -801,10 +804,15 @@ err_out:
  */
 static void idpf_txq_group_rel(struct idpf_vport *vport)
 {
+	bool split, flow_sch_en;
 	int i, j;
 
 	if (!vport->txq_grps)
 		return;
+
+	split = idpf_is_queue_model_split(vport->txq_model);
+	flow_sch_en = !idpf_is_cap_ena(vport->adapter, IDPF_OTHER_CAPS,
+				       VIRTCHNL2_CAP_SPLITQ_QSCHED);
 
 	for (i = 0; i < vport->num_txq_grp; i++) {
 		struct idpf_txq_group *txq_grp = &vport->txq_grps[i];
@@ -813,8 +821,15 @@ static void idpf_txq_group_rel(struct idpf_vport *vport)
 			kfree(txq_grp->txqs[j]);
 			txq_grp->txqs[j] = NULL;
 		}
+
+		if (!split)
+			continue;
+
 		kfree(txq_grp->complq);
 		txq_grp->complq = NULL;
+
+		if (flow_sch_en)
+			kfree(txq_grp->hashes);
 	}
 	kfree(vport->txq_grps);
 	vport->txq_grps = NULL;
@@ -1157,20 +1172,22 @@ static void idpf_rxq_set_descids(struct idpf_vport *vport, struct idpf_queue *q)
  */
 static int idpf_txq_group_alloc(struct idpf_vport *vport, u16 num_txq)
 {
-	bool flow_sch_en;
-	int err, i;
+	bool split, flow_sch_en;
+	int i;
 
 	vport->txq_grps = kcalloc(vport->num_txq_grp,
 				  sizeof(*vport->txq_grps), GFP_KERNEL);
 	if (!vport->txq_grps)
 		return -ENOMEM;
 
+	split = idpf_is_queue_model_split(vport->txq_model);
 	flow_sch_en = !idpf_is_cap_ena(vport->adapter, IDPF_OTHER_CAPS,
 				       VIRTCHNL2_CAP_SPLITQ_QSCHED);
 
 	for (i = 0; i < vport->num_txq_grp; i++) {
 		struct idpf_txq_group *tx_qgrp = &vport->txq_grps[i];
 		struct idpf_adapter *adapter = vport->adapter;
+		struct idpf_txq_hash *hashes;
 		int j;
 
 		tx_qgrp->vport = vport;
@@ -1179,10 +1196,16 @@ static int idpf_txq_group_alloc(struct idpf_vport *vport, u16 num_txq)
 		for (j = 0; j < tx_qgrp->num_txq; j++) {
 			tx_qgrp->txqs[j] = kzalloc(sizeof(*tx_qgrp->txqs[j]),
 						   GFP_KERNEL);
-			if (!tx_qgrp->txqs[j]) {
-				err = -ENOMEM;
+			if (!tx_qgrp->txqs[j])
 				goto err_alloc;
-			}
+		}
+
+		if (split && flow_sch_en) {
+			hashes = kcalloc(num_txq, sizeof(*hashes), GFP_KERNEL);
+			if (!hashes)
+				goto err_alloc;
+
+			tx_qgrp->hashes = hashes;
 		}
 
 		for (j = 0; j < tx_qgrp->num_txq; j++) {
@@ -1194,22 +1217,26 @@ static int idpf_txq_group_alloc(struct idpf_vport *vport, u16 num_txq)
 			q->tx_min_pkt_len = idpf_get_min_tx_pkt_len(adapter);
 			q->vport = vport;
 			q->txq_grp = tx_qgrp;
-			hash_init(q->sched_buf_hash);
 
-			if (flow_sch_en)
-				set_bit(__IDPF_Q_FLOW_SCH_EN, q->flags);
+			if (!flow_sch_en)
+				continue;
+
+			if (split) {
+				q->sched_buf_hash = &hashes[j];
+				hash_init(q->sched_buf_hash->hash);
+			}
+
+			set_bit(__IDPF_Q_FLOW_SCH_EN, q->flags);
 		}
 
-		if (!idpf_is_queue_model_split(vport->txq_model))
+		if (!split)
 			continue;
 
 		tx_qgrp->complq = kcalloc(IDPF_COMPLQ_PER_GROUP,
 					  sizeof(*tx_qgrp->complq),
 					  GFP_KERNEL);
-		if (!tx_qgrp->complq) {
-			err = -ENOMEM;
+		if (!tx_qgrp->complq)
 			goto err_alloc;
-		}
 
 		tx_qgrp->complq->dev = &adapter->pdev->dev;
 		tx_qgrp->complq->desc_count = vport->complq_desc_count;
@@ -1225,7 +1252,7 @@ static int idpf_txq_group_alloc(struct idpf_vport *vport, u16 num_txq)
 err_alloc:
 	idpf_txq_group_rel(vport);
 
-	return err;
+	return -ENOMEM;
 }
 
 /**
@@ -1512,7 +1539,7 @@ static void idpf_tx_clean_stashed_bufs(struct idpf_queue *txq, u16 compl_tag,
 	struct hlist_node *tmp_buf;
 
 	/* Buffer completion */
-	hash_for_each_possible_safe(txq->sched_buf_hash, stash, tmp_buf,
+	hash_for_each_possible_safe(txq->sched_buf_hash->hash, stash, tmp_buf,
 				    hlist, compl_tag) {
 		if (unlikely(stash->buf.compl_tag != (int)compl_tag))
 			continue;
@@ -1567,7 +1594,8 @@ static int idpf_stash_flow_sch_buffers(struct idpf_queue *txq,
 	stash->buf.compl_tag = tx_buf->compl_tag;
 
 	/* Add buffer to buf_hash table to be freed later */
-	hash_add(txq->sched_buf_hash, &stash->hlist, stash->buf.compl_tag);
+	hash_add(txq->sched_buf_hash->hash, &stash->hlist,
+		 stash->buf.compl_tag);
 
 	memset(tx_buf, 0, sizeof(struct idpf_tx_buf));
 
