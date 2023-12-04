@@ -6,14 +6,14 @@
 /* Rx buffer management */
 
 /**
- * libie_rx_hw_len - get the actual buffer size to be passed to HW
+ * libie_rx_hw_len_mtu - get the actual buffer size to be passed to HW
  * @pp: &page_pool_params of the netdev to calculate the size for
  *
  * Return: HW-writeable length per one buffer to pass it to the HW accounting:
  * MTU the @dev has, HW required alignment, minimum and maximum allowed values,
  * and system's page size.
  */
-static u32 libie_rx_hw_len(const struct page_pool_params *pp)
+static u32 libie_rx_hw_len_mtu(const struct page_pool_params *pp)
 {
 	u32 len;
 
@@ -22,6 +22,98 @@ static u32 libie_rx_hw_len(const struct page_pool_params *pp)
 	len = clamp(len, LIBIE_MIN_RX_BUF_LEN, LIBIE_RX_BUF_LEN(pp->offset));
 
 	return len;
+}
+
+/**
+ * libie_rx_hw_len_truesize - get the short buffer size to be passed to HW
+ * @pp: &page_pool_params of the netdev to calculate the size for
+ * @truesize: desired truesize for the buffers
+ *
+ * Return: HW-writeable length per one buffer to pass it to the HW ignoring the
+ * MTU and closest to the passed truesize. Can be used for "short" buffer
+ * queues to fragment pages more efficiently.
+ */
+static u32 libie_rx_hw_len_truesize(const struct page_pool_params *pp,
+				    u32 truesize)
+{
+	u32 min, len;
+
+	min = SKB_HEAD_ALIGN(pp->offset + LIBIE_RX_BUF_LEN_ALIGN);
+	truesize = clamp(roundup_pow_of_two(truesize), roundup_pow_of_two(min),
+			 PAGE_SIZE << LIBIE_RX_PAGE_ORDER);
+
+	len = SKB_WITH_OVERHEAD(truesize - pp->offset);
+	len = ALIGN_DOWN(len, LIBIE_RX_BUF_LEN_ALIGN);
+	len = clamp(len, LIBIE_MIN_RX_BUF_LEN, LIBIE_RX_BUF_LEN(pp->offset));
+
+	return len;
+}
+
+static void libie_rx_page_pool_params(struct libie_buf_queue *bq,
+				      struct page_pool_params *pp)
+{
+	pp->offset = LIBIE_SKB_HEADROOM;
+	/* HW-writeable / syncable length per one page */
+	pp->max_len = LIBIE_RX_PAGE_LEN(pp->offset);
+
+	/* HW-writeable length per buffer */
+	switch (bq->type) {
+	case LIBIE_RX_BUF_MTU:
+		bq->rx_buf_len = libie_rx_hw_len_mtu(pp);
+		break;
+	case LIBIE_RX_BUF_SHORT:
+		bq->rx_buf_len = libie_rx_hw_len_truesize(pp, bq->truesize);
+		break;
+	case LIBIE_RX_BUF_HDR:
+		bq->rx_buf_len = ALIGN(LIBIE_MAX_HEAD, LIBIE_RX_BUF_LEN_ALIGN);
+		break;
+	default:
+		break;
+	}
+
+	/* Buffer size to allocate */
+	bq->truesize = roundup_pow_of_two(SKB_HEAD_ALIGN(pp->offset +
+							 bq->rx_buf_len));
+}
+
+/**
+ * libie_rx_page_pool_params_zc - calculate params without the stack overhead
+ * @bq: buffer queue to calculate the size for
+ * @pp: &page_pool_params of the netdev
+ *
+ * Adjusts the PP params to exclude the stack overhead and sets both the buffer
+ * lengh and the truesize, which are equal for the data buffers. Note that this
+ * requires separate header buffers to be always active and account the
+ * overhead.
+ * With the MTU == ``PAGE_SIZE``, this allows the kernel to enable the zerocopy
+ * mode.
+ */
+static bool libie_rx_page_pool_params_zc(struct libie_buf_queue *bq,
+					 struct page_pool_params *pp)
+{
+	u32 mtu, max;
+
+	pp->offset = 0;
+	pp->max_len = PAGE_SIZE << LIBIE_RX_PAGE_ORDER;
+
+	switch (bq->type) {
+	case LIBIE_RX_BUF_MTU:
+		mtu = READ_ONCE(pp->netdev->mtu);
+		break;
+	case LIBIE_RX_BUF_SHORT:
+		mtu = bq->truesize;
+		break;
+	default:
+		return false;
+	}
+
+	max = min(pp->max_len, rounddown_pow_of_two(LIBIE_MAX_RX_BUF_LEN));
+
+	bq->rx_buf_len = clamp(roundup_pow_of_two(mtu), LIBIE_MIN_RX_BUF_LEN,
+			       max);
+	bq->truesize = bq->rx_buf_len;
+
+	return true;
 }
 
 /**
@@ -43,17 +135,12 @@ int libie_rx_page_pool_create(struct libie_buf_queue *bq,
 		.netdev		= napi->dev,
 		.napi		= napi,
 		.dma_dir	= DMA_FROM_DEVICE,
-		.offset		= LIBIE_SKB_HEADROOM,
 	};
 
-	/* HW-writeable / syncable length per one page */
-	pp.max_len = LIBIE_RX_PAGE_LEN(pp.offset);
-
-	/* HW-writeable length per buffer */
-	bq->rx_buf_len = libie_rx_hw_len(&pp);
-	/* Buffer size to allocate */
-	bq->truesize = roundup_pow_of_two(SKB_HEAD_ALIGN(pp.offset +
-							 bq->rx_buf_len));
+	if (!bq->hsplit)
+		libie_rx_page_pool_params(bq, &pp);
+	else if (!libie_rx_page_pool_params_zc(bq, &pp))
+		return -EINVAL;
 
 	bq->pp = page_pool_create(&pp);
 

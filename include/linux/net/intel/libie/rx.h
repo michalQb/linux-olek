@@ -19,6 +19,8 @@
 #define LIBIE_MAX_HEADROOM	LIBIE_SKB_HEADROOM
 /* Link layer / L2 overhead: Ethernet, 2 VLAN tags (C + S), FCS */
 #define LIBIE_RX_LL_LEN		(ETH_HLEN + 2 * VLAN_HLEN + ETH_FCS_LEN)
+/* Maximum supported L2-L4 header length */
+#define LIBIE_MAX_HEAD		256
 
 /* Always use order-0 pages */
 #define LIBIE_RX_PAGE_ORDER	0
@@ -65,12 +67,26 @@ struct libie_rx_buffer {
 } __aligned_largest;
 
 /**
+ * enum libie_rx_buf_type - enum representing types of Rx buffers
+ * @LIBIE_RX_BUF_MTU: buffer size is determined by MTU
+ * @LIBIE_RX_BUF_SHORT: buffer size is smaller than MTU, for short frames
+ * @LIBIE_RX_BUF_HDR: buffer size is ```LIBIE_MAX_HEAD```-sized, for headers
+ */
+enum libie_rx_buf_type {
+	LIBIE_RX_BUF_MTU	= 0U,
+	LIBIE_RX_BUF_SHORT,
+	LIBIE_RX_BUF_HDR,
+};
+
+/**
  * struct libie_buf_queue - structure representing a buffer queue
  * @pp: &page_pool for buffer management
  * @rx_bi: array of Rx buffers
  * @truesize: size to allocate per buffer, w/overhead
  * @count: number of descriptors/buffers the queue has
  * @rx_buf_len: HW-writeable length per each buffer
+ * @type: type of the buffers this queue has
+ * @hsplit: flag whether header split is enabled
  */
 struct libie_buf_queue {
 	struct page_pool	*pp;
@@ -81,6 +97,9 @@ struct libie_buf_queue {
 
 	/* Cold fields */
 	u32			rx_buf_len;
+	enum libie_rx_buf_type	type:2;
+
+	bool			hsplit:1;
 };
 
 int libie_rx_page_pool_create(struct libie_buf_queue *bq,
