@@ -2079,7 +2079,8 @@ static void idpf_tx_finalize_complq(struct idpf_queue *complq, int ntc,
 
 		dont_wake = !complq_ok || IDPF_TX_BUF_RSV_LOW(tx_q) ||
 			    np->state != __IDPF_VPORT_UP ||
-			    !netif_carrier_ok(tx_q->vport->netdev);
+			    !netif_carrier_ok(tx_q->vport->netdev) ||
+			    idpf_vport_ctrl_is_locked(tx_q->vport->netdev);
 		/* Check if the TXQ needs to and can be restarted */
 		__netif_txq_completed_wake(nq, tx_q->cleaned_pkts, tx_q->cleaned_bytes,
 					   IDPF_DESC_UNUSED(tx_q), IDPF_TX_WAKE_THRESH,

@@ -70,7 +70,6 @@ idpf_qp_cfg_qs(struct idpf_vport *vport, struct idpf_queue **qs, int num_qs)
 
 	for (i = 0; i < num_qs; i++) {
 		struct idpf_queue *q = qs[i];
-		int desc_cnt;
 
 		switch (q->q_type) {
 		case VIRTCHNL2_QUEUE_TYPE_RX:
@@ -80,13 +79,15 @@ idpf_qp_cfg_qs(struct idpf_vport *vport, struct idpf_queue **qs, int num_qs)
 				netdev_err(vport->netdev, "Could not allocate buffer for RX queue.\n");
 				break;
 			}
-			err = idpf_xdp_rxq_info_init(q, splitq);
-			if (err)
-				netdev_err(vport->netdev, "Could not initialize XDP RX queue.\n");
+			if (!splitq)
+				err = idpf_rx_bufs_init(q);
 			break;
 		case VIRTCHNL2_QUEUE_TYPE_RX_BUFFER:
 			idpf_set_xsk_pool(q);
 			err = idpf_rx_desc_alloc(q, true, vport->rxq_model);
+			if (err)
+				break;
+			err = idpf_rx_bufs_init(q);
 			break;
 		case VIRTCHNL2_QUEUE_TYPE_TX:
 			err = idpf_tx_desc_alloc(q, true);
@@ -368,8 +369,6 @@ static int idpf_qp_dis(struct idpf_vport *vport, struct idpf_q_vector *q_vector,
 {
 	int err = 0;
 
-	idpf_qvec_toggle_napi(vport, q_vector, false);
-	idpf_qvec_dis_irq(q_vector);
 	netif_tx_stop_queue(netdev_get_tx_queue(vport->netdev, q_idx));
 
 	err = idpf_send_disable_vport_msg(vport);
@@ -384,15 +383,14 @@ static int idpf_qp_dis(struct idpf_vport *vport, struct idpf_q_vector *q_vector,
 			   q_idx, err);
 		goto err_send_msg;
 	}
-
+	idpf_qvec_toggle_napi(vport, q_vector, false);
+	idpf_qvec_dis_irq(q_vector);
 	idpf_qp_clean_qs(vport, qs, num_qs);
 
 	return 0;
 
 err_send_msg:
 	netif_tx_start_queue(netdev_get_tx_queue(vport->netdev, q_idx));
-	idpf_qvec_ena_irq(q_vector);
-	idpf_qvec_toggle_napi(vport, q_vector, true);
 
 	return err;
 }
@@ -419,6 +417,9 @@ static int idpf_qp_ena(struct idpf_vport *vport, struct idpf_q_vector *q_vector,
 		return err;
 	}
 
+	idpf_qvec_toggle_napi(vport, q_vector, true);
+	idpf_qvec_ena_irq(q_vector);
+
 	err = idpf_send_config_selected_queues_msg(vport, qs, num_qs);
 	if (err) {
 		netdev_err(vport->netdev, "Could not configure queues for index %d, error = %d\n",
@@ -441,8 +442,6 @@ static int idpf_qp_ena(struct idpf_vport *vport, struct idpf_q_vector *q_vector,
 	}
 
 	netif_tx_start_queue(netdev_get_tx_queue(vport->netdev, q_idx));
-	idpf_qvec_ena_irq(q_vector);
-	idpf_qvec_toggle_napi(vport, q_vector, true);
 
 	return 0;
 }
@@ -508,7 +507,7 @@ static int idpf_xsk_pool_enable(struct idpf_vport *vport,
  * Returns 0 on success, negative on failure
  */
 int idpf_xsk_pool_setup(struct idpf_vport *vport, struct xsk_buff_pool *pool,
-			u16 qid)
+			u32 qid)
 {
 	struct idpf_queue *rxq = idpf_find_rxq(vport, qid);
 	struct idpf_q_vector *q_vector = rxq->q_vector;
