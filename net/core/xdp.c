@@ -609,54 +609,81 @@ int xdp_alloc_skb_bulk(void **skbs, int n_skb, gfp_t gfp)
 }
 EXPORT_SYMBOL_GPL(xdp_alloc_skb_bulk);
 
+struct sk_buff *__xdp_build_skb_from_buff(struct sk_buff *skb,
+					  const struct xdp_buff *xdp)
+{
+	const struct xdp_rxq_info *rxq = xdp->rxq;
+	const struct skb_shared_info *sinfo;
+	u32 nr_frags = 0;
+
+	/* xdp frags frame */
+	if (unlikely(xdp_buff_has_frags(xdp))) {
+		sinfo = xdp_get_shared_info_from_buff(xdp);
+		nr_frags = sinfo->nr_frags;
+	}
+
+	if (!skb) {
+		skb = napi_build_skb(xdp->data_hard_start, xdp->frame_sz);
+		if (unlikely(!skb))
+			return NULL;
+	} else {
+		/* build_skb_around() can return NULL only when !skb, which
+		 * is impossible here.
+		 */
+		build_skb_around(skb, xdp->data_hard_start, xdp->frame_sz);
+	}
+
+	skb_reserve(skb, xdp->data - xdp->data_hard_start);
+	__skb_put(skb, xdp->data_end - xdp->data);
+	if (xdp->data > xdp->data_meta)
+		skb_metadata_set(skb, xdp->data - xdp->data_meta);
+
+	if (rxq->mem.type == MEM_TYPE_PAGE_POOL)
+		skb_mark_for_recycle(skb);
+
+	/* __xdp_rxq_info_reg() sets these two together */
+	if (rxq->reg_state == REG_STATE_REGISTERED)
+		skb_record_rx_queue(skb, rxq->queue_index);
+
+	if (unlikely(nr_frags)) {
+		u32 truesize = sinfo->xdp_frags_truesize ? :
+			       nr_frags * xdp->frame_sz;
+
+		xdp_update_skb_shared_info(skb, nr_frags,
+					   sinfo->xdp_frags_size, truesize,
+					   xdp_buff_is_frag_pfmemalloc(xdp));
+	}
+
+	/* Essential SKB info: protocol and skb->dev */
+	skb->protocol = eth_type_trans(skb, rxq->dev);
+
+	return skb;
+}
+EXPORT_SYMBOL_GPL(__xdp_build_skb_from_buff);
+
 struct sk_buff *__xdp_build_skb_from_frame(struct xdp_frame *xdpf,
 					   struct sk_buff *skb,
 					   struct net_device *dev)
 {
-	struct skb_shared_info *sinfo = xdp_get_shared_info_from_frame(xdpf);
-	unsigned int headroom, frame_size;
-	void *hard_start;
-	u8 nr_frags;
+	struct xdp_rxq_info rxq = {
+		.dev		= dev,
+		.mem		= xdpf->mem,
+	};
+	struct xdp_buff xdp;
 
-	/* xdp frags frame */
-	if (unlikely(xdp_frame_has_frags(xdpf)))
-		nr_frags = sinfo->nr_frags;
-
-	/* Part of headroom was reserved to xdpf */
-	headroom = sizeof(*xdpf) + xdpf->headroom;
-
-	/* Memory size backing xdp_frame data already have reserved
-	 * room for build_skb to place skb_shared_info in tailroom.
-	 */
-	frame_size = xdpf->frame_sz;
-
-	hard_start = xdpf->data - headroom;
-	skb = build_skb_around(skb, hard_start, frame_size);
+	/* Check early instead of delegating it to build_skb_around() */
 	if (unlikely(!skb))
 		return NULL;
 
-	skb_reserve(skb, headroom);
-	__skb_put(skb, xdpf->len);
-	if (xdpf->metasize)
-		skb_metadata_set(skb, xdpf->metasize);
-
-	if (unlikely(xdp_frame_has_frags(xdpf)))
-		xdp_update_skb_shared_info(skb, nr_frags,
-					   sinfo->xdp_frags_size,
-					   nr_frags * xdpf->frame_sz,
-					   xdp_frame_is_frag_pfmemalloc(xdpf));
-
-	/* Essential SKB info: protocol and skb->dev */
-	skb->protocol = eth_type_trans(skb, dev);
+	xdp.rxq = &rxq;
+	xdp_convert_frame_to_buff(xdpf, &xdp);
+	__xdp_build_skb_from_buff(skb, &xdp);
 
 	/* Optional SKB info, currently missing:
 	 * - HW checksum info		(skb->ip_summed)
 	 * - HW RX hash			(skb_set_hash)
 	 * - RX ring dev queue index	(skb_record_rx_queue)
 	 */
-
-	if (xdpf->mem.type == MEM_TYPE_PAGE_POOL)
-		skb_mark_for_recycle(skb);
 
 	/* Allow SKB to reuse area used by xdp_frame */
 	xdp_scrub_frame(xdpf);
