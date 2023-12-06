@@ -395,9 +395,9 @@ static void idpf_rx_desc_rel(struct idpf_queue *rxq, bool bufq, s32 q_model)
 	if (!rxq)
 		return;
 
-	if (rxq->skb) {
-		dev_kfree_skb_any(rxq->skb);
-		rxq->skb = NULL;
+	if (rxq->xdp.data) {
+		xdp_return_buff(&rxq->xdp);
+		rxq->xdp.data = NULL;
 	}
 
 	if (bufq || !idpf_is_queue_model_split(q_model))
@@ -2980,8 +2980,6 @@ static int idpf_rx_process_skb_fields(struct idpf_queue *rxq,
 	/* process RSS/hash */
 	idpf_rx_hash(rxq, skb, rx_desc, parsed);
 
-	skb->protocol = eth_type_trans(skb, rxq->vport->netdev);
-
 	if (le16_get_bits(rx_desc->hdrlen_flags,
 			  VIRTCHNL2_RX_FLEX_DESC_ADV_RSC_M))
 		return idpf_rx_rsc(rxq, skb, rx_desc, parsed);
@@ -2989,57 +2987,7 @@ static int idpf_rx_process_skb_fields(struct idpf_queue *rxq,
 	idpf_rx_splitq_extract_csum_bits(rx_desc, &csum_bits);
 	idpf_rx_csum(rxq, skb, csum_bits, parsed);
 
-	skb_record_rx_queue(skb, rxq->idx);
-
 	return 0;
-}
-
-/**
- * idpf_rx_add_frag - Add contents of Rx buffer to sk_buff as a frag
- * @rx_buf: buffer containing page to add
- * @skb: sk_buff to place the data into
- * @size: packet length from rx_desc
- *
- * This function will add the data contained in rx_buf->page to the skb.
- * It will just attach the page as a frag to the skb.
- * The function will then update the page offset.
- */
-void idpf_rx_add_frag(struct idpf_rx_buf *rx_buf, struct sk_buff *skb,
-		      unsigned int size)
-{
-	u32 hr = rx_buf->page->pp->p.offset;
-
-	skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, rx_buf->page,
-			rx_buf->offset + hr, size, rx_buf->truesize);
-}
-
-/**
- * idpf_rx_build_skb - Allocate skb and populate it from header buffer
- * @buf: Rx buffer to pull data from
- * @size: the length of the packet
- *
- * This function allocates an skb. It then populates it with the page data from
- * the current receive descriptor, taking care to set up the skb correctly.
- */
-struct sk_buff *idpf_rx_build_skb(const struct libie_rx_buffer *buf, u32 size)
-{
-	u32 hr = buf->page->pp->p.offset;
-	struct sk_buff *skb;
-	void *va;
-
-	va = page_address(buf->page) + buf->offset;
-	net_prefetch(va + hr);
-
-	skb = napi_build_skb(va, buf->truesize);
-	if (unlikely(!skb))
-		return NULL;
-
-	skb_mark_for_recycle(skb);
-
-	skb_reserve(skb, hr);
-	__skb_put(skb, size);
-
-	return skb;
 }
 
 static u32 idpf_rx_hsplit_wa(struct libie_rx_buffer *hdr,
@@ -3105,8 +3053,10 @@ static int idpf_rx_splitq_clean(struct idpf_queue *rxq, int budget)
 {
 	int total_rx_bytes = 0, total_rx_pkts = 0;
 	struct idpf_queue *rx_bufq = NULL;
-	struct sk_buff *skb = rxq->skb;
 	u16 ntc = rxq->next_to_clean;
+	struct xdp_buff xdp;
+
+	libie_xdp_init_buff(&xdp, &rxq->xdp, &rxq->xdp_rxq);
 
 	/* Process Rx packets bounded by budget */
 	while (likely(total_rx_pkts < budget)) {
@@ -3117,6 +3067,7 @@ static int idpf_rx_splitq_clean(struct idpf_queue *rxq, int budget)
 		unsigned int pkt_len = 0;
 		unsigned int hdr_len = 0;
 		u16 gen_id, buf_id = 0;
+		struct sk_buff *skb;
 		int bufq_id;
 		 /* Header buffer overflow only valid for header split */
 		bool hbo;
@@ -3184,7 +3135,7 @@ static int idpf_rx_splitq_clean(struct idpf_queue *rxq, int budget)
 
 		hdr = &rx_bufq->rx_buf.hdr_buf[buf_id];
 
-		if (unlikely(!hdr_len && !skb)) {
+		if (unlikely(!hdr_len && !xdp.data)) {
 			hdr_len = idpf_rx_hsplit_wa(hdr, rx_buf, pkt_len);
 			pkt_len -= hdr_len;
 
@@ -3193,11 +3144,7 @@ static int idpf_rx_splitq_clean(struct idpf_queue *rxq, int budget)
 			u64_stats_update_end(&rxq->stats_sync);
 		}
 
-		if (libie_rx_sync_for_cpu(hdr, hdr_len)) {
-			skb = idpf_rx_build_skb(hdr, hdr_len);
-			if (!skb)
-				break;
-
+		if (libie_xdp_process_buff(&xdp, hdr, hdr_len)) {
 			u64_stats_update_begin(&rxq->stats_sync);
 			u64_stats_inc(&rxq->q_stats.rx.hsplit_pkts);
 			u64_stats_update_end(&rxq->stats_sync);
@@ -3206,55 +3153,42 @@ static int idpf_rx_splitq_clean(struct idpf_queue *rxq, int budget)
 		hdr->page = NULL;
 
 payload:
-		if (!libie_rx_sync_for_cpu(rx_buf, pkt_len))
-			goto skip_data;
-
-		if (skb)
-			idpf_rx_add_frag(rx_buf, skb, pkt_len);
-		else
-			skb = idpf_rx_build_skb(rx_buf, pkt_len);
-
-		/* exit if we failed to retrieve a buffer */
-		if (!skb)
-			break;
-
-skip_data:
+		libie_xdp_process_buff(&xdp, rx_buf, pkt_len);
 		rx_buf->page = NULL;
 
 		idpf_rx_post_buf_refill(refillq, buf_id);
 		IDPF_RX_BUMP_NTC(rxq, ntc);
 
 		/* skip if it is non EOP desc */
-		if (!idpf_rx_splitq_is_eop(rx_desc))
+		if (!xdp.data || !idpf_rx_splitq_is_eop(rx_desc))
 			continue;
 
-		/* pad skb if needed (to make valid ethernet frame) */
-		if (eth_skb_pad(skb)) {
-			skb = NULL;
+		total_rx_bytes += xdp_get_buff_len(&xdp);
+		total_rx_pkts++;
+
+		skb = xdp_build_skb_from_buff(&xdp);
+		if (unlikely(!skb)) {
+			xdp_return_buff(&xdp);
+			xdp.data = NULL;
+
 			continue;
 		}
 
-		/* probably a little skewed due to removing CRC */
-		total_rx_bytes += skb->len;
+		xdp.data = NULL;
 
 		/* protocol */
 		if (unlikely(idpf_rx_process_skb_fields(rxq, skb, rx_desc))) {
 			dev_kfree_skb_any(skb);
-			skb = NULL;
 			continue;
 		}
 
 		/* send completed skb up the stack */
 		napi_gro_receive(&rxq->q_vector->napi, skb);
-		skb = NULL;
-
-		/* update budget accounting */
-		total_rx_pkts++;
 	}
 
 	rxq->next_to_clean = ntc;
+	libie_xdp_save_buff(&rxq->xdp, &xdp);
 
-	rxq->skb = skb;
 	u64_stats_update_begin(&rxq->stats_sync);
 	u64_stats_add(&rxq->q_stats.rx.packets, total_rx_pkts);
 	u64_stats_add(&rxq->q_stats.rx.bytes, total_rx_bytes);

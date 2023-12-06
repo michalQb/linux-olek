@@ -602,14 +602,9 @@ static bool idpf_rx_singleq_test_staterr(const union virtchnl2_rx_desc *rx_desc,
 
 /**
  * idpf_rx_singleq_is_non_eop - process handling of non-EOP buffers
- * @rxq: Rx ring being processed
  * @rx_desc: Rx descriptor for current buffer
- * @skb: Current socket buffer containing buffer in progress
- * @ntc: next to clean
  */
-static bool idpf_rx_singleq_is_non_eop(struct idpf_queue *rxq,
-				       union virtchnl2_rx_desc *rx_desc,
-				       struct sk_buff *skb, u16 ntc)
+static bool idpf_rx_singleq_is_non_eop(const union virtchnl2_rx_desc *rx_desc)
 {
 	/* if we are the last buffer then there is nothing else to do */
 	if (likely(idpf_rx_singleq_test_staterr(rx_desc, IDPF_RXD_EOF_SINGLEQ)))
@@ -844,9 +839,6 @@ static void idpf_rx_singleq_process_skb_fields(struct idpf_queue *rx_q,
 	struct libie_rx_ptype_parsed parsed =
 					rx_q->vport->rx_ptype_lkup[ptype];
 
-	/* modifies the skb - consumes the enet header */
-	skb->protocol = eth_type_trans(skb, rx_q->vport->netdev);
-
 	/* Check if we're using base mode descriptor IDs */
 	if (rx_q->rxdids == VIRTCHNL2_RXDID_1_32B_BASE_M) {
 		idpf_rx_singleq_base_hash(rx_q, skb, rx_desc, parsed);
@@ -855,8 +847,6 @@ static void idpf_rx_singleq_process_skb_fields(struct idpf_queue *rx_q,
 		idpf_rx_singleq_flex_hash(rx_q, skb, rx_desc, parsed);
 		idpf_rx_singleq_flex_csum(rx_q, skb, rx_desc, parsed);
 	}
-
-	skb_record_rx_queue(skb, rx_q->idx);
 }
 
 /**
@@ -987,16 +977,19 @@ static void idpf_rx_singleq_extract_fields(struct idpf_queue *rx_q,
 static int idpf_rx_singleq_clean(struct idpf_queue *rx_q, int budget)
 {
 	unsigned int total_rx_bytes = 0, total_rx_pkts = 0;
-	struct sk_buff *skb = rx_q->skb;
 	u16 ntc = rx_q->next_to_clean;
 	u16 cleaned_count = 0;
 	bool failure = false;
+	struct xdp_buff xdp;
+
+	libie_xdp_init_buff(&xdp, &rx_q->xdp, &rx_q->xdp_rxq);
 
 	/* Process Rx packets bounded by budget */
 	while (likely(total_rx_pkts < (unsigned int)budget)) {
 		struct idpf_rx_extracted fields = { };
 		union virtchnl2_rx_desc *rx_desc;
 		struct idpf_rx_buf *rx_buf;
+		struct sk_buff *skb;
 
 		/* get the Rx desc from Rx queue based on 'next_to_clean' */
 		rx_desc = &rx_q->rx[ntc];
@@ -1020,45 +1013,35 @@ static int idpf_rx_singleq_clean(struct idpf_queue *rx_q, int budget)
 		idpf_rx_singleq_extract_fields(rx_q, rx_desc, &fields);
 
 		rx_buf = &rx_q->rx_buf.buf[ntc];
-		if (!libie_rx_sync_for_cpu(rx_buf, fields.size))
-			goto skip_data;
-
-		if (skb)
-			idpf_rx_add_frag(rx_buf, skb, fields.size);
-		else
-			skb = idpf_rx_build_skb(rx_buf, fields.size);
-
-		/* exit if we failed to retrieve a buffer */
-		if (!skb)
-			break;
-
-skip_data:
+		libie_xdp_process_buff(&xdp, rx_buf, fields.size);
 		rx_buf->page = NULL;
 
 		IDPF_SINGLEQ_BUMP_RING_IDX(rx_q, ntc);
 		cleaned_count++;
 
 		/* skip if it is non EOP desc */
-		if (idpf_rx_singleq_is_non_eop(rx_q, rx_desc, skb, ntc))
+		if (!xdp.data || idpf_rx_singleq_is_non_eop(rx_desc))
 			continue;
 
 #define IDPF_RXD_ERR_S FIELD_PREP(VIRTCHNL2_RX_BASE_DESC_QW1_ERROR_M, \
 				  VIRTCHNL2_RX_BASE_DESC_ERROR_RXE_M)
 		if (unlikely(idpf_rx_singleq_test_staterr(rx_desc,
 							  IDPF_RXD_ERR_S))) {
-			dev_kfree_skb_any(skb);
-			skb = NULL;
+drop_cont:
+			xdp_return_buff(&xdp);
+			xdp.data = NULL;
+
 			continue;
 		}
 
-		/* pad skb if needed (to make valid ethernet frame) */
-		if (eth_skb_pad(skb)) {
-			skb = NULL;
-			continue;
-		}
+		total_rx_bytes += xdp_get_buff_len(&xdp);
+		total_rx_pkts++;
 
-		/* probably a little skewed due to removing CRC */
-		total_rx_bytes += skb->len;
+		skb = xdp_build_skb_from_buff(&xdp);
+		if (unlikely(!skb))
+			goto drop_cont;
+
+		xdp.data = NULL;
 
 		/* protocol */
 		idpf_rx_singleq_process_skb_fields(rx_q, skb,
@@ -1066,15 +1049,10 @@ skip_data:
 
 		/* send completed skb up the stack */
 		napi_gro_receive(&rx_q->q_vector->napi, skb);
-		skb = NULL;
-
-		/* update budget accounting */
-		total_rx_pkts++;
 	}
 
-	rx_q->skb = skb;
-
 	rx_q->next_to_clean = ntc;
+	libie_xdp_save_buff(&rx_q->xdp, &xdp);
 
 	if (cleaned_count)
 		failure = idpf_rx_singleq_buf_hw_alloc_all(rx_q, cleaned_count);
