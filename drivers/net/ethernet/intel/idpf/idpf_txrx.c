@@ -697,6 +697,22 @@ rx_buf_alloc_all_out:
 	return err;
 }
 
+static int idpf_init_xdp_mem_model(struct idpf_queue *rxbufq)
+{
+	struct page_pool *pp = rxbufq->pp;
+	struct idpf_queue *rxq;
+	int err;
+
+	if (idpf_is_queue_model_split(rxbufq->vport->rxq_model))
+		rxq = &rxbufq->rxq_grp->splitq.rxq_sets[0]->rxq;
+	else
+		rxq = rxbufq;
+
+	err = xdp_rxq_info_reg_mem_model(&rxq->xdp_rxq,
+					 MEM_TYPE_PAGE_POOL, pp);
+	return err;
+}
+
 /**
  * idpf_rx_bufs_init - Initialize page pool, allocate rx bufs, and post to HW
  * @rxbufq: RX queue to create page pool for
@@ -705,14 +721,21 @@ rx_buf_alloc_all_out:
  */
 static int idpf_rx_bufs_init(struct idpf_queue *rxbufq)
 {
+	bool xdp_enabled = idpf_is_xdp_enabled(rxbufq);
 	struct page_pool *pool;
+	int err;
 
-	pool = idpf_rx_create_page_pool(rxbufq,
-					idpf_is_xdp_enabled(rxbufq));
+	pool = idpf_rx_create_page_pool(rxbufq, xdp_enabled);
 	if (IS_ERR(pool))
 		return PTR_ERR(pool);
 
 	rxbufq->pp = pool;
+
+	if (xdp_enabled) {
+		err = idpf_init_xdp_mem_model(rxbufq);
+		if (err)
+			return err;
+	}
 
 	return idpf_rx_buf_alloc_all(rxbufq);
 }
@@ -779,35 +802,14 @@ static void idpf_xdp_rxbufq_init(struct idpf_queue *q)
 /**
  * idpf_xdp_rxq_info_init - Setup XDP for a given Rx queue
  * @rxq: Rx queue for which the resources are setup
- * @splitq: flag indicating if the HW works in split queue mode
- *
- * Returns 0 on success, negative on failure
  */
-static int idpf_xdp_rxq_info_init(struct idpf_queue *rxq, bool splitq)
+static void idpf_xdp_rxq_info_init(struct idpf_queue *rxq)
 {
-	struct page_pool *pp;
-	int err;
-
 	if (!xdp_rxq_info_is_reg(&rxq->xdp_rxq))
 		xdp_rxq_info_reg(&rxq->xdp_rxq, rxq->vport->netdev,
 				 rxq->idx, rxq->q_vector->napi.napi_id);
 
-	if (splitq) {
-		int num_bufq = rxq->vport->num_bufqs_per_qgrp;
-
-		if (num_bufq != IDPF_SINGLE_BUFQ_PER_RXQ_GRP)
-			return -EINVAL;
-		pp = rxq->rxq_grp->splitq.bufq_sets[0].bufq.pp;
-	} else {
-		pp = rxq->pp;
-	}
-
-	err = xdp_rxq_info_reg_mem_model(&rxq->xdp_rxq,
-					 MEM_TYPE_PAGE_POOL, pp);
-
 	rxq->xdpq = rxq->vport->txqs[rxq->idx + rxq->vport->xdp_txq_offset];
-
-	return err;
 }
 
 /**
@@ -820,9 +822,11 @@ int idpf_xdp_rxq_info_init_all(struct idpf_vport *vport)
 {
 	bool splitq = idpf_is_queue_model_split(vport->rxq_model);
 	struct idpf_rxq_group *rx_qgrp;
+	u32 num_rxq, idx = vport->idx;
 	struct idpf_queue *q;
-	int i, j, err;
-	u16 num_rxq;
+	int i, j;
+
+	config_data = &vport->adapter->vport_config[idx]->user_config;
 
 	for (i = 0; i < vport->num_rxq_grp; i++) {
 		rx_qgrp = &vport->rxq_grps[i];
@@ -836,9 +840,8 @@ int idpf_xdp_rxq_info_init_all(struct idpf_vport *vport)
 				q = &rx_qgrp->splitq.rxq_sets[j]->rxq;
 			else
 				q = rx_qgrp->singleq.rxqs[j];
-			err = idpf_xdp_rxq_info_init(q, splitq);
-			if (err)
-				return err;
+
+			idpf_xdp_rxq_info_init(q);
 		}
 	}
 
