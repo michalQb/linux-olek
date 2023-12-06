@@ -99,8 +99,6 @@ do {								\
 #define IDPF_RX_BUF_STRIDE			32
 #define IDPF_RX_BUF_POST_STRIDE			16
 #define IDPF_LOW_WATERMARK			64
-/* Size of header buffer specifically for header split */
-#define IDPF_HDR_BUF_SIZE			256
 #define IDPF_PACKET_HDR_PAD	\
 	(ETH_HLEN + ETH_FCS_LEN + VLAN_HLEN * 2)
 #define IDPF_TX_TSO_MIN_MSS			88
@@ -315,16 +313,10 @@ struct idpf_rx_extracted {
 #define IDPF_TX_MAX_DESC_DATA_ALIGNED \
 	ALIGN_DOWN(IDPF_TX_MAX_DESC_DATA, IDPF_TX_MAX_READ_REQ_SIZE)
 
-#define IDPF_RX_DMA_ATTR \
-	(DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING)
 #define IDPF_RX_DESC(rxq, i)	\
 	(&(((union virtchnl2_rx_desc *)((rxq)->desc_ring))[i]))
 
-struct idpf_rx_buf {
-	struct page *page;
-	unsigned int page_offset;
-	u16 truesize;
-};
+#define idpf_rx_buf libie_rx_buffer
 
 #define IDPF_RX_MAX_PTYPE_PROTO_IDS    32
 #define IDPF_RX_MAX_PTYPE_SZ	(sizeof(struct virtchnl2_ptype) + \
@@ -627,13 +619,15 @@ struct idpf_queue {
 	union {
 		struct idpf_tx_buf *tx_buf;
 		struct {
+			struct libie_rx_buffer *hdr_buf;
 			struct idpf_rx_buf *buf;
-			dma_addr_t hdr_buf_pa;
-			void *hdr_buf_va;
 		} rx_buf;
 	};
+	struct page_pool *hdr_pp;
 	struct page_pool *pp;
 	void *desc_ring;
+
+	u32 hdr_truesize;
 	u16 idx;
 	u16 q_type;
 	u32 q_id;
@@ -885,7 +879,7 @@ static inline dma_addr_t idpf_alloc_page(struct page_pool *pool,
 					 unsigned int buf_size)
 {
 	if (buf_size == IDPF_RX_BUF_2048)
-		buf->page = page_pool_dev_alloc_frag(pool, &buf->page_offset,
+		buf->page = page_pool_dev_alloc_frag(pool, &buf->offset,
 						     buf_size);
 	else
 		buf->page = page_pool_dev_alloc_pages(pool);
@@ -895,7 +889,7 @@ static inline dma_addr_t idpf_alloc_page(struct page_pool *pool,
 
 	buf->truesize = buf_size;
 
-	return page_pool_get_dma_addr(buf->page) + buf->page_offset +
+	return page_pool_get_dma_addr(buf->page) + buf->offset +
 	       pool->p.offset;
 }
 
@@ -922,7 +916,7 @@ static inline void idpf_rx_sync_for_cpu(struct idpf_rx_buf *rx_buf, u32 len)
 
 	dma_sync_single_range_for_cpu(pp->p.dev,
 				      page_pool_get_dma_addr(page),
-				      rx_buf->page_offset + pp->p.offset, len,
+				      rx_buf->offset + pp->p.offset, len,
 				      page_pool_get_dma_dir(pp));
 }
 
@@ -970,6 +964,7 @@ void idpf_rx_add_frag(struct idpf_rx_buf *rx_buf, struct sk_buff *skb,
 struct sk_buff *idpf_rx_construct_skb(struct idpf_queue *rxq,
 				      struct idpf_rx_buf *rx_buf,
 				      unsigned int size);
+struct sk_buff *idpf_rx_build_skb(const struct libie_rx_buffer *buf, u32 size);
 bool idpf_init_rx_buf_hw_alloc(struct idpf_queue *rxq, struct idpf_rx_buf *buf);
 void idpf_rx_buf_hw_update(struct idpf_queue *rxq, u32 val);
 void idpf_tx_buf_hw_update(struct idpf_queue *tx_q, u32 val,

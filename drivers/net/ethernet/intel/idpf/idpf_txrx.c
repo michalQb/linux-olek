@@ -328,18 +328,17 @@ err_out:
 
 /**
  * idpf_rx_page_rel - Release an rx buffer page
- * @rxq: the queue that owns the buffer
  * @rx_buf: the buffer to free
  */
-static void idpf_rx_page_rel(struct idpf_queue *rxq, struct idpf_rx_buf *rx_buf)
+static void idpf_rx_page_rel(struct libie_rx_buffer *rx_buf)
 {
 	if (unlikely(!rx_buf->page))
 		return;
 
-	page_pool_put_full_page(rxq->pp, rx_buf->page, false);
+	page_pool_put_full_page(rx_buf->page->pp, rx_buf->page, false);
 
 	rx_buf->page = NULL;
-	rx_buf->page_offset = 0;
+	rx_buf->offset = 0;
 }
 
 /**
@@ -348,13 +347,17 @@ static void idpf_rx_page_rel(struct idpf_queue *rxq, struct idpf_rx_buf *rx_buf)
  */
 static void idpf_rx_hdr_buf_rel_all(struct idpf_queue *rxq)
 {
-	struct idpf_adapter *adapter = rxq->vport->adapter;
+	struct libie_buf_queue bq = {
+		.pp	= rxq->hdr_pp,
+	};
 
-	dma_free_coherent(&adapter->pdev->dev,
-			  rxq->desc_count * IDPF_HDR_BUF_SIZE,
-			  rxq->rx_buf.hdr_buf_va,
-			  rxq->rx_buf.hdr_buf_pa);
-	rxq->rx_buf.hdr_buf_va = NULL;
+	for (u32 i = 0; i < rxq->desc_count; i++)
+		idpf_rx_page_rel(&rxq->rx_buf.hdr_buf[i]);
+
+	libie_rx_page_pool_destroy(&bq);
+	rxq->hdr_pp = bq.pp;
+
+	kfree(rxq->rx_buf.hdr_buf);
 }
 
 /**
@@ -371,7 +374,7 @@ static void idpf_rx_buf_rel_all(struct idpf_queue *rxq)
 
 	/* Free all the bufs allocated and given to hw on Rx queue */
 	for (i = 0; i < rxq->desc_count; i++)
-		idpf_rx_page_rel(rxq, &rxq->rx_buf.buf[i]);
+		idpf_rx_page_rel(&rxq->rx_buf.buf[i]);
 
 	if (rxq->rx_hsplit_en)
 		idpf_rx_hdr_buf_rel_all(rxq);
@@ -481,17 +484,33 @@ void idpf_rx_buf_hw_update(struct idpf_queue *rxq, u32 val)
  */
 static int idpf_rx_hdr_buf_alloc_all(struct idpf_queue *rxq)
 {
-	struct idpf_adapter *adapter = rxq->vport->adapter;
+	struct libie_buf_queue bq = {
+		.count		= rxq->desc_count,
+		.type		= LIBIE_RX_BUF_HDR,
+	};
+	struct libie_rx_buffer *hdr_buf;
+	int ret;
 
-	rxq->rx_buf.hdr_buf_va =
-		dma_alloc_coherent(&adapter->pdev->dev,
-				   IDPF_HDR_BUF_SIZE * rxq->desc_count,
-				   &rxq->rx_buf.hdr_buf_pa,
-				   GFP_KERNEL);
-	if (!rxq->rx_buf.hdr_buf_va)
+	hdr_buf = kcalloc(bq.count, sizeof(*hdr_buf), GFP_KERNEL);
+	if (!hdr_buf)
 		return -ENOMEM;
 
+	rxq->rx_buf.hdr_buf = hdr_buf;
+
+	ret = libie_rx_page_pool_create(&bq, &rxq->q_vector->napi);
+	if (ret)
+		goto free_hdr;
+
+	rxq->hdr_pp = bq.pp;
+	rxq->hdr_truesize = bq.truesize;
+	rxq->rx_hbuf_size = bq.rx_buf_len;
+
 	return 0;
+
+free_hdr:
+	kfree(hdr_buf);
+
+	return ret;
 }
 
 /**
@@ -526,6 +545,9 @@ static void idpf_rx_post_buf_refill(struct idpf_sw_queue *refillq, u16 buf_id)
 static bool idpf_rx_post_buf_desc(struct idpf_queue *bufq, u16 buf_id)
 {
 	struct virtchnl2_splitq_rx_buf_desc *splitq_rx_desc = NULL;
+	struct libie_buf_queue bq = {
+		.count		= bufq->desc_count,
+	};
 	u16 nta = bufq->next_to_alloc;
 	struct idpf_rx_buf *buf;
 	dma_addr_t addr;
@@ -534,9 +556,15 @@ static bool idpf_rx_post_buf_desc(struct idpf_queue *bufq, u16 buf_id)
 	buf = &bufq->rx_buf.buf[buf_id];
 
 	if (bufq->rx_hsplit_en) {
-		splitq_rx_desc->hdr_addr =
-			cpu_to_le64(bufq->rx_buf.hdr_buf_pa +
-				    (u32)buf_id * IDPF_HDR_BUF_SIZE);
+		bq.pp = bufq->hdr_pp;
+		bq.rx_bi = bufq->rx_buf.hdr_buf;
+		bq.truesize = bufq->hdr_truesize;
+
+		addr = libie_rx_alloc(&bq, buf_id);
+		if (addr == DMA_MAPPING_ERROR)
+			return false;
+
+		splitq_rx_desc->hdr_addr = cpu_to_le64(addr);
 	}
 
 	addr = idpf_alloc_page(bufq->pp, buf, bufq->rx_buf_size);
@@ -1328,7 +1356,7 @@ static int idpf_rxq_group_alloc(struct idpf_vport *vport, u16 num_rxq)
 
 			if (hs) {
 				q->rx_hsplit_en = true;
-				q->rx_hbuf_size = IDPF_HDR_BUF_SIZE;
+				q->rx_hbuf_size = LIBIE_MAX_HEAD;
 			}
 
 			bufq_set->num_refillqs = num_rxq;
@@ -1372,7 +1400,7 @@ skip_splitq_rx_init:
 
 			if (hs) {
 				q->rx_hsplit_en = true;
-				q->rx_hbuf_size = IDPF_HDR_BUF_SIZE;
+				q->rx_hbuf_size = LIBIE_MAX_HEAD;
 			}
 
 setup_rxq:
@@ -2944,6 +2972,8 @@ static int idpf_rx_process_skb_fields(struct idpf_queue *rxq,
 	idpf_rx_splitq_extract_csum_bits(rx_desc, &csum_bits);
 	idpf_rx_csum(rxq, skb, csum_bits, parsed);
 
+	skb_record_rx_queue(skb, rxq->idx);
+
 	return 0;
 }
 
@@ -2961,7 +2991,7 @@ void idpf_rx_add_frag(struct idpf_rx_buf *rx_buf, struct sk_buff *skb,
 		      unsigned int size)
 {
 	skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, rx_buf->page,
-			rx_buf->page_offset, size, rx_buf->truesize);
+			rx_buf->offset, size, rx_buf->truesize);
 
 	rx_buf->page = NULL;
 }
@@ -2984,7 +3014,7 @@ struct sk_buff *idpf_rx_construct_skb(struct idpf_queue *rxq,
 	struct sk_buff *skb;
 	void *va;
 
-	va = page_address(rx_buf->page) + rx_buf->page_offset;
+	va = page_address(rx_buf->page) + rx_buf->offset;
 
 	/* prefetch first cache line of first page */
 	net_prefetch(va);
@@ -2997,7 +3027,6 @@ struct sk_buff *idpf_rx_construct_skb(struct idpf_queue *rxq,
 		return NULL;
 	}
 
-	skb_record_rx_queue(skb, rxq->idx);
 	skb_mark_for_recycle(skb);
 
 	/* Determine available headroom for copy */
@@ -3016,7 +3045,7 @@ struct sk_buff *idpf_rx_construct_skb(struct idpf_queue *rxq,
 		return skb;
 	}
 
-	skb_add_rx_frag(skb, 0, rx_buf->page, rx_buf->page_offset + headlen,
+	skb_add_rx_frag(skb, 0, rx_buf->page, rx_buf->offset + headlen,
 			size, rx_buf->truesize);
 
 	/* Since we're giving the page to the stack, clear our reference to it.
@@ -3028,35 +3057,30 @@ struct sk_buff *idpf_rx_construct_skb(struct idpf_queue *rxq,
 }
 
 /**
- * idpf_rx_hdr_construct_skb - Allocate skb and populate it from header buffer
- * @rxq: Rx descriptor queue
- * @va: Rx buffer to pull data from
+ * idpf_rx_build_skb - Allocate skb and populate it from header buffer
+ * @buf: Rx buffer to pull data from
  * @size: the length of the packet
  *
  * This function allocates an skb. It then populates it with the page data from
  * the current receive descriptor, taking care to set up the skb correctly.
- * This specifically uses a header buffer to start building the skb.
  */
-static struct sk_buff *idpf_rx_hdr_construct_skb(struct idpf_queue *rxq,
-						 const void *va,
-						 unsigned int size)
+struct sk_buff *idpf_rx_build_skb(const struct libie_rx_buffer *buf, u32 size)
 {
+	u32 hr = buf->page->pp->p.offset;
 	struct sk_buff *skb;
+	void *va;
 
-	/* allocate a skb to store the frags */
-	skb = __napi_alloc_skb(&rxq->q_vector->napi, size, GFP_ATOMIC);
+	va = page_address(buf->page) + buf->offset;
+	net_prefetch(va + hr);
+
+	skb = napi_build_skb(va, buf->truesize);
 	if (unlikely(!skb))
 		return NULL;
 
-	skb_record_rx_queue(skb, rxq->idx);
-
-	memcpy(__skb_put(skb, size), va, ALIGN(size, sizeof(long)));
-
-	/* More than likely, a payload fragment, which will use a page from
-	 * page_pool will be added to the SKB so mark it for recycle
-	 * preemptively. And if not, it's inconsequential.
-	 */
 	skb_mark_for_recycle(skb);
+
+	skb_reserve(skb, hr);
+	__skb_put(skb, size);
 
 	return skb;
 }
@@ -3190,10 +3214,17 @@ bypass_hsplit:
 		rx_buf = &rx_bufq->rx_buf.buf[buf_id];
 
 		if (hdr_len) {
-			const void *va = (u8 *)rx_bufq->rx_buf.hdr_buf_va +
-						(u32)buf_id * IDPF_HDR_BUF_SIZE;
+			struct libie_rx_buffer *hdr;
 
-			skb = idpf_rx_hdr_construct_skb(rxq, va, hdr_len);
+			hdr = &rx_bufq->rx_buf.hdr_buf[buf_id];
+			libie_rx_sync_for_cpu(hdr, hdr_len);
+
+			skb = idpf_rx_build_skb(hdr, hdr_len);
+			if (!skb)
+				break;
+
+			hdr->page = NULL;
+
 			u64_stats_update_begin(&rxq->stats_sync);
 			u64_stats_inc(&rxq->q_stats.rx.hsplit_pkts);
 			u64_stats_update_end(&rxq->stats_sync);
@@ -3268,6 +3299,9 @@ bypass_hsplit:
 static int idpf_rx_update_bufq_desc(struct idpf_queue *bufq, u16 refill_desc,
 				    struct virtchnl2_splitq_rx_buf_desc *buf_desc)
 {
+	struct libie_buf_queue bq = {
+		.count		= bufq->desc_count,
+	};
 	struct idpf_rx_buf *buf;
 	dma_addr_t addr;
 	u16 buf_id;
@@ -3286,8 +3320,15 @@ static int idpf_rx_update_bufq_desc(struct idpf_queue *bufq, u16 refill_desc,
 	if (!bufq->rx_hsplit_en)
 		return 0;
 
-	buf_desc->hdr_addr = cpu_to_le64(bufq->rx_buf.hdr_buf_pa +
-					 (u32)buf_id * IDPF_HDR_BUF_SIZE);
+	bq.pp = bufq->hdr_pp;
+	bq.rx_bi = bufq->rx_buf.hdr_buf;
+	bq.truesize = bufq->hdr_truesize;
+
+	addr = libie_rx_alloc(&bq, buf_id);
+	if (addr == DMA_MAPPING_ERROR)
+		return -ENOMEM;
+
+	buf_desc->hdr_addr = cpu_to_le64(addr);
 
 	return 0;
 }
