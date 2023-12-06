@@ -867,6 +867,8 @@ static void idpf_rx_singleq_process_skb_fields(struct idpf_queue *rx_q,
 		idpf_rx_singleq_flex_hash(rx_q, skb, rx_desc, parsed);
 		idpf_rx_singleq_flex_csum(rx_q, skb, rx_desc, parsed);
 	}
+
+	skb_record_rx_queue(skb, rx_q->idx);
 }
 
 /**
