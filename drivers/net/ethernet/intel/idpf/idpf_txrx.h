@@ -1060,7 +1060,7 @@ int idpf_rx_desc_alloc(struct idpf_queue *rxq, bool bufq, s32 q_model);
 void idpf_rx_desc_rel(struct idpf_queue *rxq, bool bufq, s32 q_model);
 int idpf_tx_desc_alloc(struct idpf_queue *tx_q, bool bufq);
 void idpf_tx_desc_rel(struct idpf_queue *txq, bool bufq);
-int idpf_xdp_rxq_info_init(struct idpf_queue *rxq, bool splitq);
+int idpf_rx_bufs_init(struct idpf_queue *rxbufq);
 
 DECLARE_STATIC_KEY_FALSE(idpf_xdp_locking_key);
 
