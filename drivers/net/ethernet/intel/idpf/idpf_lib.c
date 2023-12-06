@@ -3,6 +3,7 @@
 
 #include "idpf.h"
 #include "idpf_xdp.h"
+#include "idpf_xsk.h"
 
 static const struct net_device_ops idpf_netdev_ops_splitq;
 static const struct net_device_ops idpf_netdev_ops_singleq;
@@ -844,7 +845,8 @@ static int idpf_cfg_netdev(struct idpf_vport *vport)
 	if (idpf_is_queue_model_split(vport->rxq_model))
 		xdp_set_features_flag(netdev, NETDEV_XDP_ACT_BASIC |
 					      NETDEV_XDP_ACT_REDIRECT |
-					      NETDEV_XDP_ACT_RX_SG);
+					      NETDEV_XDP_ACT_RX_SG |
+					      NETDEV_XDP_ACT_XSK_ZEROCOPY);
 
 	idpf_set_ethtool_ops(netdev);
 	SET_NETDEV_DEV(netdev, &adapter->pdev->dev);
@@ -2452,6 +2454,7 @@ static const struct net_device_ops idpf_netdev_ops_splitq = {
 	.ndo_tx_timeout = idpf_tx_timeout,
 	.ndo_bpf = idpf_xdp,
 	.ndo_xdp_xmit = idpf_xdp_xmit,
+	.ndo_xsk_wakeup = idpf_xsk_wakeup,
 };
 
 static const struct net_device_ops idpf_netdev_ops_singleq = {

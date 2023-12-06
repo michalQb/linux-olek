@@ -10,6 +10,7 @@ enum virtchnl2_queue_type;
 
 struct idpf_queue;
 struct idpf_vport;
+struct net_device;
 struct xsk_buff_pool;
 
 void idpf_xsk_setup_queue(struct idpf_queue *q, enum virtchnl2_queue_type t);
@@ -24,5 +25,6 @@ bool idpf_xmit_zc(struct idpf_queue *complq);
 
 int idpf_xsk_pool_setup(struct idpf_vport *vport, struct xsk_buff_pool *pool,
 			u32 qid);
+int idpf_xsk_wakeup(struct net_device *netdev, u32 qid, u32 flags);
 
 #endif /* !_IDPF_XSK_H_ */

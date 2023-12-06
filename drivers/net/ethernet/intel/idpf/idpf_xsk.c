@@ -1120,3 +1120,45 @@ bool idpf_xmit_zc(struct idpf_queue *complq)
 
 	return result;
 }
+
+/**
+ * idpf_xsk_wakeup - Implements ndo_xsk_wakeup
+ * @netdev: net_device
+ * @qid: queue to wake up
+ * @flags: ignored in our case, since we have Rx and Tx in the same NAPI
+ *
+ * Returns negative on error, zero otherwise.
+ */
+int idpf_xsk_wakeup(struct net_device *netdev, u32 qid, u32 flags)
+{
+	struct idpf_netdev_priv *np = netdev_priv(netdev);
+	struct idpf_vport *vport = np->vport;
+	struct idpf_q_vector *q_vector;
+	struct idpf_queue *q;
+	int idx;
+
+	if (idpf_vport_ctrl_is_locked(netdev))
+		return -EBUSY;
+
+	if (unlikely(!vport->link_up))
+		return -ENETDOWN;
+
+	if (unlikely(!idpf_xdp_is_prog_ena(vport)))
+		return -ENXIO;
+
+	idx = qid + vport->xdp_txq_offset;
+
+	if (unlikely(idx >= vport->num_txq))
+		return -ENXIO;
+
+	if (unlikely(!test_bit(__IDPF_Q_XSK, vport->txqs[idx]->flags)))
+		return -ENXIO;
+
+	q = vport->txqs[idx];
+	q_vector = q->txq_grp->complq->q_vector;
+
+	if (!napi_if_scheduled_mark_missed(&q_vector->napi))
+		idpf_trigger_sw_intr(&vport->adapter->hw, q_vector);
+
+	return 0;
+}
