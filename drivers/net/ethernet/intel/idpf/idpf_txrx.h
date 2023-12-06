@@ -7,7 +7,7 @@
 #include <linux/dim.h>
 
 #include <net/libeth/cache.h>
-#include <net/page_pool/helpers.h>
+#include <net/libeth/rx.h>
 #include <net/tcp.h>
 #include <net/netdev_queues.h>
 
@@ -103,8 +103,6 @@ do {								\
 #define IDPF_RX_BUF_STRIDE			32
 #define IDPF_RX_BUF_POST_STRIDE			16
 #define IDPF_LOW_WATERMARK			64
-/* Size of header buffer specifically for header split */
-#define IDPF_HDR_BUF_SIZE			256
 #define IDPF_PACKET_HDR_PAD	\
 	(ETH_HLEN + ETH_FCS_LEN + VLAN_HLEN * 2)
 #define IDPF_TX_TSO_MIN_MSS			88
@@ -300,14 +298,7 @@ struct idpf_rx_extracted {
 #define IDPF_TX_MAX_DESC_DATA_ALIGNED \
 	ALIGN_DOWN(IDPF_TX_MAX_DESC_DATA, IDPF_TX_MAX_READ_REQ_SIZE)
 
-#define IDPF_RX_DMA_ATTR \
-	(DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING)
-
-struct idpf_rx_buf {
-	struct page *page;
-	unsigned int page_offset;
-	u16 truesize;
-};
+#define idpf_rx_buf libeth_fqe
 
 #define IDPF_RX_MAX_PTYPE_PROTO_IDS    32
 #define IDPF_RX_MAX_PTYPE_SZ	(sizeof(struct virtchnl2_ptype) + \
@@ -750,18 +741,18 @@ __libeth_cacheline_set_assert(struct idpf_tx_queue, 64,
 
 /**
  * struct idpf_buf_queue - software structure represting a buffer queue
- * @rx_buf: Struct with RX buffer related members
- * @rx_buf.buf: See struct idpf_rx_buf
- * @rx_buf.hdr_buf_pa: DMA handle
- * @rx_buf.hdr_buf_va: Virtual address
+ * @hdr_buf: &libeth_fqe for header buffers
+ * @buf: &idpf_rx_buf for data buffers
  * @split_buf: Descriptor ring memory
- * @pp: Page pool pointer
+ * @hdr_pp: &page_pool for header buffers
+ * @pp: &page_pool for data buffers
  * @tail: Tail offset
  * @flags: See enum idpf_queue_flags_t
  * @desc_count: Number of descriptors
  * @next_to_use: Next descriptor to use
  * @next_to_clean: Next descriptor to clean
  * @next_to_alloc: RX buffer to allocate at
+ * @hdr_truesize: truesize for buffer headers
  * @q_id: Queue id
  * @size: Length of descriptor ring in bytes
  * @dma: Physical address of ring
@@ -773,16 +764,16 @@ __libeth_cacheline_set_assert(struct idpf_tx_queue, 64,
 struct idpf_buf_queue {
 	__libeth_cacheline_group_begin(read_mostly);
 	struct virtchnl2_splitq_rx_buf_desc *split_buf;
-	struct {
-		struct idpf_rx_buf *buf;
-		dma_addr_t hdr_buf_pa;
-		void *hdr_buf_va;
-	} rx_buf;
+	struct libeth_fqe *hdr_buf;
+	struct page_pool *hdr_pp;
+	struct idpf_rx_buf *buf;
 	struct page_pool *pp;
 	void __iomem *tail;
 
 	DECLARE_BITMAP(flags, __IDPF_Q_FLAGS_NBITS);
 	u32 desc_count;
+
+	u32 hdr_truesize;
 	__libeth_cacheline_group_end(read_mostly);
 
 	__libeth_cacheline_group_begin(read_write);
@@ -977,6 +968,18 @@ struct idpf_txq_group {
 	u32 num_completions_pending;
 };
 
+static inline int idpf_q_vector_to_mem(const struct idpf_q_vector *q_vector)
+{
+	u32 cpu;
+
+	if (!q_vector)
+		return NUMA_NO_NODE;
+
+	cpu = cpumask_first(q_vector->affinity_mask);
+
+	return cpu < nr_cpu_ids ? cpu_to_mem(cpu) : NUMA_NO_NODE;
+}
+
 /**
  * idpf_size_to_txd_count - Get number of descriptors needed for large Tx frag
  * @size: transmit request size in bytes
@@ -1045,7 +1048,7 @@ static inline dma_addr_t idpf_alloc_page(struct page_pool *pool,
 					 unsigned int buf_size)
 {
 	if (buf_size == IDPF_RX_BUF_2048)
-		buf->page = page_pool_dev_alloc_frag(pool, &buf->page_offset,
+		buf->page = page_pool_dev_alloc_frag(pool, &buf->offset,
 						     buf_size);
 	else
 		buf->page = page_pool_dev_alloc_pages(pool);
@@ -1055,7 +1058,7 @@ static inline dma_addr_t idpf_alloc_page(struct page_pool *pool,
 
 	buf->truesize = buf_size;
 
-	return page_pool_get_dma_addr(buf->page) + buf->page_offset +
+	return page_pool_get_dma_addr(buf->page) + buf->offset +
 	       pool->p.offset;
 }
 
@@ -1082,7 +1085,7 @@ static inline void idpf_rx_sync_for_cpu(struct idpf_rx_buf *rx_buf, u32 len)
 
 	dma_sync_single_range_for_cpu(pp->p.dev,
 				      page_pool_get_dma_addr(page),
-				      rx_buf->page_offset + pp->p.offset, len,
+				      rx_buf->offset + pp->p.offset, len,
 				      page_pool_get_dma_dir(pp));
 }
 
@@ -1101,6 +1104,7 @@ int idpf_vport_intr_alloc(struct idpf_vport *vport);
 void idpf_vport_intr_update_itr_ena_irq(struct idpf_q_vector *q_vector);
 void idpf_vport_intr_deinit(struct idpf_vport *vport);
 int idpf_vport_intr_init(struct idpf_vport *vport);
+void idpf_vport_intr_ena(struct idpf_vport *vport);
 int idpf_config_rss(struct idpf_vport *vport);
 int idpf_init_rss(struct idpf_vport *vport);
 void idpf_deinit_rss(struct idpf_vport *vport);
@@ -1110,6 +1114,7 @@ void idpf_rx_add_frag(struct idpf_rx_buf *rx_buf, struct sk_buff *skb,
 struct sk_buff *idpf_rx_construct_skb(const struct idpf_rx_queue *rxq,
 				      struct idpf_rx_buf *rx_buf,
 				      unsigned int size);
+struct sk_buff *idpf_rx_build_skb(const struct libeth_fqe *buf, u32 size);
 void idpf_tx_buf_hw_update(struct idpf_tx_queue *tx_q, u32 val,
 			   bool xmit_more);
 unsigned int idpf_size_to_txd_count(unsigned int size);
