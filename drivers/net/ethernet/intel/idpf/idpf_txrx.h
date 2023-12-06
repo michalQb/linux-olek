@@ -637,7 +637,7 @@ struct idpf_queue {
 			struct xdp_rxq_info xdp_rxq;
 
 			struct bpf_prog __rcu *xdp_prog;
-			struct sk_buff *skb;
+			struct xdp_buff xdp;
 		};
 
 		/* Tx */
@@ -876,9 +876,6 @@ int idpf_xdp_rxq_info_init_all(const struct idpf_vport *vport);
 void idpf_xdp_rxq_info_deinit_all(const struct idpf_vport *vport);
 void idpf_copy_xdp_prog_to_qs(struct idpf_vport *vport,
 			      struct bpf_prog *xdp_prog);
-void idpf_rx_add_frag(struct idpf_rx_buf *rx_buf, struct sk_buff *skb,
-		      unsigned int size);
-struct sk_buff *idpf_rx_build_skb(const struct libie_rx_buffer *buf, u32 size);
 bool idpf_init_rx_buf_hw_alloc(struct idpf_queue *rxq, struct idpf_rx_buf *buf);
 void idpf_rx_buf_hw_update(struct idpf_queue *rxq, u32 val);
 void idpf_tx_buf_hw_update(struct idpf_queue *tx_q, u32 val,
