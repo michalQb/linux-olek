@@ -637,6 +637,9 @@ static void idpf_clean_xdp_irq_zc(struct idpf_queue *complq)
 				goto fetch_next_desc;
 			}
 			break;
+		case IDPF_TXD_COMPLT_SW_MARKER:
+			idpf_tx_handle_sw_marker(xdpq);
+			break;
 		case -ENODATA:
 			goto clean_xdpq;
 		case -EINVAL:

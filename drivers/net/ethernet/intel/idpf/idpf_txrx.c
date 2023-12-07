@@ -1686,7 +1686,7 @@ err_out:
  * idpf_tx_handle_sw_marker - Handle queue marker packet
  * @tx_q: tx queue to handle software marker
  */
-static void idpf_tx_handle_sw_marker(struct idpf_queue *tx_q)
+void idpf_tx_handle_sw_marker(struct idpf_queue *tx_q)
 {
 	struct idpf_vport *vport = tx_q->vport;
 	int i;

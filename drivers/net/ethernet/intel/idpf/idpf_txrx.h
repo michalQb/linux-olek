@@ -1073,6 +1073,7 @@ int idpf_parse_compl_desc(struct idpf_splitq_4b_tx_compl_desc *desc,
 			  struct idpf_queue *complq,
 			  struct idpf_queue **txq,
 			  bool gen_flag);
+void idpf_tx_handle_sw_marker(struct idpf_queue *tx_q);
 
 DECLARE_STATIC_KEY_FALSE(idpf_xdp_locking_key);
 
