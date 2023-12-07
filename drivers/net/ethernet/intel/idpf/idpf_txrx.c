@@ -3,6 +3,7 @@
 
 #include "idpf.h"
 #include "idpf_xdp.h"
+#include "idpf_xsk.h"
 
 #define idpf_tx_buf_compl_tag(buf)	(*(int *)&(buf)->priv)
 
@@ -57,30 +58,36 @@ void idpf_tx_timeout(struct net_device *netdev, unsigned int txqueue)
 	}
 }
 
+static void idpf_tx_buf_clean(struct idpf_queue *txq)
+{
+	struct libie_sq_onstack_stats ss = { };
+	struct xdp_frame_bulk bq;
+
+	xdp_frame_bulk_init(&bq);
+	rcu_read_lock();
+
+	for (u32 i = 0; i < txq->desc_count; i++)
+		libie_tx_complete_any(&txq->tx_buf[i], txq->dev, &bq,
+				      &txq->xdp_tx_active, &ss);
+
+	xdp_flush_frame_bulk(&bq);
+	rcu_read_unlock();
+}
+
 /**
  * idpf_tx_buf_rel_all - Free any empty Tx buffers
  * @txq: queue to be cleaned
  */
 static void idpf_tx_buf_rel_all(struct idpf_queue *txq)
 {
-	struct libie_sq_onstack_stats ss = { };
-	struct xdp_frame_bulk bq;
-	u16 i;
-
 	/* Buffers already cleared, nothing to do */
 	if (!txq->tx_buf)
 		return;
 
-	xdp_frame_bulk_init(&bq);
-	rcu_read_lock();
-
-	/* Free all the Tx buffer sk_buffs */
-	for (i = 0; i < txq->desc_count; i++)
-		libie_tx_complete_any(&txq->tx_buf[i], txq->dev, &bq,
-				      &txq->xdp_tx_active, &ss);
-
-	xdp_flush_frame_bulk(&bq);
-	rcu_read_unlock();
+	if (test_bit(__IDPF_Q_XSK, txq->flags))
+		idpf_xsk_clean_xdpq(txq);
+	else
+		idpf_tx_buf_clean(txq);
 
 	kfree(txq->tx_buf);
 	txq->tx_buf = NULL;
@@ -88,7 +95,7 @@ static void idpf_tx_buf_rel_all(struct idpf_queue *txq)
 	if (!txq->buf_stack.bufs)
 		return;
 
-	for (i = 0; i < txq->buf_stack.size; i++)
+	for (u32 i = 0; i < txq->buf_stack.size; i++)
 		kfree(txq->buf_stack.bufs[i]);
 
 	kfree(txq->buf_stack.bufs);
@@ -106,6 +113,8 @@ void idpf_tx_desc_rel(struct idpf_queue *txq, bool bufq)
 {
 	if (bufq)
 		idpf_tx_buf_rel_all(txq);
+
+	idpf_xsk_clear_queue(txq);
 
 	if (!txq->desc_ring)
 		return;
@@ -201,6 +210,7 @@ static int idpf_tx_buf_alloc_all(struct idpf_queue *tx_q)
  */
 int idpf_tx_desc_alloc(struct idpf_queue *tx_q, bool bufq)
 {
+	enum virtchnl2_queue_type type;
 	struct device *dev = tx_q->dev;
 	u32 desc_sz;
 	int err;
@@ -232,6 +242,10 @@ int idpf_tx_desc_alloc(struct idpf_queue *tx_q, bool bufq)
 	tx_q->next_to_use = 0;
 	tx_q->next_to_clean = 0;
 	set_bit(__IDPF_Q_GEN_CHK, tx_q->flags);
+
+	type = bufq ? VIRTCHNL2_QUEUE_TYPE_TX :
+	       VIRTCHNL2_QUEUE_TYPE_TX_COMPLETION;
+	idpf_xsk_setup_queue(tx_q, type);
 
 	return 0;
 
@@ -3807,7 +3821,9 @@ static bool idpf_tx_splitq_clean_all(struct idpf_q_vector *q_vec,
 	for (i = 0; i < num_txq; i++) {
 		struct idpf_queue *cq = q_vec->tx[i];
 
-		if (!test_bit(__IDPF_Q_XDP, cq->flags))
+		if (test_bit(__IDPF_Q_XSK, cq->flags))
+			clean_complete &= idpf_xmit_zc(cq);
+		else if (!test_bit(__IDPF_Q_XDP, cq->flags))
 			clean_complete &= idpf_tx_clean_complq(cq,
 							       budget_per_q,
 							       cleaned);

@@ -7,6 +7,90 @@
 #include "idpf_xsk.h"
 
 /**
+ * idpf_xsk_setup_queue - set xsk_pool pointer from netdev to the queue structure
+ * @q: queue to use
+ * @t: queue type
+ *
+ * Assigns pointer to xsk_pool field in queue struct if it is supported in
+ * netdev, NULL otherwise.
+ */
+void idpf_xsk_setup_queue(struct idpf_queue *q, enum virtchnl2_queue_type t)
+{
+	struct idpf_vport_user_config_data *cfg_data;
+	struct idpf_vport *vport = q->vport;
+	struct xsk_buff_pool *pool;
+	bool is_rx = false;
+	int qid;
+
+	__clear_bit(__IDPF_Q_XSK, q->flags);
+
+	if (!idpf_xdp_is_prog_ena(q->vport))
+		return;
+
+	switch (t) {
+	case VIRTCHNL2_QUEUE_TYPE_RX:
+		is_rx = true;
+		qid = q->idx;
+		break;
+	case VIRTCHNL2_QUEUE_TYPE_RX_BUFFER:
+		is_rx = true;
+		qid = q->rxq_grp->splitq.rxq_sets[0]->rxq.idx;
+		break;
+	case VIRTCHNL2_QUEUE_TYPE_TX:
+		qid = q->idx - q->vport->xdp_txq_offset;
+		break;
+	case VIRTCHNL2_QUEUE_TYPE_TX_COMPLETION:
+		qid = q->txq_grp->txqs[0]->idx - q->vport->xdp_txq_offset;
+		break;
+	default:
+		return;
+	}
+
+	if (!is_rx && !test_bit(__IDPF_Q_XDP, q->flags))
+		return;
+
+	cfg_data = &vport->adapter->vport_config[vport->idx]->user_config;
+
+	if (!test_bit(qid, cfg_data->af_xdp_zc_qps))
+		return;
+
+	pool = xsk_get_pool_from_qid(q->vport->netdev, qid);
+
+	if (pool && is_rx && !xsk_buff_can_alloc(pool, 1))
+		return;
+
+	if (is_rx)
+		q->xsk_rx = pool;
+	else
+		q->xsk_tx = pool;
+
+	__set_bit(__IDPF_Q_XSK, q->flags);
+}
+
+void idpf_xsk_clear_queue(struct idpf_queue *q)
+{
+	struct device *dev;
+
+	if (!__test_and_clear_bit(__IDPF_Q_XSK, q->flags))
+		return;
+
+	switch (q->q_type) {
+	case VIRTCHNL2_QUEUE_TYPE_RX:
+	case VIRTCHNL2_QUEUE_TYPE_RX_BUFFER:
+		dev = q->xsk_rx->dev;
+		q->xsk_rx = NULL;
+		q->dev = dev;
+		break;
+	case VIRTCHNL2_QUEUE_TYPE_TX:
+	case VIRTCHNL2_QUEUE_TYPE_TX_COMPLETION:
+		dev = q->xsk_tx->dev;
+		q->xsk_tx = NULL;
+		q->dev = dev;
+		break;
+	}
+}
+
+/**
  * idpf_qp_cfg_qs - Configure all queues contained from a given array.
  * @vport: vport structure
  * @qs: an array of queues to configure
@@ -93,6 +177,23 @@ idpf_qp_clean_qs(struct idpf_vport *vport, struct idpf_queue **qs, int num_qs)
 			break;
 		}
 	}
+}
+
+/**
+ * idpf_trigger_sw_intr - trigger a software interrupt
+ * @hw: pointer to the HW structure
+ * @q_vector: interrupt vector to trigger the software interrupt for
+ */
+static void
+idpf_trigger_sw_intr(struct idpf_hw *hw, struct idpf_q_vector *q_vector)
+{
+	struct idpf_intr_reg *intr = &q_vector->intr_reg;
+	u32 val;
+
+	val = intr->dyn_ctl_intena_m | intr->dyn_ctl_itridx_m | /* set no itr*/
+	      intr->dyn_ctl_swint_trig_m |intr->dyn_ctl_sw_itridx_ena_m;
+
+	writel(val, intr->dyn_ctl);
 }
 
 /**
@@ -470,4 +571,225 @@ xsk_pool_if_up:
 
 xsk_exit:
 	return err;
+}
+
+/**
+ * idpf_xsk_clean_xdpq - Clean the XDP Tx queue and its buffer pool queues
+ * @xdpq: XDP_Tx queue
+ */
+void idpf_xsk_clean_xdpq(struct idpf_queue *xdpq)
+{
+	u32 ntc = xdpq->next_to_clean, ntu = xdpq->next_to_use;
+	struct device *dev = xdpq->xsk_tx->dev;
+	struct libie_sq_onstack_stats ss = { };
+	struct xdp_frame_bulk bq;
+	u32 xsk_frames = 0;
+
+	xdp_frame_bulk_init(&bq);
+	rcu_read_lock();
+
+	while (ntc != ntu) {
+		struct libie_tx_buffer *tx_buf = &xdpq->tx_buf[ntc];
+
+		if (tx_buf->type)
+			libie_xdp_complete_tx_buf(tx_buf, dev, false, &bq,
+						  &xdpq->xdp_tx_active, &ss);
+		else
+			xsk_frames++;
+
+		if (unlikely(++ntc >= xdpq->desc_count))
+			ntc = 0;
+	}
+
+	xdp_flush_frame_bulk(&bq);
+	rcu_read_unlock();
+
+	if (xsk_frames)
+		xsk_tx_completed(xdpq->xsk_tx, xsk_frames);
+}
+
+/**
+ * idpf_clean_xdp_irq_zc - produce AF_XDP descriptors to CQ
+ * @complq: completion queue associated with zero-copy Tx queue
+ */
+static u32 idpf_clean_xdp_irq_zc(struct idpf_queue *complq)
+{
+	struct idpf_splitq_4b_tx_compl_desc *last_rs_desc;
+	struct device *dev = complq->xsk_tx->dev;
+	struct libie_sq_onstack_stats ss = { };
+	int complq_budget = complq->desc_count;
+	u32 ntc = complq->next_to_clean;
+	struct idpf_queue *xdpq = NULL;
+	struct xdp_frame_bulk bq;
+	u32 done_frames = 0;
+	u32 xsk_frames = 0;
+	u32 tx_ntc, cnt;
+	bool gen_flag;
+	int head, i;
+
+	last_rs_desc = &complq->comp_4b[ntc];
+	gen_flag = test_bit(__IDPF_Q_GEN_CHK, complq->flags);
+
+	do {
+		int ctype = idpf_parse_compl_desc(last_rs_desc, complq,
+						  &xdpq, gen_flag);
+
+		if (likely(ctype == IDPF_TXD_COMPLT_RS)) {
+			head = le16_to_cpu(last_rs_desc->q_head_compl_tag.q_head);
+			goto fetch_next_desc;
+		}
+
+		switch (ctype) {
+		case IDPF_TXD_COMPLT_SW_MARKER:
+			idpf_tx_handle_sw_marker(xdpq);
+			break;
+		case -ENODATA:
+			goto clean_xdpq;
+		case -EINVAL:
+			goto fetch_next_desc;
+		default:
+			dev_err(&xdpq->vport->adapter->pdev->dev,
+				"Unsupported completion type for XSK\n");
+			goto fetch_next_desc;
+		}
+
+fetch_next_desc:
+		last_rs_desc++;
+		ntc++;
+		if (unlikely(ntc == complq->desc_count)) {
+			ntc = 0;
+			last_rs_desc = &complq->comp_4b[0];
+			gen_flag = !gen_flag;
+			change_bit(__IDPF_Q_GEN_CHK, complq->flags);
+		}
+		prefetch(last_rs_desc);
+		complq_budget--;
+	} while (likely(complq_budget));
+
+clean_xdpq:
+	complq->next_to_clean = ntc;
+
+	if (!xdpq)
+		return 0;
+
+	libie_xdp_sq_lock(&xdpq->xdp_lock);
+
+	cnt = xdpq->desc_count;
+	tx_ntc = xdpq->next_to_clean;
+	done_frames = head >= tx_ntc ? head - tx_ntc :
+				       head + cnt - tx_ntc;
+	if (!done_frames)
+		return 0;
+
+	if (likely(!xdpq->xdp_tx_active)) {
+		xsk_frames = done_frames;
+		goto xsk;
+	}
+
+	xdp_frame_bulk_init(&bq);
+
+	for (i = 0; i < done_frames; i++) {
+		struct libie_tx_buffer *tx_buf = &xdpq->tx_buf[tx_ntc];
+
+		if (tx_buf->type)
+			libie_xdp_complete_tx_buf(tx_buf, dev, true, &bq,
+						  &xdpq->xdp_tx_active,
+						  &ss);
+		else
+			xsk_frames++;
+
+		if (unlikely(++tx_ntc == cnt))
+			tx_ntc = 0;
+	}
+
+	xdp_flush_frame_bulk(&bq);
+
+xsk:
+	xdpq->next_to_clean += done_frames;
+	if (xdpq->next_to_clean >= cnt)
+		xdpq->next_to_clean -= cnt;
+
+	if (xsk_frames)
+		xsk_tx_completed(xdpq->xsk_tx, xsk_frames);
+
+	libie_xdp_sq_unlock(&xdpq->xdp_lock);
+
+	return done_frames;
+}
+
+/**
+ * idpf_xsk_xmit_pkt - produce a single HW Tx descriptor out of AF_XDP desc
+ * @desc: AF_XDP descriptor to pull the DMA address and length from
+ * @sq: XDP queue to produce the HW Tx descriptor on
+ */
+static void idpf_xsk_xmit_pkt(struct libie_xdp_tx_desc desc,
+			      const struct libie_xdp_tx_queue *sq)
+{
+	union idpf_tx_flex_desc *tx_desc = sq->desc_ring;
+	struct idpf_tx_splitq_params tx_params = {
+		.dtype		= IDPF_TX_DESC_DTYPE_FLEX_L2TAG1_L2TAG2,
+		.eop_cmd	= IDPF_TX_DESC_CMD_EOP,
+	};
+
+	tx_desc = &tx_desc[sq->cached_ntu];
+	tx_desc->q.buf_addr = cpu_to_le64(desc.addr);
+
+	idpf_tx_splitq_build_desc(tx_desc, &tx_params,
+				  tx_params.eop_cmd | tx_params.offload.td_cmd,
+				  desc.len);
+}
+
+static u32 idpf_xsk_xmit_prep(void *_xdpq, struct libie_xdp_tx_queue *sq)
+{
+	struct idpf_queue *xdpq = _xdpq;
+
+	libie_xdp_sq_lock(&xdpq->xdp_lock);
+
+	*sq = (struct libie_xdp_tx_queue){
+		.pool		= xdpq->xsk_tx,
+		.tx_buf		= xdpq->tx_buf,
+		.desc_ring	= xdpq->desc_ring,
+		.desc_count	= xdpq->desc_count,
+		.xdp_lock	= &xdpq->xdp_lock,
+		.next_to_use	= &xdpq->next_to_use,
+	};
+
+	return IDPF_DESC_UNUSED(xdpq);
+}
+
+/**
+ * idpf_xmit_xdpq_zc - take entries from XSK Tx queue and place them onto HW Tx queue
+ * @xdpq: XDP queue to produce the HW Tx descriptors on
+ *
+ * Returns true if there is no more work that needs to be done, false otherwise
+ */
+static bool idpf_xmit_xdpq_zc(struct idpf_queue *xdpq)
+{
+	u32 budget;
+
+	budget = min_t(u32, IDPF_DESC_UNUSED(xdpq), IDPF_QUEUE_QUARTER(xdpq));
+
+	return libie_xsk_xmit_do_bulk(xdpq, xdpq->xsk_tx, budget,
+				      idpf_xsk_xmit_prep, idpf_xsk_xmit_pkt,
+				      idpf_xdp_tx_finalize);
+}
+
+/**
+ * idpf_xmit_zc - perform xmit from all XDP queues assigned to the completion queue
+ * @complq: Completion queue associated with one or more XDP queues
+ *
+ * Returns true if there is no more work that needs to be done, false otherwise
+ */
+bool idpf_xmit_zc(struct idpf_queue *complq)
+{
+	struct idpf_txq_group *xdpq_grp = complq->txq_grp;
+	bool result = true;
+	int i;
+
+	idpf_clean_xdp_irq_zc(complq);
+
+	for (i = 0; i < xdpq_grp->num_txq; i++)
+		result &= idpf_xmit_xdpq_zc(xdpq_grp->txqs[i]);
+
+	return result;
 }

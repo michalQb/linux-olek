@@ -313,6 +313,7 @@ struct idpf_ptype_state {
  * @__IDPF_Q_SW_MARKER: Used to indicate TX queue marker completions
  * @__IDPF_Q_POLL_MODE: Enable poll mode
  * @__IDPF_Q_FLAGS_NBITS: Must be last
+ * @__IDPF_Q_XSK: Queue used to handle the AF_XDP socket
  */
 enum idpf_queue_flags_t {
 	__IDPF_Q_GEN_CHK,
@@ -321,6 +322,7 @@ enum idpf_queue_flags_t {
 	__IDPF_Q_SW_MARKER,
 	__IDPF_Q_POLL_MODE,
 	__IDPF_Q_XDP,
+	__IDPF_Q_XSK,
 
 	__IDPF_Q_FLAGS_NBITS,
 };
@@ -574,10 +576,12 @@ struct idpf_queue {
 	union {
 		struct page_pool *hdr_pp;
 		struct idpf_queue **xdpqs;
+		struct xsk_buff_pool *xsk_tx;
 	};
 	union {
 		struct page_pool *pp;
 		struct device *dev;
+		struct xsk_buff_pool *xsk_rx;
 	};
 	union {
 		union virtchnl2_rx_desc *rx;
