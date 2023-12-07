@@ -192,10 +192,6 @@ static bool ctx_was_changed(struct xdp_page_head *head)
 
 static void reset_ctx(struct xdp_page_head *head, struct xdp_test_data *xdp)
 {
-	/* mem id can change if we migrate CPUs between batches */
-	if (head->frame->mem.id != xdp->rxq.mem.id)
-		head->frame->mem.id = xdp->rxq.mem.id;
-
 	if (likely(!frame_was_changed(head) && !ctx_was_changed(head)))
 		return;
 
@@ -240,7 +236,7 @@ xdp_test_run_init_page(struct page *page, struct xdp_test_data *xdp)
 	new_ctx->data = new_ctx->data_meta + meta_len;
 
 	xdp_update_frame_from_buff(new_ctx, frm);
-	frm->mem = new_ctx->rxq->mem;
+	frm->mem_type = new_ctx->rxq->mem.type;
 
 	memcpy(&head->orig_ctx, new_ctx, sizeof(head->orig_ctx));
 
