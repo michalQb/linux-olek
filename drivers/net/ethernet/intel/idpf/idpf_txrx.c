@@ -1668,6 +1668,7 @@ int idpf_vport_queues_alloc(struct idpf_vport *vport)
 			__clear_bit(__IDPF_Q_FLOW_SCH_EN,
 				    vport->txqs[j]->txq_grp->complq->flags);
 			__set_bit(__IDPF_Q_XDP, vport->txqs[j]->flags);
+			idpf_xsk_setup_xdpq(vport->txqs[j]);
 			spin_lock_init(&vport->txqs[j]->tx_lock);
 		}
 		idpf_xdp_cfg_tx_sharing(vport);

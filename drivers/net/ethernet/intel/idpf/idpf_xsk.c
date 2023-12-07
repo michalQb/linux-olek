@@ -629,14 +629,13 @@ static void idpf_clean_xdp_irq_zc(struct idpf_queue *complq)
 	do {
 		int ctype = idpf_parse_compl_desc(last_rs_desc, complq,
 						  &xdpq, gen_flag);
-		if (test_bit(__IDPF_Q_XSK, complq->flags)) {
-			dev_err(&xdpq->vport->adapter->pdev->dev,
-				"Found TxQ is not XSK queue\n");
-			goto fetch_next_desc;
-		}
-
 		switch (ctype) {
 		case IDPF_TXD_COMPLT_RS:
+			if (!test_bit(__IDPF_Q_XSK, xdpq->flags)) {
+				dev_err(&xdpq->vport->adapter->pdev->dev,
+					"Found TxQ is not XSK queue\n");
+				goto fetch_next_desc;
+			}
 			break;
 		case -ENODATA:
 			goto clean_xdpq;
