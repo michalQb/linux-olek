@@ -135,6 +135,11 @@ static void idpf_tx_buf_rel_all(struct idpf_queue *txq)
 	if (!txq->tx_buf)
 		return;
 
+	if (test_bit(__IDPF_Q_XSK, txq->flags)) {
+		idpf_xsk_clean_xdpq(txq);
+		goto skip_sk_buffs;
+	}
+
 	/* Free all the Tx buffer sk_buffs */
 	for (i = 0; i < txq->desc_count; i++) {
 		if (test_bit(__IDPF_Q_XDP, txq->flags))
@@ -143,6 +148,7 @@ static void idpf_tx_buf_rel_all(struct idpf_queue *txq)
 			idpf_tx_buf_rel(txq, &txq->tx_buf[i]);
 	}
 
+skip_sk_buffs:
 	kfree(txq->tx_buf);
 	txq->tx_buf = NULL;
 
@@ -1662,6 +1668,7 @@ int idpf_vport_queues_alloc(struct idpf_vport *vport)
 			__clear_bit(__IDPF_Q_FLOW_SCH_EN,
 				    vport->txqs[j]->txq_grp->complq->flags);
 			__set_bit(__IDPF_Q_XDP, vport->txqs[j]->flags);
+			idpf_xsk_setup_xdpq(vport->txqs[j]);
 			spin_lock_init(&vport->txqs[j]->tx_lock);
 		}
 		idpf_xdp_cfg_tx_sharing(vport);
@@ -1679,7 +1686,7 @@ err_out:
  * idpf_tx_handle_sw_marker - Handle queue marker packet
  * @tx_q: tx queue to handle software marker
  */
-static void idpf_tx_handle_sw_marker(struct idpf_queue *tx_q)
+void idpf_tx_handle_sw_marker(struct idpf_queue *tx_q)
 {
 	struct idpf_vport *vport = tx_q->vport;
 	int i;
@@ -2112,10 +2119,10 @@ static void idpf_tx_finalize_complq(struct idpf_queue *complq, int ntc,
  * 	-ENODATA if there is no completion descriptor to be cleaned
  * 	-EINVAL  if no Tx queue has been found for the completion queue
  */
-static int idpf_parse_compl_desc(struct idpf_splitq_4b_tx_compl_desc *desc,
-				 struct idpf_queue *complq,
-				 struct idpf_queue **txq,
-				 bool gen_flag)
+int idpf_parse_compl_desc(struct idpf_splitq_4b_tx_compl_desc *desc,
+			  struct idpf_queue *complq,
+			  struct idpf_queue **txq,
+			  bool gen_flag)
 {
 	int rel_tx_qid;
 	u8 ctype;	/* completion type */
@@ -3511,6 +3518,10 @@ static u32 idpf_clean_xdp_irq(struct idpf_queue *xdpq)
 	int head = tx_ntc;
 	bool gen_flag;
 
+	/* Last RS index is invalid in xsk frames */
+	if (!xdpq->tx_buf[tx_ntc].page)
+		return 0;
+
 	last_rs_desc = IDPF_SPLITQ_4B_TX_COMPLQ_DESC(complq, ntc);
 	gen_flag = test_bit(__IDPF_Q_GEN_CHK, complq->flags);
 
@@ -3636,6 +3647,7 @@ static int idpf_xmit_xdp_buff(const struct xdp_buff *xdp,
 	idpf_tx_splitq_build_desc(tx_desc, &tx_params,
 				  tx_params.eop_cmd | tx_params.offload.td_cmd,
 				  size);
+	xdpq->xdp_tx_active++;
 	ntu++;
 	if (ntu == xdpq->desc_count)
 		ntu = 0;
@@ -4565,7 +4577,9 @@ static bool idpf_tx_splitq_clean_all(struct idpf_q_vector *q_vec,
 	budget_per_q = DIV_ROUND_UP(budget, num_txq);
 
 	for (i = 0; i < num_txq; i++)
-		if (test_bit(__IDPF_Q_FLOW_SCH_EN, q_vec->tx[i]->flags))
+		if (test_bit(__IDPF_Q_XSK, q_vec->tx[i]->flags))
+			clean_complete &= idpf_xmit_zc(q_vec->tx[i]);
+		else if (test_bit(__IDPF_Q_FLOW_SCH_EN, q_vec->tx[i]->flags))
 			clean_complete &= idpf_tx_clean_fb_complq(q_vec->tx[i],
 								  budget_per_q,
 								  cleaned);

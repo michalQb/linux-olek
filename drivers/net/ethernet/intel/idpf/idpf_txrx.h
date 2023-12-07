@@ -490,6 +490,7 @@ enum idpf_queue_flags_t {
 	__IDPF_Q_SW_MARKER,
 	__IDPF_Q_POLL_MODE,
 	__IDPF_Q_XDP,
+	__IDPF_Q_XSK,
 
 	__IDPF_Q_FLAGS_NBITS,
 };
@@ -778,6 +779,7 @@ struct idpf_queue {
 	struct xdp_rxq_info xdp_rxq;
 	struct idpf_queue *xdpq;
 	struct xsk_buff_pool *xsk_pool;
+	u16 xdp_tx_active;
 
 	u16 tx_max_bufs;
 	u8 tx_min_pkt_len;
@@ -1091,6 +1093,11 @@ void idpf_rx_desc_rel(struct idpf_queue *rxq, bool bufq, s32 q_model);
 int idpf_tx_desc_alloc(struct idpf_queue *tx_q, bool bufq);
 void idpf_tx_desc_rel(struct idpf_queue *txq, bool bufq);
 int idpf_rx_bufs_init(struct idpf_queue *rxbufq);
+int idpf_parse_compl_desc(struct idpf_splitq_4b_tx_compl_desc *desc,
+			  struct idpf_queue *complq,
+			  struct idpf_queue **txq,
+			  bool gen_flag);
+void idpf_tx_handle_sw_marker(struct idpf_queue *tx_q);
 
 DECLARE_STATIC_KEY_FALSE(idpf_xdp_locking_key);
 

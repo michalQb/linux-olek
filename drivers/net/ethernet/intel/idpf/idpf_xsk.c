@@ -54,6 +54,20 @@ void idpf_set_xsk_pool(struct idpf_queue *q)
 		q->xsk_pool = NULL;
 }
 
+void idpf_xsk_setup_xdpq(struct idpf_queue *xdpq)
+{
+	struct idpf_queue *complq = xdpq->txq_grp->complq;
+
+	idpf_set_xsk_pool(xdpq);
+	if (xdpq->xsk_pool) {
+		set_bit(__IDPF_Q_XSK, xdpq->flags);
+		set_bit(__IDPF_Q_XSK, complq->flags);
+	} else {
+		clear_bit(__IDPF_Q_XSK, xdpq->flags);
+		clear_bit(__IDPF_Q_XSK, complq->flags);
+	}
+}
+
 /**
  * idpf_qp_cfg_qs - Configure all queues contained from a given array.
  * @vport: vport structure
@@ -92,7 +106,7 @@ idpf_qp_cfg_qs(struct idpf_vport *vport, struct idpf_queue **qs, int num_qs)
 		case VIRTCHNL2_QUEUE_TYPE_TX:
 			err = idpf_tx_desc_alloc(q, true);
 			if (test_bit(__IDPF_Q_XDP, q->flags))
-				idpf_set_xsk_pool(q);
+				idpf_xsk_setup_xdpq(q);
 			break;
 		case VIRTCHNL2_QUEUE_TYPE_TX_COMPLETION:
 			err = idpf_tx_desc_alloc(q, false);
@@ -157,6 +171,25 @@ idpf_qvec_toggle_napi(struct idpf_vport *vport, struct idpf_q_vector *q_vector,
 		napi_enable(&q_vector->napi);
 	else
 		napi_disable(&q_vector->napi);
+}
+
+/**
+ * idpf_trigger_sw_intr - trigger a software interrupt
+ * @hw: pointer to the HW structure
+ * @q_vector: interrupt vector to trigger the software interrupt for
+ */
+static void
+idpf_trigger_sw_intr(struct idpf_hw *hw, struct idpf_q_vector *q_vector)
+{
+	struct idpf_intr_reg *intr = &q_vector->intr_reg;
+	u32 val;
+
+	val = intr->dyn_ctl_intena_m |
+	      intr->dyn_ctl_itridx_m |    /* set no itr*/
+	      intr->dyn_ctl_swint_trig_m |
+	      intr->dyn_ctl_sw_itridx_ena_m;
+
+	writel(val, intr->dyn_ctl);
 }
 
 /**
@@ -560,3 +593,293 @@ xsk_pool_if_up:
 xsk_exit:
 	return err;
 }
+
+static void
+idpf_clean_xdp_tx_buf(struct idpf_queue *xdpq, struct idpf_tx_buf *tx_buf)
+{
+	switch (tx_buf->xdp_type) {
+	case IDPF_XDP_BUFFER_FRAME:
+		dma_unmap_single(xdpq->dev, dma_unmap_addr(tx_buf, dma),
+				 dma_unmap_len(tx_buf, len), DMA_TO_DEVICE);
+		dma_unmap_len_set(tx_buf, len, 0);
+		xdp_return_frame(tx_buf->xdpf);
+		tx_buf->xdpf = NULL;
+		break;
+	}
+
+	xdpq->xdp_tx_active--;
+	tx_buf->xdp_type = IDPF_XDP_BUFFER_NONE;
+}
+
+static void idpf_clean_xdp_irq_zc(struct idpf_queue *complq)
+{
+	struct idpf_splitq_4b_tx_compl_desc *last_rs_desc;
+	int complq_budget = complq->desc_count;
+	u32 ntc = complq->next_to_clean;
+	struct idpf_queue *xdpq = NULL;
+	u32 done_frames = 0;
+	u32 xsk_frames = 0;
+	u32 tx_ntc, cnt;
+	bool gen_flag;
+	int head, i;
+
+	last_rs_desc = IDPF_SPLITQ_4B_TX_COMPLQ_DESC(complq, ntc);
+	gen_flag = test_bit(__IDPF_Q_GEN_CHK, complq->flags);
+
+	do {
+		int ctype = idpf_parse_compl_desc(last_rs_desc, complq,
+						  &xdpq, gen_flag);
+		switch (ctype) {
+		case IDPF_TXD_COMPLT_RS:
+			if (!test_bit(__IDPF_Q_XSK, xdpq->flags)) {
+				dev_err(&xdpq->vport->adapter->pdev->dev,
+					"Found TxQ is not XSK queue\n");
+				goto fetch_next_desc;
+			}
+			break;
+		case IDPF_TXD_COMPLT_SW_MARKER:
+			idpf_tx_handle_sw_marker(xdpq);
+			break;
+		case -ENODATA:
+			goto clean_xdpq;
+		case -EINVAL:
+			goto fetch_next_desc;
+		default:
+			dev_err(&xdpq->vport->adapter->pdev->dev,
+				"Unsupported completion type for XSK\n");
+			goto fetch_next_desc;
+		}
+
+		head = le16_to_cpu(last_rs_desc->q_head_compl_tag.q_head);
+fetch_next_desc:
+		last_rs_desc++;
+		ntc++;
+		if (unlikely(ntc == complq->desc_count)) {
+			ntc = 0;
+			last_rs_desc = IDPF_SPLITQ_4B_TX_COMPLQ_DESC(complq, 0);
+			gen_flag = !gen_flag;
+			change_bit(__IDPF_Q_GEN_CHK, complq->flags);
+		}
+		prefetch(last_rs_desc);
+		complq_budget--;
+	} while (likely(complq_budget));
+
+clean_xdpq:
+	complq->next_to_clean = ntc;
+
+	if (!xdpq)
+		return;
+
+	cnt = xdpq->desc_count;
+	tx_ntc = xdpq->next_to_clean;
+	done_frames = head >= tx_ntc ? head - tx_ntc :
+				       head + cnt - tx_ntc;
+	if (!done_frames)
+		return;
+
+	if (likely(!xdpq->xdp_tx_active)) {
+		xsk_frames = done_frames;
+		goto skip;
+	}
+
+	for (i = 0; i < done_frames; i++) {
+		struct idpf_tx_buf *tx_buf = &xdpq->tx_buf[tx_ntc];
+
+		if (tx_buf->xdp_type)
+			idpf_clean_xdp_tx_buf(xdpq, tx_buf);
+		else
+			xsk_frames++;
+
+		tx_ntc++;
+		if (tx_ntc >= cnt)
+			tx_ntc = 0;
+	}
+skip:
+	xdpq->next_to_clean += done_frames;
+	if (xdpq->next_to_clean >= cnt)
+		xdpq->next_to_clean -= cnt;
+	if (xsk_frames)
+		xsk_tx_completed(xdpq->xsk_pool, xsk_frames);
+}
+
+static void idpf_xmit_pkt(struct idpf_queue *xdpq, struct xdp_desc *desc,
+			  unsigned int *total_bytes)
+{
+	struct idpf_tx_splitq_params tx_params = {
+		(enum idpf_tx_desc_dtype_value)0, 0, { }, { }
+	};
+	union idpf_tx_flex_desc *tx_desc;
+	dma_addr_t dma;
+
+	dma = xsk_buff_raw_get_dma(xdpq->xsk_pool, desc->addr);
+	xsk_buff_raw_dma_sync_for_device(xdpq->xsk_pool, dma, desc->len);
+
+	tx_desc = IDPF_FLEX_TX_DESC(xdpq, xdpq->next_to_use++);
+	tx_desc->q.buf_addr = cpu_to_le64(dma);
+	tx_params.dtype = IDPF_TX_DESC_DTYPE_FLEX_L2TAG1_L2TAG2;
+	tx_params.eop_cmd = IDPF_TX_DESC_CMD_EOP;
+
+	idpf_tx_splitq_build_desc(tx_desc, &tx_params,
+				  tx_params.eop_cmd |
+				  tx_params.offload.td_cmd,
+				  desc->len);
+	*total_bytes += desc->len;
+}
+
+static void idpf_xmit_pkt_batch(struct idpf_queue *xdpq,
+				struct xdp_desc *descs,
+				unsigned int *total_bytes)
+{
+	struct idpf_tx_splitq_params tx_params = {
+		(enum idpf_tx_desc_dtype_value)0, 0, { }, { }
+	};
+	union idpf_tx_flex_desc *tx_desc;
+	u32 ntu = xdpq->next_to_use;
+	u32 i;
+
+	loop_unrolled_for(i = 0; i < IDPF_XSK_PKTS_PER_BATCH; i++) {
+		dma_addr_t dma;
+
+		dma = xsk_buff_raw_get_dma(xdpq->xsk_pool, descs[i].addr);
+		xsk_buff_raw_dma_sync_for_device(xdpq->xsk_pool, dma,
+						 descs[i].len);
+
+		tx_desc = IDPF_FLEX_TX_DESC(xdpq, ntu++);
+		tx_desc->q.buf_addr = cpu_to_le64(dma);
+		tx_params.dtype = IDPF_TX_DESC_DTYPE_FLEX_L2TAG1_L2TAG2;
+		tx_params.eop_cmd = IDPF_TX_DESC_CMD_EOP;
+
+		idpf_tx_splitq_build_desc(tx_desc, &tx_params,
+					  tx_params.eop_cmd |
+					  tx_params.offload.td_cmd,
+					  descs[i].len);
+		*total_bytes += descs[i].len;
+	}
+	xdpq->next_to_use = ntu;
+}
+
+static void idpf_fill_tx_hw_ring(struct idpf_queue *xdpq,
+				 struct xdp_desc *descs, u32 nb_pkts,
+				 unsigned int *total_bytes)
+{
+	u32 batched, leftover, i;
+
+	batched = ALIGN_DOWN(nb_pkts, IDPF_XSK_PKTS_PER_BATCH);
+	leftover = nb_pkts & (IDPF_XSK_PKTS_PER_BATCH - 1);
+
+	for (i = 0; i < batched; i += IDPF_XSK_PKTS_PER_BATCH)
+		idpf_xmit_pkt_batch(xdpq, &descs[i], total_bytes);
+	for (; i < batched + leftover; i++)
+		idpf_xmit_pkt(xdpq, &descs[i], total_bytes);
+}
+
+static bool idpf_xmit_xdpq_zc(struct idpf_queue *xdpq)
+{
+	struct xdp_desc *descs = xdpq->xsk_pool->tx_descs;
+	struct idpf_cleaned_stats stats = { };
+	u32 nb_processed = 0;
+	int budget;
+
+	budget = IDPF_DESC_UNUSED(xdpq);
+	budget = min_t(u16, budget, xdpq->desc_count / 4);
+
+	stats.packets = xsk_tx_peek_release_desc_batch(xdpq->xsk_pool,
+						       budget);
+	if (!stats.packets)
+		return true;
+
+	if (xdpq->next_to_use + stats.packets >= xdpq->desc_count) {
+		nb_processed = xdpq->desc_count - xdpq->next_to_use;
+		idpf_fill_tx_hw_ring(xdpq, descs, nb_processed,
+				     &stats.bytes);
+		xdpq->next_to_use = 0;
+		xdpq->compl_tag_cur_gen = IDPF_TX_ADJ_COMPL_TAG_GEN(xdpq);
+	}
+
+	idpf_fill_tx_hw_ring(xdpq, &descs[nb_processed],
+			     stats.packets - nb_processed, &stats.bytes);
+
+	idpf_set_rs_bit(xdpq);
+	//idpf_update_tx_ring_stats(xdpq, &stats);
+	idpf_xdpq_update_tail(xdpq);
+
+	if (xsk_uses_need_wakeup(xdpq->xsk_pool))
+		xsk_set_tx_need_wakeup(xdpq->xsk_pool);
+
+	return stats.packets < budget;
+}
+
+bool idpf_xmit_zc(struct idpf_queue *complq)
+{
+	struct idpf_txq_group *xdpq_grp = complq->txq_grp;
+	bool result = true;
+	int i;
+
+	idpf_clean_xdp_irq_zc(complq);
+
+	for (i = 0; i < xdpq_grp->num_txq; i++)
+		result &= idpf_xmit_xdpq_zc(xdpq_grp->txqs[i]);
+
+	return result;
+}
+
+int idpf_xsk_splitq_wakeup(struct net_device *netdev, u32 q_id,
+			   u32 __always_unused flags)
+{
+	struct idpf_netdev_priv *np = netdev_priv(netdev);
+	struct idpf_vport *vport = np->vport;
+	struct idpf_q_vector *q_vector;
+	struct idpf_queue *q;
+	int idx;
+
+
+	if (idpf_vport_ctrl_is_locked(netdev))
+		return -EBUSY;
+
+	if (unlikely(!vport->link_up))
+		return -ENETDOWN;
+
+	if (unlikely(!idpf_xdp_is_prog_ena(vport)))
+		return -ENXIO;
+
+	idx = q_id + vport->xdp_txq_offset;
+
+	if (unlikely(idx >= vport->num_txq))
+		return -ENXIO;
+
+	if (unlikely(!test_bit(__IDPF_Q_XSK, vport->txqs[idx]->flags)))
+		return -ENXIO;
+
+	q = vport->txqs[idx];
+	q_vector = q->txq_grp->complq->q_vector;
+
+	if (!napi_if_scheduled_mark_missed(&q_vector->napi))
+		idpf_trigger_sw_intr(&vport->adapter->hw, q_vector);
+
+	return 0;
+}
+
+void idpf_xsk_clean_xdpq(struct idpf_queue *xdpq)
+{
+	u32 ntc = xdpq->next_to_clean, ntu = xdpq->next_to_use;
+	u32 xsk_frames = 0;
+
+	while (ntc != ntu) {
+		struct idpf_tx_buf *tx_buf = &xdpq->tx_buf[ntc];
+
+		if (tx_buf->xdp_type)
+			idpf_clean_xdp_tx_buf(xdpq, tx_buf);
+		else
+			xsk_frames++;
+
+		tx_buf->page = NULL;
+
+		ntc++;
+		if (ntc >= xdpq->desc_count)
+			ntc = 0;
+	}
+
+	if (xsk_frames)
+		xsk_tx_completed(xdpq->xsk_pool, xsk_frames);
+}
+
