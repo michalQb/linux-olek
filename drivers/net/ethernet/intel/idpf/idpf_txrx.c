@@ -2117,8 +2117,6 @@ static int idpf_parse_compl_desc(struct idpf_splitq_4b_tx_compl_desc *desc,
 	u8 ctype;	/* completion type */
 	u16 gen;
 
-	*txq = NULL;
-
 	/* if the descriptor isn't done, no work yet to do */
 	gen = (le16_to_cpu(desc->qid_comptype_gen) &
 	      IDPF_TXD_COMPLQ_GEN_M) >> IDPF_TXD_COMPLQ_GEN_S;
