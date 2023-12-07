@@ -4114,7 +4114,7 @@ static int bpf_xdp_frags_shrink_tail(struct xdp_buff *xdp, int offset)
 		if (skb_frag_size(frag) == shrink) {
 			struct page *page = skb_frag_page(frag);
 
-			__xdp_return(page_address(page), &xdp->rxq->mem,
+			__xdp_return(page_address(page), xdp->rxq->mem.type,
 				     false, NULL);
 			n_frags_free++;
 		} else {

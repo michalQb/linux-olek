@@ -703,9 +703,18 @@ void page_pool_put_unrefed_page(struct page_pool *pool, struct page *page,
 }
 EXPORT_SYMBOL(page_pool_put_unrefed_page);
 
+static void page_pool_bulk_splice(struct xdp_frame_bulk *bulk, void *data)
+{
+	if (unlikely(bulk->count == ARRAY_SIZE(bulk->q))) {
+		page_pool_put_page_bulk(bulk->q, bulk->count);
+		bulk->count = 0;
+	}
+
+	bulk->q[bulk->count++] = data;
+}
+
 /**
  * page_pool_put_page_bulk() - release references on multiple pages
- * @pool:	pool from which pages were allocated
  * @data:	array holding page pointers
  * @count:	number of pages in @data
  *
@@ -718,11 +727,14 @@ EXPORT_SYMBOL(page_pool_put_unrefed_page);
  * Please note the caller must not use data area after running
  * page_pool_put_page_bulk(), as this function overwrites it.
  */
-void page_pool_put_page_bulk(struct page_pool *pool, void **data,
-			     int count)
+void page_pool_put_page_bulk(void **data, int count)
 {
+	struct page_pool *pool = NULL;
+	struct xdp_frame_bulk sub;
 	int i, bulk_len = 0;
 	bool in_softirq;
+
+	xdp_frame_bulk_init(&sub);
 
 	for (i = 0; i < count; i++) {
 		struct page *page = virt_to_head_page(data[i]);
@@ -731,11 +743,24 @@ void page_pool_put_page_bulk(struct page_pool *pool, void **data,
 		if (!page_pool_is_last_ref(page))
 			continue;
 
+		if (unlikely(!pool)) {
+			pool = page->pp;
+		} else if (page->pp != pool) {
+			/* If the page belongs to a different page_pool,
+			 * splice the array and handle it recursively.
+			 */
+			page_pool_bulk_splice(&sub, data[i]);
+			continue;
+		}
+
 		page = __page_pool_put_page(pool, page, -1, false);
 		/* Approved for bulk recycling in ptr_ring cache */
 		if (page)
 			data[bulk_len++] = page;
 	}
+
+	if (sub.count)
+		page_pool_put_page_bulk(sub.q, sub.count);
 
 	if (unlikely(!bulk_len))
 		return;
