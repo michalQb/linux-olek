@@ -526,6 +526,8 @@ struct idpf_intr_reg {
 	u32 dyn_ctl_itridx_s;
 	u32 dyn_ctl_itridx_m;
 	u32 dyn_ctl_intrvl_s;
+	u32 dyn_ctl_swint_trig_m;
+	u32 dyn_ctl_sw_itridx_ena_m;
 	void __iomem *rx_itr;
 	void __iomem *tx_itr;
 	void __iomem *icr_ena;
