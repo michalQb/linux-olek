@@ -698,6 +698,20 @@ void page_pool_put_unrefed_page(struct page_pool *pool, struct page *page,
 }
 EXPORT_SYMBOL(page_pool_put_unrefed_page);
 
+static void page_pool_bulk_splice(struct xdp_frame_bulk *fb,
+				  struct page_pool *pool, void *data)
+{
+	if (unlikely(!fb->xa)) {
+		fb->xa = pool;
+		fb->count = 0;
+	} else if (unlikely(fb->count == ARRAY_SIZE(fb->q))) {
+		page_pool_put_page_bulk(fb->xa, fb->q, fb->count);
+		fb->count = 0;
+	}
+
+	fb->q[fb->count++] = data;
+}
+
 /**
  * page_pool_put_page_bulk() - release references on multiple pages
  * @pool:	pool from which pages were allocated
@@ -716,8 +730,11 @@ EXPORT_SYMBOL(page_pool_put_unrefed_page);
 void page_pool_put_page_bulk(struct page_pool *pool, void **data,
 			     int count)
 {
+	struct xdp_frame_bulk fb;
 	int i, bulk_len = 0;
 	bool in_softirq;
+
+	xdp_frame_bulk_init(&fb);
 
 	for (i = 0; i < count; i++) {
 		struct page *page = virt_to_head_page(data[i]);
@@ -726,11 +743,22 @@ void page_pool_put_page_bulk(struct page_pool *pool, void **data,
 		if (!page_pool_is_last_ref(page))
 			continue;
 
+		/* If the page belongs to a different page_pool, splice the
+		 * array and handle it recursively.
+		 */
+		if (page->pp != pool) {
+			page_pool_bulk_splice(&fb, page->pp, data[i]);
+			continue;
+		}
+
 		page = __page_pool_put_page(pool, page, -1, false);
 		/* Approved for bulk recycling in ptr_ring cache */
 		if (page)
 			data[bulk_len++] = page;
 	}
+
+	if (fb.xa && likely(fb.count))
+		page_pool_put_page_bulk(fb.xa, fb.q, fb.count);
 
 	if (unlikely(!bulk_len))
 		return;
