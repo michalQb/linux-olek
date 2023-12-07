@@ -857,7 +857,7 @@ int idpf_xsk_splitq_wakeup(struct net_device *netdev, u32 q_id,
 	return 0;
 }
 
-void idpf_xsk_clean_xdp_ring(struct idpf_queue *xdpq)
+void idpf_xsk_clean_xdpq(struct idpf_queue *xdpq)
 {
 	u32 ntc = xdpq->next_to_clean, ntu = xdpq->next_to_use;
 	u32 xsk_frames = 0;
