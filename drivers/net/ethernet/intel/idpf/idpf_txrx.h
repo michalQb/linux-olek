@@ -769,7 +769,7 @@ struct idpf_queue {
 	struct xdp_rxq_info xdp_rxq;
 	struct idpf_queue *xdpq;
 	struct xsk_buff_pool *xsk_pool;
-	struct xdp_tx_active;
+	u16 xdp_tx_active;
 
 	u16 tx_max_bufs;
 	u8 tx_min_pkt_len;

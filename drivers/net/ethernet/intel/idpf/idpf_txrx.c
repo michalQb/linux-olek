@@ -136,7 +136,7 @@ static void idpf_tx_buf_rel_all(struct idpf_queue *txq)
 		return;
 
 	if (test_bit(__IDPF_Q_XSK, txq->flags)) {
-		idpf_xsk_clean_xdp_ring(txq);
+		idpf_xsk_clean_xdpq(txq);
 		goto skip_sk_buffs;
 	}
 

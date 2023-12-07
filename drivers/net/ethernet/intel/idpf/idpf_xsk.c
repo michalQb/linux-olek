@@ -598,7 +598,7 @@ static void
 idpf_clean_xdp_tx_buf(struct idpf_queue *xdpq, struct idpf_tx_buf *tx_buf)
 {
 	switch (tx_buf->xdp_type) {
-	case IAVF_XDP_BUFFER_FRAME:
+	case IDPF_XDP_BUFFER_FRAME:
 		dma_unmap_single(xdpq->dev, dma_unmap_addr(tx_buf, dma),
 				 dma_unmap_len(tx_buf, len), DMA_TO_DEVICE);
 		dma_unmap_len_set(tx_buf, len, 0);
@@ -608,7 +608,7 @@ idpf_clean_xdp_tx_buf(struct idpf_queue *xdpq, struct idpf_tx_buf *tx_buf)
 	}
 
 	xdpq->xdp_tx_active--;
-	tx_buf->xdp_type = IAVF_XDP_BUFFER_NONE;
+	tx_buf->xdp_type = IDPF_XDP_BUFFER_NONE;
 }
 
 static void idpf_clean_xdp_irq_zc(struct idpf_queue *complq)
@@ -629,7 +629,7 @@ static void idpf_clean_xdp_irq_zc(struct idpf_queue *complq)
 	do {
 		int ctype = idpf_parse_compl_desc(last_rs_desc, complq,
 						  &xdpq, gen_flag);
-		if (test_bit(__IDPF_Q_XSK, q->flags)) {
+		if (test_bit(__IDPF_Q_XSK, complq->flags)) {
 			dev_err(&xdpq->vport->adapter->pdev->dev,
 				"Found TxQ is not XSK queue\n");
 			goto fetch_next_desc;
@@ -639,7 +639,7 @@ static void idpf_clean_xdp_irq_zc(struct idpf_queue *complq)
 		case IDPF_TXD_COMPLT_RS:
 			break;
 		case -ENODATA:
-			goto exit_xdp_irq;
+			goto clean_xdpq;
 		case -EINVAL:
 			goto fetch_next_desc;
 		default:
@@ -662,6 +662,7 @@ fetch_next_desc:
 		complq_budget--;
 	} while (likely(complq_budget));
 
+clean_xdpq:
 	complq->next_to_clean = ntc;
 
 	if (!xdpq)
@@ -683,7 +684,7 @@ fetch_next_desc:
 		struct idpf_tx_buf *tx_buf = &xdpq->tx_buf[tx_ntc];
 
 		if (tx_buf->xdp_type)
-			idpf_clean_xdp_tx_buf(xdp_ring, tx_buf);
+			idpf_clean_xdp_tx_buf(xdpq, tx_buf);
 		else
 			xsk_frames++;
 
@@ -705,7 +706,7 @@ static void idpf_xmit_pkt(struct idpf_queue *xdpq, struct xdp_desc *desc,
 	struct idpf_tx_splitq_params tx_params = {
 		(enum idpf_tx_desc_dtype_value)0, 0, { }, { }
 	};
-	struct idpf_tx_flex_desc *tx_desc;
+	union idpf_tx_flex_desc *tx_desc;
 	dma_addr_t dma;
 
 	dma = xsk_buff_raw_get_dma(xdpq->xsk_pool, desc->addr);
@@ -719,7 +720,7 @@ static void idpf_xmit_pkt(struct idpf_queue *xdpq, struct xdp_desc *desc,
 	idpf_tx_splitq_build_desc(tx_desc, &tx_params,
 				  tx_params.eop_cmd |
 				  tx_params.offload.td_cmd,
-				  desc.len);
+				  desc->len);
 	*total_bytes += desc->len;
 }
 
@@ -730,8 +731,8 @@ static void idpf_xmit_pkt_batch(struct idpf_queue *xdpq,
 	struct idpf_tx_splitq_params tx_params = {
 		(enum idpf_tx_desc_dtype_value)0, 0, { }, { }
 	};
-	struct idpf_tx_flex_desc *tx_desc;
-	u16 ntu = xdpq->next_to_use;
+	union idpf_tx_flex_desc *tx_desc;
+	u32 ntu = xdpq->next_to_use;
 	u32 i;
 
 	loop_unrolled_for(i = 0; i < IDPF_XSK_PKTS_PER_BATCH; i++) {
@@ -749,7 +750,7 @@ static void idpf_xmit_pkt_batch(struct idpf_queue *xdpq,
 		idpf_tx_splitq_build_desc(tx_desc, &tx_params,
 					  tx_params.eop_cmd |
 					  tx_params.offload.td_cmd,
-					  desc.len);
+					  descs[i].len);
 		*total_bytes += descs[i].len;
 	}
 	xdpq->next_to_use = ntu;
@@ -777,7 +778,7 @@ static bool idpf_xmit_xdpq_zc(struct idpf_queue *xdpq)
 	u32 nb_processed = 0;
 	int budget;
 
-	budget = IDPF_DESC_UNUSED(xdpq):
+	budget = IDPF_DESC_UNUSED(xdpq);
 	budget = min_t(u16, budget, xdpq->desc_count / 4);
 
 	stats.packets = xsk_tx_peek_release_desc_batch(xdpq->xsk_pool,
@@ -815,7 +816,7 @@ bool idpf_xmit_zc(struct idpf_queue *complq)
 	idpf_clean_xdp_irq_zc(complq);
 
 	for (i = 0; i < xdpq_grp->num_txq; i++)
-		result &= idpf_xmit_xdpq_zc(txqs[i]);
+		result &= idpf_xmit_xdpq_zc(xdpq_grp->txqs[i]);
 
 	return result;
 }
@@ -827,13 +828,13 @@ int idpf_xsk_splitq_wakeup(struct net_device *netdev, u32 q_id,
 	struct idpf_vport *vport = np->vport;
 	struct idpf_q_vector *q_vector;
 	struct idpf_queue *q;
-	int idx, ret;
+	int idx;
 
 
 	if (idpf_vport_ctrl_is_locked(netdev))
 		return -EBUSY;
 
-	if (unlikely(!vport->active))
+	if (unlikely(!vport->link_up))
 		return -ENETDOWN;
 
 	if (unlikely(!idpf_xdp_is_prog_ena(vport)))
@@ -851,7 +852,7 @@ int idpf_xsk_splitq_wakeup(struct net_device *netdev, u32 q_id,
 	q_vector = q->txq_grp->complq->q_vector;
 
 	if (!napi_if_scheduled_mark_missed(&q_vector->napi))
-		idpf_trigger_sw_intr(adapter, q_vector);
+		idpf_trigger_sw_intr(&vport->adapter->hw, q_vector);
 
 	return 0;
 }
