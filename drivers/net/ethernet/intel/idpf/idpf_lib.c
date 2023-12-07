@@ -2591,11 +2591,6 @@ void idpf_free_dma_mem(struct idpf_hw *hw, struct idpf_dma_mem *mem)
 	mem->pa = 0;
 }
 
-int idpf_xsk_wakeup(struct net_device *netdev, u32 queue_id, u32 flags)
-{
-	return 0;
-}
-
 static const struct net_device_ops idpf_netdev_ops_splitq = {
 	.ndo_open = idpf_open,
 	.ndo_stop = idpf_stop,
@@ -2610,7 +2605,7 @@ static const struct net_device_ops idpf_netdev_ops_splitq = {
 	.ndo_tx_timeout = idpf_tx_timeout,
 	.ndo_bpf = idpf_xdp,
 	.ndo_xdp_xmit = idpf_xdp_xmit,
-	.ndo_xsk_wakeup = idpf_xsk_wakeup,
+	.ndo_xsk_wakeup = idpf_xsk_splitq_wakeup,
 };
 
 static const struct net_device_ops idpf_netdev_ops_singleq = {
