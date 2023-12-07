@@ -311,6 +311,7 @@ struct idpf_ptype_state {
  * @__IDPF_Q_NOIRQ: queue is polling-driven and has no interrupt
  * @__IDPF_Q_XDP: this is an XDP queue
  * @__IDPF_Q_FLAGS_NBITS: Must be last
+ * @__IDPF_Q_XSK: Queue used to handle the AF_XDP socket
  */
 enum idpf_queue_flags_t {
 	__IDPF_Q_GEN_CHK,
@@ -321,6 +322,7 @@ enum idpf_queue_flags_t {
 	__IDPF_Q_HSPLIT_EN,
 	__IDPF_Q_NOIRQ,
 	__IDPF_Q_XDP,
+	__IDPF_Q_XSK,
 
 	__IDPF_Q_FLAGS_NBITS,
 };
@@ -380,26 +382,28 @@ struct idpf_intr_reg {
  * struct idpf_q_vector
  * @vport: Vport back pointer
  * @napi: napi handler
+ * @total_events: Number of interrupts processed
  * @v_idx: Vector index
  * @wb_on_itr: WB on ITR enabled or not
  * @intr_reg: See struct idpf_intr_reg
+ * @num_rxq: Number of RX queues
  * @num_txq: Number of TX queues
+ * @num_bufq: Number of buffer queues
  * @num_complq: number of completion queues
+ * @num_xsksq: number of XSk send queues
+ * @rx: Array of RX queues to service
  * @tx: Array of TX queues to service
+ * @bufq: Array of buffer queues to service
  * @complq: array of completion queues
+ * @xsksq: array of XSk send queues
  * @tx_dim: Data for TX net_dim algorithm
  * @tx_itr_value: TX interrupt throttling rate
  * @tx_intr_mode: Dynamic ITR or not
  * @tx_itr_idx: TX ITR index
- * @num_rxq: Number of RX queues
- * @rx: Array of RX queues to service
  * @rx_dim: Data for RX net_dim algorithm
  * @rx_itr_value: RX interrupt throttling rate
  * @rx_intr_mode: Dynamic ITR or not
  * @rx_itr_idx: RX ITR index
- * @num_bufq: Number of buffer queues
- * @bufq: Array of buffer queues to service
- * @total_events: Number of interrupts processed
  * @affinity_mask: CPU affinity mask
  */
 struct idpf_q_vector {
@@ -410,10 +414,12 @@ struct idpf_q_vector {
 	u16 num_txq;
 	u16 num_bufq;
 	u16 num_complq;
+	u16 num_xsksq;
 	struct idpf_rx_queue **rx;
 	struct idpf_tx_queue **tx;
 	struct idpf_buf_queue **bufq;
 	struct idpf_compl_queue **complq;
+	struct idpf_tx_queue **xsksq;
 
 	struct idpf_intr_reg intr_reg;
 	__libeth_cacheline_group_end(read_mostly);
@@ -440,7 +446,7 @@ struct idpf_q_vector {
 	cpumask_var_t affinity_mask;
 	__libeth_cacheline_group_end(cold);
 };
-__libeth_cacheline_group_assert(struct idpf_q_vector, read_mostly, 112);
+__libeth_cacheline_group_assert(struct idpf_q_vector, read_mostly, 128);
 __libeth_cacheline_group_assert(struct idpf_q_vector, read_write,
 				432 + 2 * sizeof(struct dim));
 
@@ -581,6 +587,7 @@ __libeth_cacheline_set_assert(struct idpf_rx_queue,
  * @desc_ring: Descriptor ring memory
  * @txq_grp: See struct idpf_txq_group
  * @complq: corresponding completion queue in XDP mode
+ * @pool: corresponding XSk pool if installed
  * @dev: Device back pointer for DMA mapping
  * @tail: Tail offset. Used for both queue models single and split
  * @flags: See enum idpf_queue_flags_t
@@ -654,7 +661,10 @@ struct idpf_tx_queue {
 		struct idpf_txq_group *txq_grp;
 		struct idpf_compl_queue *complq;
 	};
-	struct device *dev;
+	union {
+		struct device *dev;
+		struct xsk_buff_pool *pool;
+	};
 	void __iomem *tail;
 
 	DECLARE_BITMAP(flags, __IDPF_Q_FLAGS_NBITS);
