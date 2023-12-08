@@ -52,7 +52,7 @@ static u32 libie_rx_hw_len_truesize(const struct page_pool_params *pp,
 static void libie_rx_page_pool_params(struct libie_buf_queue *bq,
 				      struct page_pool_params *pp)
 {
-	pp->offset = LIBIE_SKB_HEADROOM;
+	pp->offset = bq->xdp ? LIBIE_XDP_HEADROOM : LIBIE_SKB_HEADROOM;
 	/* HW-writeable / syncable length per one page */
 	pp->max_len = LIBIE_RX_PAGE_LEN(pp->offset);
 
@@ -134,17 +134,34 @@ int libie_rx_page_pool_create(struct libie_buf_queue *bq,
 		.dev		= napi->dev->dev.parent,
 		.netdev		= napi->dev,
 		.napi		= napi,
-		.dma_dir	= DMA_FROM_DEVICE,
 	};
+	struct xdp_mem_info mem;
+	struct page_pool *pool;
+	int ret;
+
+	pp.dma_dir = bq->xdp ? DMA_BIDIRECTIONAL : DMA_FROM_DEVICE;
 
 	if (!bq->hsplit)
 		libie_rx_page_pool_params(bq, &pp);
 	else if (!libie_rx_page_pool_params_zc(bq, &pp))
 		return -EINVAL;
 
-	bq->pp = page_pool_create(&pp);
+	pool = page_pool_create(&pp);
+	if (IS_ERR(pool))
+		return PTR_ERR(pool);
 
-	return PTR_ERR_OR_ZERO(bq->pp);
+	ret = xdp_reg_mem_model(&mem, MEM_TYPE_PAGE_POOL, pool);
+	if (ret)
+		goto err_mem;
+
+	bq->pp = pool;
+
+	return 0;
+
+err_mem:
+	page_pool_destroy(pool);
+
+	return ret;
 }
 EXPORT_SYMBOL_NS_GPL(libie_rx_page_pool_create, LIBIE);
 
@@ -154,7 +171,12 @@ EXPORT_SYMBOL_NS_GPL(libie_rx_page_pool_create, LIBIE);
  */
 void libie_rx_page_pool_destroy(struct libie_buf_queue *bq)
 {
-	page_pool_destroy(bq->pp);
+	struct xdp_mem_info mem = {
+		.type	= MEM_TYPE_PAGE_POOL,
+		.id	= bq->pp->xdp_mem_id,
+	};
+
+	xdp_unreg_mem_model(&mem);
 	bq->pp = NULL;
 }
 EXPORT_SYMBOL_NS_GPL(libie_rx_page_pool_destroy, LIBIE);
