@@ -15,8 +15,10 @@
 
 /* Space reserved in front of each frame */
 #define LIBIE_SKB_HEADROOM	(NET_SKB_PAD + NET_IP_ALIGN)
+#define LIBIE_XDP_HEADROOM	(ALIGN(XDP_PACKET_HEADROOM, NET_SKB_PAD) + \
+				 NET_IP_ALIGN)
 /* Maximum headroom to calculate max MTU below */
-#define LIBIE_MAX_HEADROOM	LIBIE_SKB_HEADROOM
+#define LIBIE_MAX_HEADROOM	LIBIE_XDP_HEADROOM
 /* Link layer / L2 overhead: Ethernet, 2 VLAN tags (C + S), FCS */
 #define LIBIE_RX_LL_LEN		(ETH_HLEN + 2 * VLAN_HLEN + ETH_FCS_LEN)
 /* Maximum supported L2-L4 header length */
@@ -87,6 +89,7 @@ enum libie_rx_buf_type {
  * @rx_buf_len: HW-writeable length per each buffer
  * @type: type of the buffers this queue has
  * @hsplit: flag whether header split is enabled
+ * @xdp: flag indicating whether XDP is enabled
  */
 struct libie_buf_queue {
 	struct page_pool	*pp;
@@ -100,6 +103,7 @@ struct libie_buf_queue {
 	enum libie_rx_buf_type	type:2;
 
 	bool			hsplit:1;
+	bool			xdp:1;
 };
 
 int libie_rx_page_pool_create(struct libie_buf_queue *bq,
