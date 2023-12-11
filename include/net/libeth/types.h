@@ -4,7 +4,7 @@
 #ifndef __LIBETH_TYPES_H
 #define __LIBETH_TYPES_H
 
-#include <linux/u64_stats_sync.h>
+#include <net/xsk_buff_pool.h>
 
 struct libeth_netdev_priv {
 	u32				curr_xdpsqs;
@@ -154,5 +154,97 @@ struct libeth_xdpsq_stats {
 } __libeth_stats_aligned;
 
 #undef ___live
+
+/* XDP */
+
+/* &xdp_buff_xsk is the largest structure &libeth_xdp_buff gets casted to,
+ * pick maximum pointer-compatible alignment.
+ */
+#define __libeth_xdp_buff_aligned					    \
+	__aligned(IS_ALIGNED(sizeof(struct xdp_buff_xsk), 16) ? 16 :	    \
+		  IS_ALIGNED(sizeof(struct xdp_buff_xsk), 8) ? 8 :	    \
+		  sizeof(long))
+
+struct libeth_xdp_buff {
+	union {
+		struct xdp_buff		base;
+		void			*data;
+	};
+
+	const void			*desc;
+	unsigned long			priv[] __libeth_xdp_buff_aligned;
+} __libeth_xdp_buff_aligned;
+static_assert(offsetof(struct libeth_xdp_buff, data) ==
+	      offsetof(struct xdp_buff_xsk, xdp.data));
+static_assert(offsetof(struct libeth_xdp_buff, desc) ==
+	      offsetof(struct xdp_buff_xsk, cb));
+static_assert(IS_ALIGNED(sizeof(struct xdp_buff_xsk),
+			 __alignof(struct libeth_xdp_buff)));
+
+#define __libeth_xdp_psz0(...)
+#define __libeth_xdp_psz1(...)		sizeof(__VA_ARGS__)
+#define __libeth_xdp_priv_sz(...)					    \
+	CONCATENATE(__libeth_xdp_psz, COUNT_ARGS(__VA_ARGS__))(__VA_ARGS__)
+
+#define LIBETH_XDP_PRIV_SZ(sz)						    \
+	(ALIGN(sz, __alignof(struct libeth_xdp_buff)) / sizeof(long))
+
+/* Performs XSK_CHECK_PRIV_TYPE() */
+#define LIBETH_XDP_ASSERT_PRIV_SZ(sz)					    \
+	static_assert(offsetofend(struct xdp_buff_xsk, cb) >=		    \
+		      struct_size_t(struct libeth_xdp_buff, priv,	    \
+				    LIBETH_XDP_PRIV_SZ(sz)))
+
+#define ___LIBETH_XDP_DECLARE_BUFF(name, up, ...)			    \
+	union {								    \
+		u8 up[struct_size_t(struct libeth_xdp_buff, priv,	    \
+				    LIBETH_XDP_PRIV_SZ(__VA_ARGS__ + 0))];  \
+		struct libeth_xdp_buff	name;				    \
+									    \
+		LIBETH_XDP_ASSERT_PRIV_SZ(__VA_ARGS__ + 0);		    \
+	}
+#define ___LIBETH_XDP_ONSTACK_BUFF(name, ...)				    \
+	_DEFINE_FLEX(struct libeth_xdp_buff, name, priv,		    \
+		     LIBETH_XDP_PRIV_SZ(__VA_ARGS__ + 0), /* no init */);   \
+	LIBETH_XDP_ASSERT_PRIV_SZ(__VA_ARGS__ + 0)
+
+/* Take private space size as argument */
+#define __LIBETH_XDP_DECLARE_BUFF(name, ...)				    \
+	___LIBETH_XDP_DECLARE_BUFF(name, __UNIQUE_ID(raw_), ##__VA_ARGS__)
+#define __LIBETH_XDP_ONSTACK_BUFF(name, ...)				    \
+	___LIBETH_XDP_ONSTACK_BUFF(name, ##__VA_ARGS__)
+
+/* Take type or variable name as argument */
+#define LIBETH_XDP_DECLARE_BUFF(name, ...)				    \
+	__LIBETH_XDP_DECLARE_BUFF(name, __libeth_xdp_priv_sz(__VA_ARGS__))
+#define LIBETH_XDP_ONSTACK_BUFF(name, ...)				    \
+	__LIBETH_XDP_ONSTACK_BUFF(name, __libeth_xdp_priv_sz(__VA_ARGS__))
+
+/* XDPSQ sharing */
+
+struct libeth_xdpsq_lock {
+	spinlock_t			lock;
+	bool				share;
+};
+
+/* XDPSQ clean-up timers */
+
+struct libeth_xdpsq_timer {
+	void				*xdpsq;
+	struct libeth_xdpsq_lock	*lock;
+
+	struct delayed_work		dwork;
+};
+
+/* Rx polling path */
+
+struct libeth_xdp_buff_stash {
+	void				*data;
+	u16				headroom;
+	u16				len;
+
+	u32				frame_sz:24;
+	enum xdp_buff_flags		flags:8;
+} __aligned_largest;
 
 #endif /* __LIBETH_TYPES_H */
