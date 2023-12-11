@@ -4,3 +4,8 @@
 obj-$(CONFIG_LIBETH)		+= libeth.o
 
 libeth-y			:= rx.o
+libeth-y			+= tx.o
+
+obj-$(CONFIG_LIBETH_XDP)	+= libeth_xdp.o
+
+libeth_xdp-y			+= xdp.o
