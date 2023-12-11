@@ -82,4 +82,10 @@ static inline void libie_tx_complete_buf(struct libie_tx_buffer *buf,
 	buf->type = LIBIE_TX_BUF_EMPTY;
 }
 
+struct xdp_frame_bulk;
+
+void libie_tx_complete_any(struct libie_tx_buffer *buf, struct device *dev,
+			   struct xdp_frame_bulk *bq, u32 *xdp_tx_active,
+			   struct libie_sq_onstack_stats *ss);
+
 #endif /* __LIBIE_TX_H */
