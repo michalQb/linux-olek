@@ -170,6 +170,7 @@ do {								\
 
 #define IDPF_XDP_ACT_FINALIZE_TX	BIT(0)
 #define IDPF_XDP_ACT_FINALIZE_REDIR	BIT(1)
+#define IDPF_XDP_ACT_STOP_NOW		BIT(2)
 
 #define IDPF_XDP_MAX_MTU		3046
 
@@ -218,6 +219,7 @@ struct idpf_tx_buf {
 		struct sk_buff *skb;	/* used for .ndo_start_xmit() */
 		struct page *page;	/* used for XDP_TX */
 		struct xdp_frame *xdpf; /* used for .ndo_xdp_xmit() */
+		struct xdp_buff *xdp;	/* used for XDP_TX in ZC mode */
 	};
 	DEFINE_DMA_UNMAP_ADDR(dma);
 	DEFINE_DMA_UNMAP_LEN(len);
@@ -655,6 +657,7 @@ union idpf_queue_stats {
  * @tail: Tail offset. Used for both queue models single and split. In splitq
  *	  model relevant only for TX queue and RX queue.
  * @tx_buf: See struct idpf_tx_buf
+ * @xdp_buf: Buffer used to support AF_XDP in zero-copy mode
  * @rx_buf: Struct with RX buffer related members
  * @rx_buf.buf: See struct idpf_rx_buf
  * @rx_buf.hdr_buf_pa: DMA handle
@@ -740,6 +743,7 @@ struct idpf_queue {
 	void __iomem *tail;
 	union {
 		struct idpf_tx_buf *tx_buf;
+		struct xdp_buff **xdp_buf;
 		struct {
 			struct idpf_rx_buf *buf;
 			dma_addr_t hdr_buf_pa;
