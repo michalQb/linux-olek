@@ -574,6 +574,167 @@ xsk_exit:
 }
 
 /**
+ * idpf_init_rx_descs_zc - pick buffers from XSK buffer pool and use it
+ * @pool: XSK Buffer pool to pull the buffers from
+ * @xdp: SW ring of xdp_buff that will hold the buffers
+ * @buf_desc: Pointer to buffer descriptors that will be filled
+ * @first_buf_id: ID of the first buffer to be filled
+ * @count: The number of buffers to allocate
+ *
+ * This function allocates a number of Rx buffers from the fill queue
+ * or the internal recycle mechanism and places them on the buffer queue.
+ *
+ * Note that queue wrap should be handled by caller of this function.
+ *
+ * Returns the amount of allocated Rx descriptors
+ */
+static u32 idpf_init_rx_descs_zc(struct xsk_buff_pool *pool,
+				 struct xdp_buff **xdp,
+				 struct virtchnl2_splitq_rx_buf_desc *buf_desc,
+				 u32 first_buf_id,
+				 u32 count)
+{
+	dma_addr_t dma;
+	u32 num_buffs;
+	u32 i;
+
+	num_buffs = xsk_buff_alloc_batch(pool, xdp, count);
+	for (i = 0; i < num_buffs; i++) {
+		dma = xsk_buff_xdp_get_dma(*xdp);
+		buf_desc->pkt_addr = cpu_to_le64(dma);
+		buf_desc->qword0.buf_id = cpu_to_le16(i + first_buf_id);
+
+		buf_desc++;
+		xdp++;
+	}
+
+	return num_buffs;
+}
+
+/**
+ * __idpf_alloc_rx_buffers_zc - allocate a number of Rx buffers
+ * @rxbufq: buffer queue
+ * @count: The number of buffers to allocate
+ *
+ * Place the @count of descriptors onto buffer queue. Handle the queue wrap
+ * for case where space from next_to_use up to the end of ring is less
+ * than @count. Finally do a tail bump.
+ *
+ * Returns true if all allocations were successful, false if any fail.
+ */
+static bool __idpf_alloc_rx_buffers_zc(struct idpf_queue *rxbufq, u32 count)
+{
+	struct virtchnl2_splitq_rx_buf_desc *buf_desc;
+	u32 nb_buffs_extra = 0, nb_buffs = 0;
+	u32 ntu = rxbufq->next_to_use;
+	u32 total_count = count;
+	struct xdp_buff **xdp;
+
+	buf_desc = &rxbufq->split_buf[ntu];
+	xdp = &rxbufq->xsk[ntu];
+
+	if (ntu + count >= rxbufq->desc_count) {
+		nb_buffs_extra = idpf_init_rx_descs_zc(rxbufq->xsk_rx, xdp,
+						       buf_desc,
+						       ntu,
+						       rxbufq->desc_count - ntu);
+		if (nb_buffs_extra != rxbufq->desc_count - ntu) {
+			ntu += nb_buffs_extra;
+			goto exit;
+		}
+		buf_desc = &rxbufq->split_buf[0];
+		xdp = &rxbufq->xsk[0];
+		ntu = 0;
+		count -= nb_buffs_extra;
+		idpf_rx_buf_hw_update(rxbufq, 0);
+
+		if (!count)
+			goto exit;
+	}
+
+	nb_buffs = idpf_init_rx_descs_zc(rxbufq->xsk_rx, xdp,
+					 buf_desc, ntu, count);
+
+	ntu += nb_buffs;
+	if (ntu == rxbufq->desc_count)
+		ntu = 0;
+
+exit:
+	if (rxbufq->next_to_use != ntu)
+		idpf_rx_buf_hw_update(rxbufq, ntu);
+
+	rxbufq->next_to_alloc = ntu;
+
+	return total_count == (nb_buffs_extra + nb_buffs);
+}
+
+/**
+ * idpf_alloc_rx_buffers_zc - allocate a number of Rx buffers
+ * @rxbufq: buffer queue
+ * @count: The number of buffers to allocate
+ *
+ * Wrapper for internal allocation routine; figure out how many tail
+ * bumps should take place based on the given threshold
+ *
+ * Returns true if all calls to internal alloc routine succeeded
+ */
+static bool idpf_alloc_rx_buffers_zc(struct idpf_queue *rxbufq, u32 count)
+{
+	u32 rx_thresh = IDPF_QUEUE_QUARTER(rxbufq);
+	u32 leftover, i, tail_bumps;
+
+	tail_bumps = count / rx_thresh;
+	leftover = count - (tail_bumps * rx_thresh);
+
+	for (i = 0; i < tail_bumps; i++)
+		if (!__idpf_alloc_rx_buffers_zc(rxbufq, rx_thresh))
+			return false;
+	return __idpf_alloc_rx_buffers_zc(rxbufq, leftover);
+}
+
+/**
+ * idpf_check_alloc_rx_buffers_zc - allocate a number of Rx buffers with logs
+ * @rxbufq: buffer queue
+ *
+ * Wrapper for internal allocation routine; Prints out logs, if allocation
+ * did not go as expected
+ */
+int idpf_check_alloc_rx_buffers_zc(struct idpf_queue *rxbufq)
+{
+	struct net_device *netdev = rxbufq->vport->netdev;
+	struct xsk_buff_pool *pool = rxbufq->xsk_rx;
+	u32 count = IDPF_DESC_UNUSED(rxbufq);
+
+	rxbufq->xsk = kcalloc(rxbufq->desc_count, sizeof(*rxbufq->xsk),
+			      GFP_KERNEL);
+	if (!rxbufq->xsk)
+		return -ENOMEM;
+
+	if (!xsk_buff_can_alloc(pool, count)) {
+		netdev_warn(netdev, "XSK buffer pool does not provide enough addresses to fill %d buffers on Rx queue %d\n",
+			    count, rxbufq->idx);
+		netdev_warn(netdev, "Change Rx queue/fill queue size to avoid performance issues\n");
+	}
+
+	if (!idpf_alloc_rx_buffers_zc(rxbufq, count))
+		netdev_warn(netdev, "Failed to allocate some buffers on XSK buffer pool enabled Rx queue %d\n",
+			    rxbufq->idx);
+
+	rxbufq->rx_buf_size = xsk_pool_get_rx_frame_size(pool);
+	rxbufq->rx_hsplit_en = false;
+	rxbufq->rx_hbuf_size = 0;
+
+	return 0;
+}
+
+void idpf_xsk_buf_rel(struct idpf_queue *rxbufq)
+{
+	rxbufq->rx_buf_size = 0;
+
+	kfree(rxbufq->xsk);
+}
+
+/**
  * idpf_xsk_clean_xdpq - Clean the XDP Tx queue and its buffer pool queues
  * @xdpq: XDP_Tx queue
  */
@@ -717,6 +878,30 @@ xsk:
 	return done_frames;
 }
 
+static u32 idpf_xsk_tx_prep(void *_xdpq, struct libie_xdp_tx_queue *sq)
+{
+	struct idpf_queue *xdpq = _xdpq;
+	u32 free;
+
+	free = IDPF_DESC_UNUSED(xdpq);
+	if (unlikely(free < IDPF_QUEUE_QUARTER(xdpq)))
+		free += idpf_clean_xdp_irq_zc(xdpq->txq_grp->complq);
+
+	libie_xdp_sq_lock(&xdpq->xdp_lock);
+
+	*sq = (struct libie_xdp_tx_queue){
+		.pool		= xdpq->xsk_tx,
+		.tx_buf		= xdpq->tx_buf,
+		.desc_ring	= xdpq->desc_ring,
+		.desc_count	= xdpq->desc_count,
+		.xdp_lock	= &xdpq->xdp_lock,
+		.next_to_use	= &xdpq->next_to_use,
+		.xdp_tx_active	= &xdpq->xdp_tx_active,
+	};
+
+	return free;
+}
+
 /**
  * idpf_xsk_xmit_pkt - produce a single HW Tx descriptor out of AF_XDP desc
  * @desc: AF_XDP descriptor to pull the DMA address and length from
@@ -739,6 +924,25 @@ static void idpf_xsk_xmit_pkt(struct libie_xdp_tx_desc desc,
 				  desc.len);
 }
 
+static bool idpf_xsk_tx_flush_bulk(struct libie_xdp_tx_bulk *bq)
+{
+	return libie_xsk_tx_flush_bulk(bq, idpf_xsk_tx_prep,
+				       idpf_xsk_xmit_pkt);
+}
+
+static bool idpf_xsk_run_prog(struct xdp_buff *xdp,
+			      struct libie_xdp_tx_bulk *bq)
+{
+	return libie_xdp_run_prog(xdp, bq, idpf_xsk_tx_flush_bulk);
+}
+
+static void idpf_xsk_finalize_rx(struct libie_xdp_tx_bulk *bq)
+{
+	if (bq->act_mask >= LIBIE_XDP_TX)
+		libie_xdp_finalize_rx(bq, idpf_xsk_tx_flush_bulk,
+				      idpf_xdp_tx_finalize);
+}
+
 static u32 idpf_xsk_xmit_prep(void *_xdpq, struct libie_xdp_tx_queue *sq)
 {
 	struct idpf_queue *xdpq = _xdpq;
@@ -755,6 +959,129 @@ static u32 idpf_xsk_xmit_prep(void *_xdpq, struct libie_xdp_tx_queue *sq)
 	};
 
 	return IDPF_DESC_UNUSED(xdpq);
+}
+
+static bool
+idpf_xsk_rx_skb(struct xdp_buff *xdp,
+		const struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc,
+		struct idpf_queue *rxq)
+{
+	struct napi_struct *napi = &rxq->q_vector->napi;
+	struct sk_buff *skb;
+
+	skb = xdp_build_skb_from_zc(napi, xdp);
+	if (unlikely(!skb))
+		return false;
+
+	if (unlikely(!idpf_rx_process_skb_fields(rxq, skb, rx_desc))) {
+		kfree_skb(skb);
+		return false;
+	}
+
+	napi_gro_receive(napi, skb);
+
+	return true;
+}
+
+/**
+ * idpf_clean_rx_irq_zc - consumes packets from the hardware queue
+ * @rxq: AF_XDP Rx queue
+ * @budget: NAPI budget
+ *
+ * Returns number of processed packets on success, remaining budget on failure.
+ */
+int idpf_clean_rx_irq_zc(struct idpf_queue *rxq, int budget)
+{
+	struct libie_rq_onstack_stats rs = { };
+	struct idpf_queue *rx_bufq = NULL;
+	u32 ntc = rxq->next_to_clean;
+	struct libie_xdp_tx_bulk bq;
+	u32 buf_id, to_refill;
+	bool failure = false;
+
+	libie_xsk_tx_init_bulk(&bq, rxq->xdp_prog, rxq->xdp_rxq.dev,
+			       rxq->xdpqs, rxq->num_xdp_txq);
+
+	while (likely(rs.packets < budget)) {
+		const struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc;
+		u32 field, rxdid, pkt_len, bufq_id, xdp_act;
+		struct xdp_buff *xdp;
+
+		rx_desc = &rxq->rx[ntc].flex_adv_nic_3_wb;
+
+		/* if the descriptor isn't done, no work yet to do */
+		field = le16_to_cpu(rx_desc->pktlen_gen_bufq_id);
+		if (!!(field & VIRTCHNL2_RX_FLEX_DESC_ADV_GEN_M) !=
+		    test_bit(__IDPF_Q_GEN_CHK, rxq->flags))
+			break;
+
+		dma_rmb();
+
+		rxdid = FIELD_GET(VIRTCHNL2_RX_FLEX_DESC_ADV_RXDID_M,
+				  rx_desc->rxdid_ucast);
+		if (rxdid != VIRTCHNL2_RXDID_2_FLEX_SPLITQ) {
+			u64_stats_update_begin(&rxq->stats_sync);
+			u64_stats_inc(&rxq->q_stats.rx.bad_descs);
+			u64_stats_update_end(&rxq->stats_sync);
+
+			goto next;
+		}
+
+		bufq_id = !!(field & VIRTCHNL2_RX_FLEX_DESC_ADV_BUFQ_ID_M);
+		rx_bufq = &rxq->rxq_grp->splitq.bufq_sets[bufq_id].bufq;
+
+		buf_id = le16_to_cpu(rx_desc->buf_id);
+		pkt_len = FIELD_GET(VIRTCHNL2_RX_FLEX_DESC_ADV_LEN_PBUF_M,
+				    field);
+
+		xdp = libie_xsk_process_buff(rxq->xsk, buf_id, pkt_len);
+		if (!xdp)
+			goto next;
+
+		xdp_act = idpf_xsk_run_prog(xdp, &bq);
+		if ((xdp_act == LIBIE_XDP_PASS &&
+		     unlikely(!idpf_xsk_rx_skb(xdp, rx_desc, rxq))) ||
+		    unlikely(xdp_act == LIBIE_XDP_ABORTED)) {
+			failure = true;
+			break;
+		}
+
+		rs.bytes += pkt_len;
+		rs.packets++;
+
+next:
+		IDPF_RX_BUMP_NTC(rxq, ntc);
+	}
+
+	rxq->next_to_clean = ntc;
+	idpf_xsk_finalize_rx(&bq);
+
+	u64_stats_update_begin(&rxq->stats_sync);
+	u64_stats_add(&rxq->q_stats.rx.packets, rs.packets);
+	u64_stats_add(&rxq->q_stats.rx.bytes, rs.bytes);
+	u64_stats_update_end(&rxq->stats_sync);
+
+	if (!rx_bufq)
+		goto skip_refill;
+
+	IDPF_RX_BUMP_NTC(rx_bufq, buf_id);
+	rx_bufq->next_to_clean = buf_id;
+
+	to_refill = IDPF_DESC_UNUSED(rx_bufq);
+	if (to_refill > IDPF_QUEUE_QUARTER(rx_bufq))
+		failure |= !idpf_alloc_rx_buffers_zc(rx_bufq, to_refill);
+
+skip_refill:
+	if (xsk_uses_need_wakeup(rxq->xsk_rx)) {
+		if (failure || rxq->next_to_clean == rxq->next_to_use)
+			xsk_set_rx_need_wakeup(rxq->xsk_rx);
+		else
+			xsk_clear_rx_need_wakeup(rxq->xsk_rx);
+
+		return rs.packets;
+	}
+
+	return unlikely(failure) ? budget : rs.bytes;
 }
 
 /**

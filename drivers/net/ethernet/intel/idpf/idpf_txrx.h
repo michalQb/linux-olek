@@ -572,6 +572,7 @@ struct idpf_queue {
 			struct libie_rx_buffer *hdr_buf;
 			struct idpf_rx_buf *buf;
 		} rx_buf;
+		struct xdp_buff **xsk;
 	};
 	union {
 		struct page_pool *hdr_pp;
@@ -946,6 +947,11 @@ netdev_tx_t idpf_tx_singleq_start(struct sk_buff *skb,
 				  struct net_device *netdev);
 bool idpf_rx_singleq_buf_hw_alloc_all(struct idpf_queue *rxq,
 				      u16 cleaned_count);
+
+struct virtchnl2_rx_flex_desc_adv_nic_3;
+
+int idpf_rx_process_skb_fields(struct idpf_queue *rxq, struct sk_buff *skb,
+			       const struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc);
 int idpf_tso(struct sk_buff *skb, struct idpf_tx_offload_params *off);
 void idpf_tx_handle_sw_marker(struct idpf_queue *tx_q);
 int idpf_rx_desc_alloc(struct idpf_queue *rxq, bool bufq, s32 q_model);

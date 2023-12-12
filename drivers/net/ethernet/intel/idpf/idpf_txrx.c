@@ -414,8 +414,12 @@ void idpf_rx_desc_rel(struct idpf_queue *rxq, bool bufq, s32 q_model)
 		rxq->xdp.data = NULL;
 	}
 
-	if (bufq || !idpf_is_queue_model_split(q_model))
+	if (bufq && test_bit(__IDPF_Q_XSK, rxq->flags))
+		idpf_xsk_buf_rel(rxq);
+	else if (bufq || !idpf_is_queue_model_split(q_model))
 		idpf_rx_buf_rel_all(rxq);
+
+	idpf_xsk_clear_queue(rxq);
 
 	rxq->next_to_alloc = 0;
 	rxq->next_to_clean = 0;
@@ -679,6 +683,9 @@ int idpf_rx_bufs_init(struct idpf_queue *rxbufq, enum libie_rx_buf_type type)
 	};
 	int ret;
 
+	if (test_bit(__IDPF_Q_XSK, rxbufq->flags))
+		return idpf_check_alloc_rx_buffers_zc(rxbufq);
+
 	ret = libie_rx_page_pool_create(&bq, &rxbufq->q_vector->napi);
 	if (ret)
 		return ret;
@@ -750,6 +757,7 @@ int idpf_rx_bufs_init_all(struct idpf_vport *vport)
  */
 int idpf_rx_desc_alloc(struct idpf_queue *rxq, bool bufq, s32 q_model)
 {
+	enum virtchnl2_queue_type type;
 	struct device *dev = rxq->dev;
 
 	if (bufq)
@@ -773,6 +781,9 @@ int idpf_rx_desc_alloc(struct idpf_queue *rxq, bool bufq, s32 q_model)
 	rxq->next_to_clean = 0;
 	rxq->next_to_use = 0;
 	set_bit(__IDPF_Q_GEN_CHK, rxq->flags);
+
+	type = bufq ? VIRTCHNL2_QUEUE_TYPE_RX_BUFFER : VIRTCHNL2_QUEUE_TYPE_RX;
+	idpf_xsk_setup_queue(rxq, type);
 
 	return 0;
 }
@@ -2797,8 +2808,8 @@ netdev_tx_t idpf_tx_splitq_start(struct sk_buff *skb,
  * @rx_desc: Receive descriptor
  * @parsed: parsed Rx packet type related fields
  */
-static void idpf_rx_hash(struct idpf_queue *rxq, struct sk_buff *skb,
-			 struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc,
+static void idpf_rx_hash(const struct idpf_queue *rxq, struct sk_buff *skb,
+			 const struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc,
 			 struct libie_rx_ptype_parsed parsed)
 {
 	u32 hash;
@@ -2874,7 +2885,7 @@ checksum_fail:
  * @csum: structure to extract checksum fields
  *
  **/
-static void idpf_rx_splitq_extract_csum_bits(struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc,
+static void idpf_rx_splitq_extract_csum_bits(const struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc,
 					     struct idpf_rx_csum_decoded *csum)
 {
 	u8 qword0, qword1;
@@ -2911,7 +2922,7 @@ static void idpf_rx_splitq_extract_csum_bits(struct virtchnl2_rx_flex_desc_adv_n
  * length and packet type.
  */
 static int idpf_rx_rsc(struct idpf_queue *rxq, struct sk_buff *skb,
-		       struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc,
+		       const struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc,
 		       struct libie_rx_ptype_parsed parsed)
 {
 	u16 rsc_segments, rsc_seg_len;
@@ -2980,9 +2991,8 @@ static int idpf_rx_rsc(struct idpf_queue *rxq, struct sk_buff *skb,
  * order to populate the hash, checksum, protocol, and
  * other fields within the skb.
  */
-static int idpf_rx_process_skb_fields(struct idpf_queue *rxq,
-				      struct sk_buff *skb,
-				      struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc)
+int idpf_rx_process_skb_fields(struct idpf_queue *rxq, struct sk_buff *skb,
+			       const struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc)
 {
 	struct idpf_rx_csum_decoded csum_bits = { };
 	struct libie_rx_ptype_parsed parsed;
@@ -3856,7 +3866,9 @@ static bool idpf_rx_splitq_clean_all(struct idpf_q_vector *q_vec, int budget,
 		struct idpf_queue *rxq = q_vec->rx[i];
 		int pkts_cleaned_per_q;
 
-		pkts_cleaned_per_q = idpf_rx_splitq_clean(rxq, budget_per_q);
+		pkts_cleaned_per_q = test_bit(__IDPF_Q_XSK, rxq->flags) ?
+				     idpf_clean_rx_irq_zc(rxq, budget_per_q) :
+				     idpf_rx_splitq_clean(rxq, budget_per_q);
 		/* if we clean as many as budgeted, we must not be done */
 		if (pkts_cleaned_per_q >= budget_per_q)
 			clean_complete = false;
@@ -3864,8 +3876,10 @@ static bool idpf_rx_splitq_clean_all(struct idpf_q_vector *q_vec, int budget,
 	}
 	*cleaned = pkts_cleaned;
 
-	for (i = 0; i < q_vec->num_bufq; i++)
-		idpf_rx_clean_refillq_all(q_vec->bufq[i]);
+	for (i = 0; i < q_vec->num_bufq; i++) {
+		if (!test_bit(__IDPF_Q_XSK, q_vec->bufq[i]->flags))
+			idpf_rx_clean_refillq_all(q_vec->bufq[i]);
+	}
 
 	return clean_complete;
 }

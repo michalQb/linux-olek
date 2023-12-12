@@ -48,7 +48,6 @@ static int idpf_rxq_for_each(const struct idpf_vport *vport,
 static int idpf_xdp_rxq_info_init(struct idpf_queue *rxq, void *arg)
 {
 	const struct idpf_vport *vport = rxq->vport;
-	const struct page_pool *pp;
 	int err;
 
 	err = __xdp_rxq_info_reg(&rxq->xdp_rxq, vport->netdev, rxq->idx,
@@ -57,13 +56,28 @@ static int idpf_xdp_rxq_info_init(struct idpf_queue *rxq, void *arg)
 	if (err)
 		return err;
 
-	pp = arg ? rxq->rxq_grp->splitq.bufq_sets[0].bufq.pp : rxq->pp;
-	xdp_rxq_info_attach_page_pool(&rxq->xdp_rxq, pp);
+	if (test_bit(__IDPF_Q_XSK, rxq->flags)) {
+		err = xdp_rxq_info_reg_mem_model(&rxq->xdp_rxq,
+						 MEM_TYPE_XSK_BUFF_POOL,
+						 NULL);
+	} else {
+		const struct page_pool *pp;
+
+		pp = arg ? rxq->rxq_grp->splitq.bufq_sets[0].bufq.pp : rxq->pp;
+		xdp_rxq_info_attach_page_pool(&rxq->xdp_rxq, pp);
+	}
+	if (err)
+		goto unreg;
 
 	rxq->xdpqs = &vport->txqs[vport->xdp_txq_offset];
 	rxq->num_xdp_txq = vport->num_xdp_txq;
 
 	return 0;
+
+unreg:
+	xdp_rxq_info_unreg(&rxq->xdp_rxq);
+
+	return err;
 }
 
 /**
@@ -90,7 +104,9 @@ static int idpf_xdp_rxq_info_deinit(struct idpf_queue *rxq, void *arg)
 	rxq->xdpqs = NULL;
 	rxq->num_xdp_txq = 0;
 
-	xdp_rxq_info_detach_mem_model(&rxq->xdp_rxq);
+	if (!test_bit(__IDPF_Q_XSK, rxq->flags))
+		xdp_rxq_info_detach_mem_model(&rxq->xdp_rxq);
+
 	xdp_rxq_info_unreg(&rxq->xdp_rxq);
 
 	return 0;
@@ -130,6 +146,23 @@ void idpf_copy_xdp_prog_to_qs(const struct idpf_vport *vport,
 			      struct bpf_prog *xdp_prog)
 {
 	idpf_rxq_for_each(vport, idpf_xdp_rxq_assign_prog, xdp_prog);
+}
+
+static int idpf_rx_napi_schedule(struct idpf_queue *rxq, void *arg)
+{
+	if (test_bit(__IDPF_Q_XSK, rxq->flags))
+		napi_schedule(&rxq->q_vector->napi);
+
+	return 0;
+}
+
+/**
+ * idpf_vport_rx_napi_schedule - Schedule napi on RX queues from vport
+ * @vport: vport to schedule napi on
+ */
+static void idpf_vport_rx_napi_schedule(const struct idpf_vport *vport)
+{
+	idpf_rxq_for_each(vport, idpf_rx_napi_schedule, NULL);
 }
 
 void idpf_vport_xdpq_get(const struct idpf_vport *vport)
@@ -450,6 +483,9 @@ idpf_xdp_setup_prog(struct idpf_vport *vport, struct bpf_prog *prog,
 			NL_SET_ERR_MSG_MOD(extack, "Could not re-open the vport after XDP setup\n");
 			return err;
 		}
+
+		if (prog)
+			idpf_vport_rx_napi_schedule(vport);
 	}
 
 	return 0;
