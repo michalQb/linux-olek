@@ -174,6 +174,145 @@ void idpf_vport_xdpq_put(const struct idpf_vport *vport)
 }
 
 /**
+ * idpf_clean_xdp_irq - Reclaim a batch of TX resources from completed XDP_TX
+ * @xdpq: XDP Tx queue
+ *
+ * Returns number of cleaned descriptors.
+ */
+static u32 idpf_clean_xdp_irq(struct idpf_queue *xdpq)
+{
+	struct idpf_queue *complq = xdpq->txq_grp->complq, *txq;
+	struct idpf_splitq_4b_tx_compl_desc *last_rs_desc;
+	struct libie_sq_onstack_stats ss = { };
+	int complq_budget = complq->desc_count;
+	u32 tx_ntc = xdpq->next_to_clean;
+	u32 ntc = complq->next_to_clean;
+	u32 cnt = xdpq->desc_count;
+	u32 done_frames = 0, i = 0;
+	struct xdp_frame_bulk bq;
+	int head = tx_ntc;
+	bool gen_flag;
+
+	last_rs_desc = &complq->comp_4b[ntc];
+	gen_flag = test_bit(__IDPF_Q_GEN_CHK, complq->flags);
+
+	do {
+		int ctype = idpf_parse_compl_desc(last_rs_desc, complq,
+						  &txq, gen_flag);
+		if (likely(ctype == IDPF_TXD_COMPLT_RS)) {
+			head = le16_to_cpu(last_rs_desc->q_head_compl_tag.q_head);
+			goto fetch_next_desc;
+		}
+
+		switch (ctype) {
+		case IDPF_TXD_COMPLT_SW_MARKER:
+			idpf_tx_handle_sw_marker(xdpq);
+			break;
+		case -ENODATA:
+			goto exit_xdp_irq;
+		case -EINVAL:
+			break;
+		default:
+			dev_err(&xdpq->vport->adapter->pdev->dev,
+				"Unsupported completion type for XDP\n");
+			break;
+		}
+
+fetch_next_desc:
+		last_rs_desc++;
+		ntc++;
+		if (unlikely(ntc == complq->desc_count)) {
+			ntc = 0;
+			last_rs_desc = &complq->comp_4b[0];
+			gen_flag = !gen_flag;
+			change_bit(__IDPF_Q_GEN_CHK, complq->flags);
+		}
+		prefetch(last_rs_desc);
+		complq_budget--;
+	} while (likely(complq_budget));
+
+exit_xdp_irq:
+	complq->next_to_clean = ntc;
+	done_frames = head >= tx_ntc ? head - tx_ntc :
+				       head + cnt - tx_ntc;
+
+	xdp_frame_bulk_init(&bq);
+
+	for (i = 0; i < done_frames; i++) {
+		libie_xdp_complete_tx_buf(&xdpq->tx_buf[tx_ntc], xdpq->dev,
+					  true, &bq, &xdpq->xdp_tx_active,
+					  &ss);
+
+		if (unlikely(++tx_ntc == cnt))
+			tx_ntc = 0;
+	}
+
+	xdp_flush_frame_bulk(&bq);
+	xdpq->next_to_clean = tx_ntc;
+
+	libie_sq_napi_stats_add((struct libie_sq_stats *)&xdpq->q_stats.tx,
+				&ss);
+
+	return i;
+}
+
+static u32 idpf_xdp_tx_prep(void *_xdpq, struct libie_xdp_tx_queue *sq)
+{
+	struct idpf_queue *xdpq = _xdpq;
+	u32 free;
+
+	libie_xdp_sq_lock(&xdpq->xdp_lock);
+
+	free = IDPF_DESC_UNUSED(xdpq);
+	if (unlikely(free < IDPF_QUEUE_QUARTER(xdpq)))
+		free += idpf_clean_xdp_irq(xdpq);
+
+	*sq = (struct libie_xdp_tx_queue){
+		.tx_buf		= xdpq->tx_buf,
+		.desc_ring	= xdpq->desc_ring,
+		.desc_count	= xdpq->desc_count,
+		.xdp_lock	= &xdpq->xdp_lock,
+		.next_to_use	= &xdpq->next_to_use,
+		.xdp_tx_active	= &xdpq->xdp_tx_active,
+	};
+
+	return free;
+}
+
+static void idpf_xdp_tx_xmit(struct libie_xdp_tx_desc desc,
+			     const struct libie_xdp_tx_queue *sq)
+{
+	union idpf_tx_flex_desc *tx_desc = sq->desc_ring;
+	struct idpf_tx_splitq_params tx_params = {
+		.dtype		= IDPF_TX_DESC_DTYPE_FLEX_L2TAG1_L2TAG2,
+		.eop_cmd	= IDPF_TX_DESC_CMD_EOP,
+	};
+
+	tx_desc = &tx_desc[sq->cached_ntu];
+	tx_desc->q.buf_addr = cpu_to_le64(desc.addr);
+
+	idpf_tx_splitq_build_desc(tx_desc, &tx_params,
+				  tx_params.eop_cmd | tx_params.offload.td_cmd,
+				  desc.len);
+}
+
+static bool idpf_xdp_tx_flush_bulk(struct libie_xdp_tx_bulk *bq)
+{
+	return libie_xdp_tx_flush_bulk(bq, idpf_xdp_tx_prep, idpf_xdp_tx_xmit);
+}
+
+void __idpf_xdp_finalize_rx(struct libie_xdp_tx_bulk *bq)
+{
+	libie_xdp_finalize_rx(bq, idpf_xdp_tx_flush_bulk,
+			      idpf_xdp_tx_finalize);
+}
+
+bool __idpf_xdp_run_prog(struct xdp_buff *xdp, struct libie_xdp_tx_bulk *bq)
+{
+	return libie_xdp_run_prog(xdp, bq, idpf_xdp_tx_flush_bulk);
+}
+
+/**
  * idpf_xdp_reconfig_queues - reconfigure queues after the XDP setup
  * @vport: vport to load or unload XDP for
  */

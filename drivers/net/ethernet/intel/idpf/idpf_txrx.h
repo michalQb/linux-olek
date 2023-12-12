@@ -135,6 +135,8 @@ do {								\
 	((++(txq)->compl_tag_cur_gen) >= (txq)->compl_tag_gen_max ? \
 	0 : (txq)->compl_tag_cur_gen)
 
+#define IDPF_QUEUE_QUARTER(Q)		((Q)->desc_count >> 2)
+
 #define IDPF_TXD_LAST_DESC_CMD (IDPF_TX_DESC_CMD_EOP | IDPF_TX_DESC_CMD_RS)
 
 #define IDPF_TX_FLAGS_TSO		BIT(0)
@@ -934,5 +936,58 @@ netdev_tx_t idpf_tx_singleq_start(struct sk_buff *skb,
 bool idpf_rx_singleq_buf_hw_alloc_all(struct idpf_queue *rxq,
 				      u16 cleaned_count);
 int idpf_tso(struct sk_buff *skb, struct idpf_tx_offload_params *off);
+void idpf_tx_handle_sw_marker(struct idpf_queue *tx_q);
+
+/**
+ * idpf_xdpq_update_tail - Updates the XDP Tx queue tail register
+ * @xdpq: XDP Tx queue
+ *
+ * This function updates the XDP Tx queue tail register.
+ */
+static inline void idpf_xdpq_update_tail(const struct idpf_queue *xdpq)
+{
+	/* Force memory writes to complete before letting h/w
+	 * know there are new descriptors to fetch.
+	 */
+	wmb();
+	writel_relaxed(xdpq->next_to_use, xdpq->tail);
+}
+
+/**
+ * idpf_set_rs_bit - set RS bit on last produced descriptor.
+ * @xdpq: XDP queue to produce the HW Tx descriptors on
+ *
+ * Returns the index of descriptor RS bit was set on (one behind current NTU).
+ */
+static inline void idpf_set_rs_bit(const struct idpf_queue *xdpq)
+{
+	int rs_idx = xdpq->next_to_use ? xdpq->next_to_use - 1 :
+					 xdpq->desc_count - 1;
+	union idpf_tx_flex_desc *tx_desc;
+
+	tx_desc = &xdpq->flex_tx[rs_idx];
+	tx_desc->q.qw1.cmd_dtype |= le16_encode_bits(IDPF_TXD_LAST_DESC_CMD,
+						     IDPF_FLEX_TXD_QW1_CMD_M);
+}
+
+/**
+ * idpf_xdp_tx_finalize - Bump XDP Tx tail and/or flush redirect map
+ * @xdpq: XDP Tx queue
+ *
+ * This function bumps XDP Tx tail and should be called when a batch of packets
+ * has been processed in the napi loop.
+ */
+static inline void idpf_xdp_tx_finalize(void *_xdpq, bool tail)
+{
+	struct idpf_queue *xdpq = _xdpq;
+
+	libie_xdp_sq_lock(&xdpq->xdp_lock);
+
+	idpf_set_rs_bit(xdpq);
+	if (tail)
+		idpf_xdpq_update_tail(xdpq);
+
+	libie_xdp_sq_unlock(&xdpq->xdp_lock);
+}
 
 #endif /* !_IDPF_TXRX_H_ */

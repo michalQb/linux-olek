@@ -1527,7 +1527,7 @@ err_out:
  * idpf_tx_handle_sw_marker - Handle queue marker packet
  * @tx_q: tx queue to handle software marker
  */
-static void idpf_tx_handle_sw_marker(struct idpf_queue *tx_q)
+void idpf_tx_handle_sw_marker(struct idpf_queue *tx_q)
 {
 	struct idpf_vport *vport = tx_q->vport;
 	int i;
@@ -3054,8 +3054,11 @@ static int idpf_rx_splitq_clean(struct idpf_queue *rxq, int budget)
 	int total_rx_bytes = 0, total_rx_pkts = 0;
 	struct idpf_queue *rx_bufq = NULL;
 	u16 ntc = rxq->next_to_clean;
+	struct libie_xdp_tx_bulk bq;
 	struct xdp_buff xdp;
 
+	libie_xdp_tx_init_bulk(&bq, rxq->xdp_prog, rxq->xdp_rxq.dev,
+			       rxq->xdpqs, rxq->num_xdp_txq);
 	libie_xdp_init_buff(&xdp, &rxq->xdp, &rxq->xdp_rxq);
 
 	/* Process Rx packets bounded by budget */
@@ -3166,6 +3169,9 @@ payload:
 		total_rx_bytes += xdp_get_buff_len(&xdp);
 		total_rx_pkts++;
 
+		if (!idpf_xdp_run_prog(&xdp, &bq))
+			continue;
+
 		skb = xdp_build_skb_from_buff(&xdp);
 		if (unlikely(!skb)) {
 			xdp_return_buff(&xdp);
@@ -3187,7 +3193,9 @@ payload:
 	}
 
 	rxq->next_to_clean = ntc;
+
 	libie_xdp_save_buff(&rxq->xdp, &xdp);
+	idpf_xdp_finalize_rx(&bq);
 
 	u64_stats_update_begin(&rxq->stats_sync);
 	u64_stats_add(&rxq->q_stats.rx.packets, total_rx_pkts);
