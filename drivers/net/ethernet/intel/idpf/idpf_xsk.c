@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (C) 2023 Intel Corporation */
 
-#include <net/xdp_sock_drv.h>
 #include <net/xdp_sock.h>
 #include "idpf.h"
 #include "idpf_xsk.h"
@@ -13,7 +12,7 @@
  * Assigns pointer to xsk_pool field in queue struct if it is supported in
  * netdev, NULL otherwise.
  */
-void idpf_set_xsk_pool(struct idpf_queue *q)
+void idpf_set_xsk_pool(struct idpf_queue *q, u32 q_type)
 {
 	struct idpf_vport_user_config_data *cfg_data;
 	struct idpf_vport *vport = q->vport;
@@ -26,7 +25,7 @@ void idpf_set_xsk_pool(struct idpf_queue *q)
 		return;
 	}
 
-	switch (q->q_type) {
+	switch (q_type) {
 	case VIRTCHNL2_QUEUE_TYPE_RX:
 		is_rx = true;
 		qid = q->idx;
@@ -58,7 +57,7 @@ void idpf_xsk_setup_xdpq(struct idpf_queue *xdpq)
 {
 	struct idpf_queue *complq = xdpq->txq_grp->complq;
 
-	idpf_set_xsk_pool(xdpq);
+	idpf_set_xsk_pool(xdpq, VIRTCHNL2_QUEUE_TYPE_TX);
 	if (xdpq->xsk_pool) {
 		set_bit(__IDPF_Q_XSK, xdpq->flags);
 		set_bit(__IDPF_Q_XSK, complq->flags);
@@ -66,6 +65,18 @@ void idpf_xsk_setup_xdpq(struct idpf_queue *xdpq)
 		clear_bit(__IDPF_Q_XSK, xdpq->flags);
 		clear_bit(__IDPF_Q_XSK, complq->flags);
 	}
+}
+
+void idpf_xsk_setup_rxbufq(struct idpf_queue *rxbufq, bool bufq)
+{
+	u32 q_type = bufq ? VIRTCHNL2_QUEUE_TYPE_RX_BUFFER :
+			    VIRTCHNL2_QUEUE_TYPE_RX;
+
+	idpf_set_xsk_pool(rxbufq, q_type);
+	if (rxbufq->xsk_pool)
+		set_bit(__IDPF_Q_XSK, rxbufq->flags);
+	else
+		clear_bit(__IDPF_Q_XSK, rxbufq->flags);
 }
 
 /**
@@ -87,7 +98,6 @@ idpf_qp_cfg_qs(struct idpf_vport *vport, struct idpf_queue **qs, int num_qs)
 
 		switch (q->q_type) {
 		case VIRTCHNL2_QUEUE_TYPE_RX:
-			idpf_set_xsk_pool(q);
 			err = idpf_rx_desc_alloc(q, false, vport->rxq_model);
 			if (err) {
 				netdev_err(vport->netdev, "Could not allocate buffer for RX queue.\n");
@@ -97,7 +107,6 @@ idpf_qp_cfg_qs(struct idpf_vport *vport, struct idpf_queue **qs, int num_qs)
 				err = idpf_rx_bufs_init(q);
 			break;
 		case VIRTCHNL2_QUEUE_TYPE_RX_BUFFER:
-			idpf_set_xsk_pool(q);
 			err = idpf_rx_desc_alloc(q, true, vport->rxq_model);
 			if (err)
 				break;
@@ -605,6 +614,9 @@ idpf_clean_xdp_tx_buf(struct idpf_queue *xdpq, struct idpf_tx_buf *tx_buf)
 		xdp_return_frame(tx_buf->xdpf);
 		tx_buf->xdpf = NULL;
 		break;
+	case IDPF_XDP_BUFFER_TX:
+		xsk_buff_free(tx_buf->xdp);
+		break;
 	}
 
 	xdpq->xdp_tx_active--;
@@ -883,3 +895,331 @@ void idpf_xsk_clean_xdpq(struct idpf_queue *xdpq)
 		xsk_tx_completed(xdpq->xsk_pool, xsk_frames);
 }
 
+static u32 idpf_init_rx_descs_zc(struct xsk_buff_pool *pool,
+				 struct xdp_buff **xdp,
+				 struct virtchnl2_splitq_rx_buf_desc *buf_desc,
+				 u32 first_buf_id,
+				 u32 count)
+{
+	dma_addr_t dma;
+	u32 num_buffs;
+	u32 i;
+
+	num_buffs = xsk_buff_alloc_batch(pool, xdp, count);
+	for (i = 0; i < num_buffs; i++) {
+		dma = xsk_buff_xdp_get_dma(*xdp);
+		buf_desc->pkt_addr = cpu_to_le64(dma);
+		buf_desc->qword0.buf_id = cpu_to_le16(i + first_buf_id);
+
+		buf_desc++;
+		xdp++;
+	}
+
+	return num_buffs;
+}
+
+static struct xdp_buff **idpf_get_xdp_buff(struct idpf_queue *q, u32 idx)
+{
+	return &q->xdp_buf[idx];
+}
+
+static bool __idpf_alloc_rx_buffers_zc(struct idpf_queue *rxbufq, u32 count)
+{
+	struct virtchnl2_splitq_rx_buf_desc *buf_desc;
+	u32 nb_buffs_extra = 0, nb_buffs = 0;
+	u32 ntu = rxbufq->next_to_use;
+	u32 total_count = count;
+	struct xdp_buff **xdp;
+
+	buf_desc = IDPF_SPLITQ_RX_BUF_DESC(rxbufq, ntu);
+	xdp = idpf_get_xdp_buff(rxbufq, ntu);
+
+	if (ntu + count >= rxbufq->desc_count) {
+		nb_buffs_extra = idpf_init_rx_descs_zc(rxbufq->xsk_pool, xdp,
+						       buf_desc,
+						       ntu,
+						       rxbufq->desc_count - ntu);
+		if (nb_buffs_extra != rxbufq->desc_count - ntu) {
+			ntu += nb_buffs_extra;
+			goto exit;
+		}
+		buf_desc = IDPF_SPLITQ_RX_BUF_DESC(rxbufq, 0);
+		xdp = idpf_get_xdp_buff(rxbufq, 0);
+		ntu = 0;
+		count -= nb_buffs_extra;
+		idpf_rx_buf_hw_update(rxbufq, 0);
+
+		if (!count)
+			goto exit;
+	}
+
+	nb_buffs = idpf_init_rx_descs_zc(rxbufq->xsk_pool, xdp,
+					 buf_desc, ntu, count);
+
+	ntu += nb_buffs;
+	if (ntu == rxbufq->desc_count)
+		ntu = 0;
+
+exit:
+	if (rxbufq->next_to_use != ntu)
+		idpf_rx_buf_hw_update(rxbufq, ntu);
+
+	rxbufq->next_to_alloc = ntu;
+
+	return total_count == (nb_buffs_extra + nb_buffs);
+}
+
+static bool idpf_alloc_rx_buffers_zc(struct idpf_queue *rxbufq, u32 count)
+{
+	u32 rx_thresh = IDPF_QUEUE_QUARTER(rxbufq);
+	u32 leftover, i, tail_bumps;
+
+	tail_bumps = count / rx_thresh;
+	leftover = count - (tail_bumps * rx_thresh);
+
+	for (i = 0; i < tail_bumps; i++)
+		if (!__idpf_alloc_rx_buffers_zc(rxbufq, rx_thresh))
+			return false;
+	return __idpf_alloc_rx_buffers_zc(rxbufq, leftover);
+}
+
+int idpf_check_alloc_rx_buffers_zc(struct idpf_queue *rxbufq)
+{
+	struct net_device *netdev = rxbufq->vport->netdev;
+	u32 count = IDPF_DESC_UNUSED(rxbufq);
+
+	rxbufq->xdp_buf = kcalloc(rxbufq->desc_count, sizeof(*rxbufq->xdp_buf),
+				  GFP_KERNEL);
+
+	if (!xsk_buff_can_alloc(rxbufq->xsk_pool, count)) {
+		netdev_warn(netdev, "XSK buffer pool does not provide enough addresses to fill %d buffers on Rx queue %d\n",
+			    count, rxbufq->idx);
+		netdev_warn(netdev, "Change Rx queue/fill queue size to avoid performance issues\n");
+	}
+
+	if (!idpf_alloc_rx_buffers_zc(rxbufq, count))
+		netdev_warn(netdev, "Failed to allocate some buffers on XSK buffer pool enabled Rx queue %d\n",
+			    rxbufq->idx);
+	return 0;
+}
+
+void idpf_xsk_clean_rxbufq(struct idpf_queue *rxbufq)
+{
+	u16 ntc = rxbufq->next_to_clean;
+	u16 ntu = rxbufq->next_to_use;
+
+	while (ntc != ntu) {
+		struct xdp_buff *xdp = *idpf_get_xdp_buff(rxbufq, ntc);
+
+		xsk_buff_free(xdp);
+		ntc++;
+		if (ntc >= rxbufq->desc_count)
+			ntc = 0;
+	}
+}
+
+static int idpf_xmit_xdp_tx_zc(struct xdp_buff *xdp,
+			       struct idpf_queue *xdpq)
+{
+	struct idpf_tx_splitq_params tx_params = { };
+	u32 size = xdp->data_end - xdp->data;
+	union idpf_tx_flex_desc *tx_desc;
+	struct idpf_tx_buf *tx_buf;
+	u32 ntu = xdpq->next_to_use;
+	dma_addr_t dma;
+
+	if (IDPF_DESC_UNUSED(xdpq) < IDPF_QUEUE_QUARTER(xdpq))
+		idpf_clean_xdp_irq_zc(xdpq);
+
+	if (unlikely(!IDPF_DESC_UNUSED(xdpq)))
+		return -EBUSY;
+
+	dma = xsk_buff_xdp_get_dma(xdp);
+	xsk_buff_raw_dma_sync_for_device(xdpq->xsk_pool, dma, size);
+
+	tx_buf = &xdpq->tx_buf[ntu];
+	tx_buf->bytecount = size;
+	tx_buf->gso_segs = 1;
+	tx_buf->xdp_type = IDPF_XDP_BUFFER_TX;
+	tx_buf->xdp = xdp;
+
+	tx_desc = IDPF_FLEX_TX_DESC(xdpq, ntu);
+	tx_desc->q.buf_addr = cpu_to_le64(dma);
+
+	tx_params.dtype = IDPF_TX_DESC_DTYPE_FLEX_L2TAG1_L2TAG2;
+	tx_params.eop_cmd = IDPF_TX_DESC_CMD_EOP;
+
+	idpf_tx_splitq_build_desc(tx_desc, &tx_params,
+				  tx_params.eop_cmd | tx_params.offload.td_cmd,
+				  size);
+
+	xdpq->xdp_tx_active++;
+
+	if (++ntu == xdpq->desc_count)
+		ntu = 0;
+	xdpq->next_to_use = ntu;
+
+	return 0;
+}
+
+static unsigned int
+idpf_run_xdp_zc(struct idpf_queue *rxbufq, struct xdp_buff *xdp,
+		struct bpf_prog *xdp_prog, struct idpf_queue *xdpq,
+		u32 *rxq_xdp_act)
+{
+	unsigned int xdp_act;
+	int err;
+
+	xdp_act = bpf_prog_run_xdp(xdp_prog, xdp);
+
+	if (likely(xdp_act == XDP_REDIRECT)) {
+		err = xdp_do_redirect(rxbufq->vport->netdev, xdp, xdp_prog);
+		if (likely(!err)) {
+			*rxq_xdp_act |= IDPF_XDP_ACT_FINALIZE_REDIR;
+			return XDP_REDIRECT;
+		}
+
+		if (xsk_uses_need_wakeup(rxbufq->xsk_pool) && err == -ENOBUFS)
+			*rxq_xdp_act |= IDPF_XDP_ACT_STOP_NOW;
+
+		goto xdp_err;
+	}
+
+	switch (xdp_act) {
+	case XDP_TX:
+		err = idpf_xmit_xdp_tx_zc(xdp, xdpq);
+		if (unlikely(err))
+			goto xdp_err;
+
+		*rxq_xdp_act |= IDPF_XDP_ACT_FINALIZE_TX;
+		break;
+	default:
+		bpf_warn_invalid_xdp_action(rxbufq->vport->netdev, xdp_prog,
+					    xdp_act);
+
+		fallthrough;
+	case XDP_ABORTED:
+xdp_err:
+		trace_xdp_exception(rxbufq->vport->netdev, xdp_prog, xdp_act);
+
+		fallthrough;
+	case XDP_DROP:
+		xsk_buff_free(xdp);
+
+		return XDP_DROP;
+	}
+
+	return xdp_act;
+}
+
+int idpf_clean_rx_irq_zc(struct idpf_queue *rxq, int budget)
+{
+	int total_rx_bytes = 0, total_rx_pkts = 0;
+	struct idpf_queue *rx_bufq = NULL;
+	u32 ntc = rxq->next_to_clean;
+	struct bpf_prog *xdp_prog;
+	struct idpf_queue *xdpq;
+	bool failure = false;
+	u32 rxq_xdp_act = 0;
+	u32 to_refill;
+	u16 buf_id;
+
+	xdp_prog = rcu_dereference(rxq->xdp_prog);
+	xdpq = rxq->xdpq;
+
+	while (likely(total_rx_pkts < budget)) {
+		struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc;
+		union virtchnl2_rx_desc *desc;
+		unsigned int pkt_len = 0;
+		struct xdp_buff *xdp;
+		u16 gen_id;
+		int bufq_id;
+		u8 rxdid;
+
+		desc = IDPF_RX_DESC(rxq, ntc);
+		rx_desc = (struct virtchnl2_rx_flex_desc_adv_nic_3 *)desc;
+
+		dma_rmb();
+
+		/* if the descriptor isn't done, no work yet to do */
+		gen_id = le16_to_cpu(rx_desc->pktlen_gen_bufq_id);
+		gen_id = FIELD_GET(VIRTCHNL2_RX_FLEX_DESC_ADV_GEN_M, gen_id);
+
+		if (test_bit(__IDPF_Q_GEN_CHK, rxq->flags) != gen_id)
+			break;
+
+		rxdid = FIELD_GET(VIRTCHNL2_RX_FLEX_DESC_ADV_RXDID_M,
+				  rx_desc->rxdid_ucast);
+		if (rxdid != VIRTCHNL2_RXDID_2_FLEX_SPLITQ) {
+			IDPF_RX_BUMP_NTC(rxq, ntc);
+			u64_stats_update_begin(&rxq->stats_sync);
+			u64_stats_inc(&rxq->q_stats.rx.bad_descs);
+			u64_stats_update_end(&rxq->stats_sync);
+			continue;
+		}
+
+		pkt_len = le16_to_cpu(rx_desc->pktlen_gen_bufq_id);
+		pkt_len = FIELD_GET(VIRTCHNL2_RX_FLEX_DESC_ADV_LEN_PBUF_M,
+				    pkt_len);
+
+		bufq_id = le16_to_cpu(rx_desc->pktlen_gen_bufq_id);
+		bufq_id = FIELD_GET(VIRTCHNL2_RX_FLEX_DESC_ADV_BUFQ_ID_M,
+				    bufq_id);
+
+		rx_bufq = &rxq->rxq_grp->splitq.bufq_sets[bufq_id].bufq;
+		buf_id = le16_to_cpu(rx_desc->buf_id);
+
+		xdp = *idpf_get_xdp_buff(rx_bufq, buf_id);
+
+		if (unlikely(!pkt_len)) {
+			xsk_buff_free(xdp);
+			goto next;
+		}
+
+		xsk_buff_set_size(xdp, pkt_len);
+		xsk_buff_dma_sync_for_cpu(xdp, rxq->xsk_pool);
+
+		idpf_run_xdp_zc(rx_bufq, xdp, xdp_prog, xdpq,
+				&rxq_xdp_act);
+
+		if (unlikely(rxq_xdp_act & IDPF_XDP_ACT_STOP_NOW)) {
+			failure = true;
+			break;
+		}
+
+		total_rx_bytes += pkt_len;
+next:
+		total_rx_pkts++;
+		IDPF_RX_BUMP_NTC(rxq, ntc);
+	}
+
+	rxq->next_to_clean = ntc;
+	idpf_finalize_xdp_rx(xdpq, rxq_xdp_act);
+
+	u64_stats_update_begin(&rxq->stats_sync);
+	u64_stats_add(&rxq->q_stats.rx.packets, total_rx_pkts);
+	u64_stats_add(&rxq->q_stats.rx.bytes, total_rx_bytes);
+	u64_stats_update_end(&rxq->stats_sync);
+
+	if (!rx_bufq)
+		goto skip_refill;
+
+	IDPF_RX_BUMP_NTC(rx_bufq, buf_id);
+	rx_bufq->next_to_clean = buf_id;
+
+	to_refill = IDPF_DESC_UNUSED(rx_bufq);
+	if (to_refill > IDPF_QUEUE_QUARTER(rx_bufq))
+		failure |= !idpf_alloc_rx_buffers_zc(rx_bufq, to_refill);
+
+skip_refill:
+	if (xsk_uses_need_wakeup(rxq->xsk_pool)) {
+		if (failure || rxq->next_to_clean == rxq->next_to_use)
+			xsk_set_rx_need_wakeup(rxq->xsk_pool);
+		else
+			xsk_clear_rx_need_wakeup(rxq->xsk_pool);
+
+		return total_rx_pkts;
+	}
+
+	return unlikely(failure) ? budget : total_rx_pkts;
+}

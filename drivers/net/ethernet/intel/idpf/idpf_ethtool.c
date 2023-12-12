@@ -948,7 +948,7 @@ static void idpf_get_ethtool_stats(struct net_device *netdev,
 			if (is_splitq)
 				continue;
 
-			if (rxq)
+			if (rxq && !test_bit(__IDPF_Q_XSK, rxq->flags))
 				page_pool_get_stats(rxq->pp, &pp_stats);
 		}
 	}
@@ -958,7 +958,8 @@ static void idpf_get_ethtool_stats(struct net_device *netdev,
 			struct idpf_queue *rxbufq =
 				&vport->rxq_grps[i].splitq.bufq_sets[j].bufq;
 
-			page_pool_get_stats(rxbufq->pp, &pp_stats);
+			if (!test_bit(__IDPF_Q_XSK, rxbufq->flags))
+				page_pool_get_stats(rxbufq->pp, &pp_stats);
 		}
 	}
 

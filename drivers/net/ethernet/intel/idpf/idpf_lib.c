@@ -2396,6 +2396,34 @@ static void idpf_assign_bpf_prog(struct bpf_prog **current_prog,
 		bpf_prog_put(old_prog);
 }
 
+static void idpf_vport_rx_napi_schedule(struct idpf_vport *vport)
+{
+	int i;
+
+	for (i = 0; i < vport->num_rxq_grp; i++) {
+		struct idpf_rxq_group *rx_qgrp = &vport->rxq_grps[i];
+		struct idpf_queue *q;
+		u16 num_rxq;
+		int j;
+
+		rx_qgrp->vport = vport;
+		if (idpf_is_queue_model_split(vport->rxq_model))
+			num_rxq = rx_qgrp->splitq.num_rxq_sets;
+		else
+			num_rxq = rx_qgrp->singleq.num_rxq;
+
+		for (j = 0; j < num_rxq; j++) {
+			if (idpf_is_queue_model_split(vport->rxq_model))
+				q = &rx_qgrp->splitq.rxq_sets[j]->rxq;
+			else
+				q = rx_qgrp->singleq.rxqs[j];
+
+			if (test_bit(__IDPF_Q_XSK, q->flags))
+				napi_schedule(&q->q_vector->napi);
+		}
+	}
+}
+
 /**
  * idpf_xdp_setup_prog - Add or remove XDP eBPF program
  * @vport: vport to setup XDP for
@@ -2469,6 +2497,8 @@ idpf_xdp_setup_prog(struct idpf_vport *vport, struct bpf_prog *prog,
 			return err;
 		}
 	}
+	if (prog)
+		idpf_vport_rx_napi_schedule(vport);
 
 	return 0;
 }

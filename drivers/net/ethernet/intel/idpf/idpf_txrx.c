@@ -456,8 +456,14 @@ void idpf_rx_desc_rel(struct idpf_queue *rxq, bool bufq, s32 q_model)
 		rxq->skb = NULL;
 	}
 
-	if (bufq || !idpf_is_queue_model_split(q_model))
-		idpf_rx_buf_rel_all(rxq);
+	if (bufq || !idpf_is_queue_model_split(q_model)) {
+		if (test_bit(__IDPF_Q_XSK, rxq->flags)) {
+			kfree(rxq->xdp_buf);
+			rxq->xdp_buf = NULL;
+		} else {
+			idpf_rx_buf_rel_all(rxq);
+		}
+	}
 
 	rxq->next_to_alloc = 0;
 	rxq->next_to_clean = 0;
@@ -714,8 +720,20 @@ static int idpf_init_xdp_mem_model(struct idpf_queue *rxbufq)
 	else
 		rxq = rxbufq;
 
-	err = xdp_rxq_info_reg_mem_model(&rxq->xdp_rxq,
-					 MEM_TYPE_PAGE_POOL, pp);
+	if (test_bit(__IDPF_Q_XSK, rxbufq->flags)) {
+		err = xdp_rxq_info_reg_mem_model(&rxq->xdp_rxq,
+						 MEM_TYPE_XSK_BUFF_POOL,
+						 NULL);
+		xsk_pool_set_rxq_info(rxq->xsk_pool, &rxq->xdp_rxq);
+	} else {
+		err = xdp_rxq_info_reg_mem_model(&rxq->xdp_rxq,
+						 MEM_TYPE_PAGE_POOL, pp);
+	}
+
+	if (err)
+		dev_err(rxq->dev, "Could not register XDP memory model for RX queue %u, error: %d\n",
+			rxq->idx, err);
+
 	return err;
 }
 
@@ -727,15 +745,19 @@ static int idpf_init_xdp_mem_model(struct idpf_queue *rxbufq)
  */
 int idpf_rx_bufs_init(struct idpf_queue *rxbufq)
 {
+	bool xsk_enabled = test_bit(__IDPF_Q_XSK, rxbufq->flags);
 	bool xdp_enabled = idpf_is_xdp_enabled(rxbufq);
-	struct page_pool *pool;
 	int err;
 
-	pool = idpf_rx_create_page_pool(rxbufq, xdp_enabled);
-	if (IS_ERR(pool))
-		return PTR_ERR(pool);
+	if (!xsk_enabled) {
+		struct page_pool *pool;
 
-	rxbufq->pp = pool;
+		pool = idpf_rx_create_page_pool(rxbufq, xdp_enabled);
+		if (IS_ERR(pool))
+			return PTR_ERR(pool);
+
+		rxbufq->pp = pool;
+	}
 
 	if (xdp_enabled) {
 		err = idpf_init_xdp_mem_model(rxbufq);
@@ -743,7 +765,12 @@ int idpf_rx_bufs_init(struct idpf_queue *rxbufq)
 			return err;
 	}
 
-	return idpf_rx_buf_alloc_all(rxbufq);
+	if (xsk_enabled)
+		err = idpf_check_alloc_rx_buffers_zc(rxbufq);
+	else
+		err = idpf_rx_buf_alloc_all(rxbufq);
+
+	return err;
 }
 
 /**
@@ -891,6 +918,7 @@ int idpf_rx_desc_alloc(struct idpf_queue *rxq, bool bufq, s32 q_model)
 	rxq->next_to_use = 0;
 	set_bit(__IDPF_Q_GEN_CHK, rxq->flags);
 
+	idpf_xsk_setup_rxbufq(rxq, bufq);
 	if (idpf_xdp_is_prog_ena(rxq->vport))
 		idpf_xdp_rxbufq_init(rxq);
 
@@ -1570,6 +1598,7 @@ setup_rxq:
 			 */
 			q->rx_buf_size = vport->bufq_size[0];
 			q->rx_buffer_low_watermark = IDPF_LOW_WATERMARK;
+			/* TODO: compute max_pkt_size basing on pp or xsk_pool */
 			q->rx_max_pkt_size = vport->netdev->mtu +
 							IDPF_PACKET_HDR_PAD;
 			idpf_rxq_set_descids(vport, q);
@@ -4101,6 +4130,9 @@ static void idpf_rx_clean_refillq_all(struct idpf_queue *bufq)
 	struct idpf_bufq_set *bufq_set;
 	int i;
 
+	if (test_bit(__IDPF_Q_XSK, bufq->flags))
+		return;
+
 	bufq_set = container_of(bufq, struct idpf_bufq_set, bufq);
 	for (i = 0; i < bufq_set->num_refillqs; i++)
 		idpf_rx_clean_refillq(bufq, &bufq_set->refillqs[i]);
@@ -4615,7 +4647,9 @@ static bool idpf_rx_splitq_clean_all(struct idpf_q_vector *q_vec, int budget,
 		struct idpf_queue *rxq = q_vec->rx[i];
 		int pkts_cleaned_per_q;
 
-		pkts_cleaned_per_q = idpf_rx_splitq_clean(rxq, budget_per_q);
+		pkts_cleaned_per_q = test_bit(__IDPF_Q_XSK, rxq->flags) ?
+				     idpf_clean_rx_irq_zc(rxq, budget_per_q) :
+				     idpf_rx_splitq_clean(rxq, budget_per_q);
 		/* if we clean as many as budgeted, we must not be done */
 		if (pkts_cleaned_per_q >= budget_per_q)
 			clean_complete = false;
