@@ -3,6 +3,8 @@
 
 #include "idpf.h"
 
+#define idpf_tx_buf_ctx_entry(buf)	(*(bool *)&(buf)->priv)
+
 /**
  * idpf_tx_singleq_csum - Enable tx checksum offloads
  * @skb: pointer to skb
@@ -190,6 +192,7 @@ static void idpf_tx_singleq_map(struct idpf_queue *tx_q,
 				struct idpf_tx_buf *first,
 				struct idpf_tx_offload_params *offloads)
 {
+	enum libie_tx_buf_type type = LIBIE_TX_BUF_SKB;
 	u32 offsets = offloads->hdr_offsets;
 	struct idpf_tx_buf *tx_buf = first;
 	struct idpf_base_tx_desc *tx_desc;
@@ -218,6 +221,8 @@ static void idpf_tx_singleq_map(struct idpf_queue *tx_q,
 
 		if (dma_mapping_error(tx_q->dev, dma))
 			return idpf_tx_dma_map_error(tx_q, skb, first, i);
+
+		tx_buf->type = type;
 
 		/* record length, and DMA address */
 		dma_unmap_len_set(tx_buf, len, size);
@@ -270,6 +275,7 @@ static void idpf_tx_singleq_map(struct idpf_queue *tx_q,
 				       DMA_TO_DEVICE);
 
 		tx_buf = &tx_q->tx_buf[i];
+		type = LIBIE_TX_BUF_FRAG;
 	}
 
 	skb_tx_timestamp(first->skb);
@@ -304,8 +310,8 @@ idpf_tx_singleq_get_ctx_desc(struct idpf_queue *txq)
 	struct idpf_base_tx_ctx_desc *ctx_desc;
 	int ntu = txq->next_to_use;
 
-	memset(&txq->tx_buf[ntu], 0, sizeof(struct idpf_tx_buf));
-	txq->tx_buf[ntu].ctx_entry = true;
+	txq->tx_buf[ntu].type = LIBIE_TX_BUF_EMPTY;
+	idpf_tx_buf_ctx_entry(&txq->tx_buf[ntu]) = true;
 
 	ctx_desc = IDPF_BASE_TX_CTX_DESC(txq, ntu);
 
@@ -446,7 +452,7 @@ static bool idpf_tx_singleq_clean(struct idpf_queue *tx_q, int napi_budget,
 				  int *cleaned)
 {
 	unsigned int budget = tx_q->vport->compln_clean_budget;
-	unsigned int total_bytes = 0, total_pkts = 0;
+	struct libie_sq_onstack_stats ss = { };
 	struct idpf_base_tx_desc *tx_desc;
 	s16 ntc = tx_q->next_to_clean;
 	struct idpf_netdev_priv *np;
@@ -467,13 +473,13 @@ static bool idpf_tx_singleq_clean(struct idpf_queue *tx_q, int napi_budget,
 		 * such. We can skip this descriptor since there is no buffer
 		 * to clean.
 		 */
-		if (tx_buf->ctx_entry) {
+		if (idpf_tx_buf_ctx_entry(tx_buf)) {
 			/* Clear this flag here to avoid stale flag values when
 			 * this buffer is used for actual data in the future.
 			 * There are cases where the tx_buf struct / the flags
 			 * field will not be cleared before being reused.
 			 */
-			tx_buf->ctx_entry = false;
+			idpf_tx_buf_ctx_entry(tx_buf) = false;
 			goto fetch_next_txq_desc;
 		}
 
@@ -494,20 +500,7 @@ static bool idpf_tx_singleq_clean(struct idpf_queue *tx_q, int napi_budget,
 		tx_buf->next_to_watch = NULL;
 
 		/* update the statistics for this packet */
-		total_bytes += tx_buf->bytecount;
-		total_pkts += tx_buf->gso_segs;
-
-		napi_consume_skb(tx_buf->skb, napi_budget);
-
-		/* unmap skb header data */
-		dma_unmap_single(tx_q->dev,
-				 dma_unmap_addr(tx_buf, dma),
-				 dma_unmap_len(tx_buf, len),
-				 DMA_TO_DEVICE);
-
-		/* clear tx_buf data */
-		tx_buf->skb = NULL;
-		dma_unmap_len_set(tx_buf, len, 0);
+		libie_tx_complete_buf(tx_buf, tx_q->dev, !!napi_budget, &ss);
 
 		/* unmap remaining buffers */
 		while (tx_desc != eop_desc) {
@@ -521,13 +514,8 @@ static bool idpf_tx_singleq_clean(struct idpf_queue *tx_q, int napi_budget,
 			}
 
 			/* unmap any remaining paged data */
-			if (dma_unmap_len(tx_buf, len)) {
-				dma_unmap_page(tx_q->dev,
-					       dma_unmap_addr(tx_buf, dma),
-					       dma_unmap_len(tx_buf, len),
-					       DMA_TO_DEVICE);
-				dma_unmap_len_set(tx_buf, len, 0);
-			}
+			libie_tx_complete_buf(tx_buf, tx_q->dev, !!napi_budget,
+					      &ss);
 		}
 
 		/* update budget only if we did something */
@@ -547,11 +535,11 @@ fetch_next_txq_desc:
 	ntc += tx_q->desc_count;
 	tx_q->next_to_clean = ntc;
 
-	*cleaned += total_pkts;
+	*cleaned += ss.packets;
 
 	u64_stats_update_begin(&tx_q->stats_sync);
-	u64_stats_add(&tx_q->q_stats.tx.packets, total_pkts);
-	u64_stats_add(&tx_q->q_stats.tx.bytes, total_bytes);
+	u64_stats_add(&tx_q->q_stats.tx.packets, ss.packets);
+	u64_stats_add(&tx_q->q_stats.tx.bytes, ss.bytes);
 	u64_stats_update_end(&tx_q->stats_sync);
 
 	vport = tx_q->vport;
@@ -560,7 +548,7 @@ fetch_next_txq_desc:
 
 	dont_wake = np->state != __IDPF_VPORT_UP ||
 		    !netif_carrier_ok(vport->netdev);
-	__netif_txq_completed_wake(nq, total_pkts, total_bytes,
+	__netif_txq_completed_wake(nq, ss.packets, ss.bytes,
 				   IDPF_DESC_UNUSED(tx_q), IDPF_TX_WAKE_THRESH,
 				   dont_wake);
 

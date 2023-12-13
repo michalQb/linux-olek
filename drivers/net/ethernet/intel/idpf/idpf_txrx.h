@@ -5,6 +5,7 @@
 #define _IDPF_TXRX_H_
 
 #include <linux/net/intel/libie/rx.h>
+#include <linux/net/intel/libie/tx.h>
 
 #include <net/page_pool/helpers.h>
 #include <net/tcp.h>
@@ -165,42 +166,7 @@ union idpf_tx_flex_desc {
 	struct idpf_flex_tx_sched_desc flow; /* flow based scheduling */
 };
 
-/**
- * struct idpf_tx_buf
- * @next_to_watch: Next descriptor to clean
- * @skb: Pointer to the skb
- * @dma: DMA address
- * @len: DMA length
- * @bytecount: Number of bytes
- * @gso_segs: Number of GSO segments
- * @compl_tag: Splitq only, unique identifier for a buffer. Used to compare
- *	       with completion tag returned in buffer completion event.
- *	       Because the completion tag is expected to be the same in all
- *	       data descriptors for a given packet, and a single packet can
- *	       span multiple buffers, we need this field to track all
- *	       buffers associated with this completion tag independently of
- *	       the buf_id. The tag consists of a N bit buf_id and M upper
- *	       order "generation bits". See compl_tag_bufid_m and
- *	       compl_tag_gen_s in struct idpf_queue. We'll use a value of -1
- *	       to indicate the tag is not valid.
- * @ctx_entry: Singleq only. Used to indicate the corresponding entry
- *	       in the descriptor ring was used for a context descriptor and
- *	       this buffer entry should be skipped.
- */
-struct idpf_tx_buf {
-	void *next_to_watch;
-	struct sk_buff *skb;
-	DEFINE_DMA_UNMAP_ADDR(dma);
-	DEFINE_DMA_UNMAP_LEN(len);
-	unsigned int bytecount;
-	unsigned short gso_segs;
-
-	union {
-		int compl_tag;
-
-		bool ctx_entry;
-	};
-};
+#define idpf_tx_buf libie_tx_buffer
 
 struct idpf_tx_stash {
 	struct hlist_node hlist;
@@ -493,10 +459,7 @@ struct idpf_tx_queue_stats {
 	u64_stats_t dma_map_errs;
 };
 
-struct idpf_cleaned_stats {
-	u32 packets;
-	u32 bytes;
-};
+#define idpf_cleaned_stats libie_sq_onstack_stats
 
 union idpf_queue_stats {
 	struct idpf_rx_queue_stats rx;
