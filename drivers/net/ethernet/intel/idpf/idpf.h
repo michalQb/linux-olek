@@ -16,12 +16,16 @@ struct idpf_vport_max_q;
 #include <linux/bitfield.h>
 #include <linux/sctp.h>
 #include <linux/ethtool.h>
+#include <linux/bpf_trace.h>
+#include <linux/filter.h>
+#include <linux/bpf.h>
 #include <net/gro.h>
 #include <linux/dim.h>
 
 #include "virtchnl2.h"
 #include "idpf_lan_txrx.h"
 #include "idpf_txrx.h"
+#include "idpf_xsk.h"
 #include "idpf_controlq.h"
 
 #define GETMAXVAL(num_bits)		GENMASK((num_bits) - 1, 0)
@@ -376,6 +380,13 @@ struct idpf_vport {
 	struct idpf_queue **txqs;
 	bool crc_enable;
 
+	int num_xdp_txq;
+	int num_xdp_rxq;
+	int num_xdp_complq;
+	int xdp_txq_offset;
+	int xdp_rxq_offset;
+	int xdp_complq_offset;
+
 	u16 num_rxq;
 	u16 num_bufq;
 	u32 rxq_desc_count;
@@ -423,6 +434,7 @@ struct idpf_vport {
  * @__IDPF_USER_FLAGS_NBITS: Must be last
  */
 enum idpf_user_flags {
+	__IDPF_PRIV_FLAGS_HDR_SPLIT = 0,
 	__IDPF_PROMISC_UC = 32,
 	__IDPF_PROMISC_MC,
 
@@ -466,6 +478,9 @@ struct idpf_vport_user_config_data {
 	u16 num_req_rx_qs;
 	u32 num_req_txq_desc;
 	u32 num_req_rxq_desc;
+	/* Duplicated in queue structure for performance reasons */
+	struct bpf_prog *xdp_prog;
+	DECLARE_BITMAP(af_xdp_zc_qps, IDPF_LARGE_MAX_Q);
 	DECLARE_BITMAP(user_flags, __IDPF_USER_FLAGS_NBITS);
 	struct list_head mac_filter_list;
 };
@@ -684,6 +699,59 @@ static inline int idpf_is_queue_model_split(u16 q_model)
 	return q_model == VIRTCHNL2_QUEUE_MODEL_SPLIT;
 }
 
+/**
+ * idpf_find_rxq - find rxq from q index
+ * @vport: virtual port associated to queue
+ * @q_num: q index used to find queue
+ *
+ * returns pointer to rx queue
+ */
+static inline struct idpf_queue *
+idpf_find_rxq(struct idpf_vport *vport, int q_num)
+{
+	int q_grp, q_idx;
+
+	if (!idpf_is_queue_model_split(vport->rxq_model))
+		return vport->rxq_grps->singleq.rxqs[q_num];
+
+	q_grp = q_num / IDPF_DFLT_SPLITQ_RXQ_PER_GROUP;
+	q_idx = q_num % IDPF_DFLT_SPLITQ_RXQ_PER_GROUP;
+
+	return &vport->rxq_grps[q_grp].splitq.rxq_sets[q_idx]->rxq;
+}
+
+/**
+ * idpf_find_txq - find txq from q index
+ * @vport: virtual port associated to queue
+ * @q_num: q index used to find queue
+ *
+ * returns pointer to tx queue
+ */
+static inline struct idpf_queue *
+idpf_find_txq(struct idpf_vport *vport, int q_num)
+{
+	int q_grp;
+
+	if (!idpf_is_queue_model_split(vport->txq_model))
+		return vport->txqs[q_num];
+
+	q_grp = q_num / IDPF_DFLT_SPLITQ_TXQ_PER_GROUP;
+
+	return vport->txq_grps[q_grp].complq;
+}
+
+/**
+ * idpf_xdp_is_prog_ena - check if there is an XDP program on adapter
+ * @vport: vport to check
+ */
+static inline bool idpf_xdp_is_prog_ena(struct idpf_vport *vport)
+{
+	if (!vport->adapter)
+		return false;
+
+	return !!vport->adapter->vport_config[vport->idx]->user_config.xdp_prog;
+}
+
 #define idpf_is_cap_ena(adapter, field, flag) \
 	idpf_is_capability_ena(adapter, false, field, flag)
 #define idpf_is_cap_ena_all(adapter, field, flag) \
@@ -894,6 +962,17 @@ static inline void idpf_vport_ctrl_unlock(struct net_device *netdev)
 	mutex_unlock(&np->adapter->vport_ctrl_lock);
 }
 
+/**
+ * idpf_vport_ctrl_is_locked - Check if vport control lock is taken
+ * @netdev: Network interface device structure
+ */
+static inline bool idpf_vport_ctrl_is_locked(struct net_device *netdev)
+{
+	struct idpf_netdev_priv *np = netdev_priv(netdev);
+
+	return mutex_is_locked(&np->adapter->vport_ctrl_lock);
+}
+
 void idpf_statistics_task(struct work_struct *work);
 void idpf_init_task(struct work_struct *work);
 void idpf_service_task(struct work_struct *work);
@@ -939,6 +1018,7 @@ int idpf_recv_mb_msg(struct idpf_adapter *adapter, u32 op,
 int idpf_send_mb_msg(struct idpf_adapter *adapter, u32 op,
 		     u16 msg_size, u8 *msg);
 void idpf_set_ethtool_ops(struct net_device *netdev);
+void idpf_vport_set_hsplit(struct idpf_vport *vport, bool ena);
 int idpf_vport_alloc_max_qs(struct idpf_adapter *adapter,
 			    struct idpf_vport_max_q *max_q);
 void idpf_vport_dealloc_max_qs(struct idpf_adapter *adapter,
@@ -956,6 +1036,15 @@ int idpf_vport_queue_ids_init(struct idpf_vport *vport);
 int idpf_queue_reg_init(struct idpf_vport *vport);
 int idpf_send_config_queues_msg(struct idpf_vport *vport);
 int idpf_send_enable_queues_msg(struct idpf_vport *vport);
+int idpf_send_enable_selected_queues_msg(struct idpf_vport *vport,
+					 struct idpf_queue **qs,
+					 int num_q);
+int idpf_send_disable_selected_queues_msg(struct idpf_vport *vport,
+					  struct idpf_queue **qs,
+					  int num_q);
+int idpf_send_config_selected_queues_msg(struct idpf_vport *vport,
+					 struct idpf_queue **qs,
+					 int num_q);
 int idpf_send_create_vport_msg(struct idpf_adapter *adapter,
 			       struct idpf_vport_max_q *max_q);
 int idpf_check_supported_desc_ids(struct idpf_vport *vport);
