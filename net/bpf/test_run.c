@@ -194,8 +194,7 @@ static int xdp_test_run_setup(struct xdp_test_data *xdp, struct xdp_buff *orig_c
 	 * xdp_mem_info pointing to our page_pool
 	 */
 	xdp_rxq_info_reg(&xdp->rxq, orig_ctx->rxq->dev, 0, 0);
-	xdp->rxq.mem.type = MEM_TYPE_PAGE_POOL;
-	xdp->rxq.mem.id = pp->xdp_mem_id;
+	xdp_rxq_info_attach_page_pool(&xdp->rxq, xdp->pp);
 	xdp->dev = orig_ctx->rxq->dev;
 	xdp->orig_ctx = orig_ctx;
 
@@ -212,6 +211,7 @@ err_skbs:
 
 static void xdp_test_run_teardown(struct xdp_test_data *xdp)
 {
+	xdp_rxq_info_detach_mem_model(&xdp->rxq);
 	xdp_unreg_mem_model(&xdp->mem);
 	page_pool_destroy(xdp->pp);
 	kfree(xdp->frames);
