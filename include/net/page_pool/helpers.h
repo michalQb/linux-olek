@@ -397,6 +397,38 @@ static inline bool page_pool_set_dma_addr(struct page *page, dma_addr_t addr)
 	return false;
 }
 
+static inline dma_addr_t __page_pool_dma_sync_va_for_device(const void *va,
+							    u32 dma_sync_size,
+							    bool compound)
+{
+	const struct page_pool *pool;
+	const struct page *page;
+	dma_addr_t addr;
+	u32 offset;
+
+	if (unlikely(compound)) {
+		page = virt_to_head_page(va);
+		offset = va - page_address(page);
+	} else {
+		page = virt_to_page(va);
+		offset = offset_in_page(va);
+	}
+
+	addr = page_pool_get_dma_addr(page) + offset;
+	pool = page->pp;
+
+	dma_sync_single_for_device(pool->p.dev, addr, dma_sync_size,
+				   page_pool_get_dma_dir(pool));
+
+	return addr;
+}
+
+static inline dma_addr_t page_pool_dma_sync_va_for_device(const void *va,
+							  u32 dma_sync_size)
+{
+	return __page_pool_dma_sync_va_for_device(va, dma_sync_size, false);
+}
+
 /**
  * page_pool_dma_sync_for_cpu - sync Rx page for CPU after it's written by HW
  * @pool: &page_pool the @page belongs to
