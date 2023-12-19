@@ -299,7 +299,7 @@ static int xdp_test_run_batch(struct xdp_test_data *xdp, struct bpf_prog *prog,
 	xdp_set_return_frame_no_direct();
 
 	pp = this_cpu_read(system_page_pool);
-	xdp->rxq.mem.id = pp->xdp_mem_id;
+	xdp_rxq_info_attach_page_pool(&xdp->rxq, pp);
 
 	for (i = 0; i < batch_sz; i++) {
 		page = page_pool_dev_alloc_pages(pp);
