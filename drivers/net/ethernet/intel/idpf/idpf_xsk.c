@@ -81,12 +81,57 @@ void idpf_xsk_setup_rxbufq(struct idpf_queue *rxbufq, bool bufq)
 {
 	u32 q_type = bufq ? VIRTCHNL2_QUEUE_TYPE_RX_BUFFER :
 			    VIRTCHNL2_QUEUE_TYPE_RX;
+	struct idpf_rxq_group *rxq_grp = rxbufq->rxq_grp;
+	struct idpf_vport *vport = rxbufq->vport;
 
 	idpf_set_xsk_pool(rxbufq, q_type);
-	if (rxbufq->xsk_pool)
+	if (rxbufq->xsk_pool) {
 		set_bit(__IDPF_Q_XSK, rxbufq->flags);
-	else
+		rxq_grp->splitq.num_bufq_sets = IDPF_SINGLE_BUFQ_PER_RXQ_GRP;
+		if (bufq)
+			rxbufq->desc_count = vport->rxq_desc_count;
+	} else {
 		clear_bit(__IDPF_Q_XSK, rxbufq->flags);
+		rxq_grp->splitq.num_bufq_sets = vport->num_bufqs_per_qgrp;
+		if (bufq)
+			rxbufq->desc_count = vport->bufq_desc_count[rxbufq->idx];
+	}
+}
+
+void idpf_xsk_setup_all_rxbufqs(struct idpf_vport *vport)
+{
+	struct idpf_rxq_group *rx_qgrp;
+	u16 num_rxq;
+	int i, j;
+
+	if (!vport->rxq_grps)
+		return;
+
+	for (i = 0; i < vport->num_rxq_grp; i++) {
+		rx_qgrp = &vport->rxq_grps[i];
+
+		if (!idpf_is_queue_model_split(vport->rxq_model)) {
+			for (j = 0; j < rx_qgrp->singleq.num_rxq; j++)
+				idpf_xsk_setup_rxbufq(rx_qgrp->singleq.rxqs[j],
+						      false);
+			continue;
+		}
+
+		num_rxq = rx_qgrp->splitq.num_rxq_sets;
+		for (j = 0; j < num_rxq; j++)
+			idpf_xsk_setup_rxbufq(&rx_qgrp->splitq.rxq_sets[j]->rxq,
+					      false);
+
+		if (!rx_qgrp->splitq.bufq_sets)
+			continue;
+
+		for (j = 0; j < vport->num_bufqs_per_qgrp; j++) {
+			struct idpf_bufq_set *bufq_set =
+					&rx_qgrp->splitq.bufq_sets[j];
+
+			idpf_xsk_setup_rxbufq(&bufq_set->bufq, true);
+		}
+	}
 }
 
 /**
@@ -302,7 +347,7 @@ idpf_insert_rxqs_from_grp(struct idpf_vport *vport,
 		for (i = 0; i < rxq_grp->splitq.num_rxq_sets; i++)
 			qs[qs_idx++] = &rxq_grp->splitq.rxq_sets[i]->rxq;
 
-		for (i = 0; i < vport->num_bufqs_per_qgrp; i++)
+		for (i = 0; i < rxq_grp->splitq.num_bufq_sets; i++)
 			qs[qs_idx++] = &rxq_grp->splitq.bufq_sets[i].bufq;
 	}
 
@@ -325,7 +370,8 @@ idpf_count_rxqs_in_grp(struct idpf_vport *vport, struct idpf_queue *rxq)
 	if (!idpf_is_queue_model_split(vport->rxq_model))
 		return 1;
 
-	return rxq->rxq_grp->splitq.num_rxq_sets + vport->num_bufqs_per_qgrp;
+	return rxq->rxq_grp->splitq.num_rxq_sets +
+	       rxq->rxq_grp->splitq.num_bufq_sets;
 }
 
 /**
@@ -406,6 +452,29 @@ idpf_create_queue_list(struct idpf_vport *vport, u16 q_idx, int *num_qs)
 	return qs;
 }
 
+static struct idpf_queue **
+idpf_refresh_queue_list(struct idpf_vport *vport, u16 idx,
+			struct idpf_queue **qs, int *num_qs)
+{
+	struct idpf_queue *rxq = idpf_find_rxq(vport, idx);
+	struct idpf_rxq_group *rxq_grp = rxq->rxq_grp;
+	int i;
+
+	idpf_xsk_setup_rxbufq(rxq, false);
+
+	for (i = 0; i < rxq_grp->splitq.num_bufq_sets; i++) {
+		struct idpf_queue *bufq = &rxq_grp->splitq.bufq_sets[i].bufq;
+
+		idpf_xsk_setup_rxbufq(bufq, true);
+	}
+
+	kfree(qs);
+	qs = NULL;
+
+	qs = idpf_create_queue_list(vport, idx, num_qs);
+	return qs;
+}
+
 /**
  * idpf_qp_dis - Disables queues associated with a queue pair
  * @vport: vport structure
@@ -462,6 +531,10 @@ static int idpf_qp_ena(struct idpf_vport *vport, struct idpf_q_vector *q_vector,
 {
 	int err;
 
+	qs = idpf_refresh_queue_list(vport, q_idx, qs, &num_qs);
+	if (!qs)
+		return -ENOMEM;
+
 	err = idpf_qp_cfg_qs(vport, qs, num_qs);
 	if (err) {
 		netdev_err(vport->netdev, "Could not initialize queues for index %d, error = %d\n",
@@ -509,6 +582,7 @@ static int idpf_xsk_pool_disable(struct idpf_vport *vport, u16 qid)
 {
 	struct idpf_vport_user_config_data *cfg_data;
 	struct xsk_buff_pool *pool;
+
 	if (!vport->rxq_grps)
 		return -EINVAL;
 	pool = xsk_get_pool_from_qid(vport->netdev, qid);

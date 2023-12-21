@@ -1740,7 +1740,7 @@ static void idpf_fill_rxbufq_config_chunk(struct idpf_vport *vport,
 
 	qi->rx_bufq1_id =
 		cpu_to_le16(q->rxq_grp->splitq.bufq_sets[0].bufq.q_id);
-	if (vport->num_bufqs_per_qgrp > IDPF_SINGLE_BUFQ_PER_RXQ_GRP) {
+	if (q->rxq_grp->splitq.num_bufq_sets > IDPF_SINGLE_BUFQ_PER_RXQ_GRP) {
 		qi->bufq2_ena = IDPF_BUFQ2_ENA;
 		qi->rx_bufq2_id =
 			cpu_to_le16(q->rxq_grp->splitq.bufq_sets[1].bufq.q_id);
@@ -1831,6 +1831,7 @@ static int idpf_send_config_rx_queues_msg(struct idpf_vport *vport)
 {
 	int totqs, err = 0, i, k = 0;
 	struct idpf_queue **qs;
+	int disabled_bufqs = 0;
 
 	totqs = vport->num_rxq + vport->num_bufq;
 	qs = (struct idpf_queue **)kzalloc(totqs * sizeof(*qs), GFP_KERNEL);
@@ -1846,9 +1847,11 @@ static int idpf_send_config_rx_queues_msg(struct idpf_vport *vport)
 		if (!idpf_is_queue_model_split(vport->rxq_model))
 			goto setup_rxqs;
 
-		for (j = 0; j < vport->num_bufqs_per_qgrp; j++, k++)
+		for (j = 0; j < rx_qgrp->splitq.num_bufq_sets; j++, k++)
 			qs[k] = &rx_qgrp->splitq.bufq_sets[j].bufq;
 
+		disabled_bufqs += vport->num_bufqs_per_qgrp -
+				  rx_qgrp->splitq.num_bufq_sets;
 setup_rxqs:
 		if (idpf_is_queue_model_split(vport->rxq_model))
 			num_rxq = rx_qgrp->splitq.num_rxq_sets;
@@ -1863,12 +1866,12 @@ setup_rxqs:
 	}
 
 	/* Make sure accounting agrees */
-	if (k != totqs) {
+	if (k + disabled_bufqs != totqs) {
 		err = -EINVAL;
 		goto error;
 	}
 
-	err = idpf_send_config_selected_rx_queues_msg(vport, qs, totqs);
+	err = idpf_send_config_selected_rx_queues_msg(vport, qs, k);
 
 error:
 	kfree(qs);
@@ -1972,6 +1975,7 @@ static int idpf_send_ena_dis_queues_msg(struct idpf_vport *vport, u32 vc_op)
 {
 	int num_txq, num_rxq, num_q, err = 0;
 	struct idpf_queue **qs;
+	int disabled_bufqs = 0;
 	int i, j, k = 0;
 
 	num_txq = vport->num_txq + vport->num_complq;
@@ -2031,18 +2035,21 @@ setup_rx:
 	for (i = 0; i < vport->num_rxq_grp; i++) {
 		struct idpf_rxq_group *rx_qgrp = &vport->rxq_grps[i];
 
-		for (j = 0; j < vport->num_bufqs_per_qgrp; j++, k++)
+		for (j = 0; j < rx_qgrp->splitq.num_bufq_sets; j++, k++)
 			qs[k] = &rx_qgrp->splitq.bufq_sets[j].bufq;
+
+		disabled_bufqs += vport->num_bufqs_per_qgrp -
+				  rx_qgrp->splitq.num_bufq_sets;
 	}
-	if (vport->num_bufq != k - (vport->num_txq +
-				    vport->num_complq +
-				    vport->num_rxq)) {
+	if (vport->num_bufq != k + disabled_bufqs - (vport->num_txq +
+						     vport->num_complq +
+						     vport->num_rxq)) {
 		err = -EINVAL;
 		goto error;
 	}
 
 send_msg:
-	err = idpf_send_ena_dis_selected_qs_msg(vport, qs, num_q, vc_op);
+	err = idpf_send_ena_dis_selected_qs_msg(vport, qs, num_q - disabled_bufqs, vc_op);
 error:
 	kfree(qs);
 	return err;

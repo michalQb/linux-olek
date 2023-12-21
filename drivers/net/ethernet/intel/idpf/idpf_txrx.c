@@ -484,7 +484,7 @@ void idpf_rx_desc_rel(struct idpf_queue *rxq, bool bufq, s32 q_model)
 static void idpf_rx_desc_rel_all(struct idpf_vport *vport)
 {
 	struct idpf_rxq_group *rx_qgrp;
-	u16 num_rxq;
+	u16 num_rxq, num_bufq;
 	int i, j;
 
 	if (!vport->rxq_grps)
@@ -508,7 +508,8 @@ static void idpf_rx_desc_rel_all(struct idpf_vport *vport)
 		if (!rx_qgrp->splitq.bufq_sets)
 			continue;
 
-		for (j = 0; j < vport->num_bufqs_per_qgrp; j++) {
+		num_bufq = rx_qgrp->splitq.num_bufq_sets;
+		for (j = 0; j < num_bufq; j++) {
 			struct idpf_bufq_set *bufq_set =
 				&rx_qgrp->splitq.bufq_sets[j];
 
@@ -806,7 +807,7 @@ int idpf_rx_bufs_init_all(struct idpf_vport *vport)
 		}
 
 		/* Otherwise, allocate bufs for the buffer queues */
-		for (j = 0; j < vport->num_bufqs_per_qgrp; j++) {
+		for (j = 0; j < rx_qgrp->splitq.num_bufq_sets; j++) {
 			q = &rx_qgrp->splitq.bufq_sets[j].bufq;
 			err = idpf_rx_bufs_init(q);
 			if (err)
@@ -921,7 +922,6 @@ int idpf_rx_desc_alloc(struct idpf_queue *rxq, bool bufq, s32 q_model)
 	rxq->next_to_use = 0;
 	set_bit(__IDPF_Q_GEN_CHK, rxq->flags);
 
-	idpf_xsk_setup_rxbufq(rxq, bufq);
 	if (idpf_xdp_is_prog_ena(rxq->vport))
 		idpf_xdp_rxbufq_init(rxq);
 
@@ -938,9 +938,9 @@ static int idpf_rx_desc_alloc_all(struct idpf_vport *vport)
 {
 	struct device *dev = &vport->adapter->pdev->dev;
 	struct idpf_rxq_group *rx_qgrp;
+	u16 num_rxq, num_bufq;
 	struct idpf_queue *q;
 	int i, j, err;
-	u16 num_rxq;
 
 	for (i = 0; i < vport->num_rxq_grp; i++) {
 		rx_qgrp = &vport->rxq_grps[i];
@@ -965,7 +965,8 @@ static int idpf_rx_desc_alloc_all(struct idpf_vport *vport)
 		if (!idpf_is_queue_model_split(vport->rxq_model))
 			continue;
 
-		for (j = 0; j < vport->num_bufqs_per_qgrp; j++) {
+		num_bufq = rx_qgrp->splitq.num_bufq_sets;
+		for (j = 0; j < num_bufq; j++) {
 			q = &rx_qgrp->splitq.bufq_sets[j].bufq;
 			err = idpf_rx_desc_alloc(q, true, vport->rxq_model);
 			if (err) {
@@ -1177,20 +1178,12 @@ adjust_bufqs:
 		return;
 	}
 
-	if (idpf_xdp_is_prog_ena(vport)) {
-		/* After loading the XDP program we will have only one buffer
-		 * queue per group with buffer size 4kB.
-		 */
-		vport->num_bufqs_per_qgrp = IDPF_SINGLE_BUFQ_PER_RXQ_GRP;
-		vport->bufq_size[0] = IDPF_RX_BUF_4096;
-	} else {
-		vport->num_bufqs_per_qgrp = IDPF_MAX_BUFQS_PER_RXQ_GRP;
-		/* Bufq[0] default buffer size is 4K
-		 * Bufq[1] default buffer size is 2K
-		 */
-		vport->bufq_size[0] = IDPF_RX_BUF_4096;
-		vport->bufq_size[1] = IDPF_RX_BUF_2048;
-	}
+	vport->num_bufqs_per_qgrp = IDPF_MAX_BUFQS_PER_RXQ_GRP;
+	/* Bufq[0] default buffer size is 4K
+	 * Bufq[1] default buffer size is 2K
+	 */
+	vport->bufq_size[0] = IDPF_RX_BUF_4096;
+	vport->bufq_size[1] = IDPF_RX_BUF_2048;
 }
 
 /**
@@ -1315,10 +1308,6 @@ int idpf_vport_calc_total_qs(struct idpf_adapter *adapter, u16 vport_idx,
 			    le16_to_cpu(vport_msg->num_rx_q));
 	if (idpf_is_queue_model_split(le16_to_cpu(vport_msg->txq_model)))
 		vport_msg->num_tx_complq = vport_msg->num_tx_q;
-
-	/* For XDP request only one bufq per Rx queue group */
-	if (idpf_is_queue_model_split(le16_to_cpu(vport_msg->rxq_model)))
-		vport_msg->num_rx_bufq = cpu_to_le16(num_rxq_grps);
 
 	return 0;
 }
@@ -1504,6 +1493,7 @@ static int idpf_rxq_group_alloc(struct idpf_vport *vport, u16 num_rxq)
 			goto skip_splitq_rx_init;
 		}
 		rx_qgrp->splitq.num_rxq_sets = num_rxq;
+		rx_qgrp->splitq.num_bufq_sets = vport->num_bufqs_per_qgrp;
 
 		for (j = 0; j < num_rxq; j++) {
 			rx_qgrp->splitq.rxq_sets[j] =
@@ -1633,6 +1623,8 @@ static int idpf_vport_queue_grp_alloc_all(struct idpf_vport *vport)
 	err = idpf_rxq_group_alloc(vport, num_rxq);
 	if (err)
 		goto err_out;
+
+	idpf_xsk_setup_all_rxbufqs(vport);
 
 	return 0;
 
