@@ -2545,9 +2545,10 @@ idpf_xdp_setup_prog(struct idpf_vport *vport, struct bpf_prog *prog,
 				   "Could not re-open the vport after XDP setup\n");
 			return err;
 		}
+
+		if (prog)
+			idpf_vport_rx_napi_schedule(vport);
 	}
-	if (prog)
-		idpf_vport_rx_napi_schedule(vport);
 
 	return 0;
 }

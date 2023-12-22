@@ -635,16 +635,19 @@ static int idpf_xsk_pool_enable(struct idpf_vport *vport,
 int idpf_xsk_pool_setup(struct idpf_vport *vport, struct xsk_buff_pool *pool,
 			u32 qid)
 {
-	struct idpf_queue *rxq = idpf_find_rxq(vport, qid);
-	struct idpf_q_vector *q_vector = rxq->q_vector;
 	bool if_running, pool_present = !!pool;
 	int err = 0, pool_failure = 0, num_qs;
+	struct idpf_q_vector *q_vector;
+	struct idpf_queue *rxq;
 	struct idpf_queue **qs;
 
 	if_running = netif_running(vport->netdev) &&
 		     idpf_xdp_is_prog_ena(vport);
 
 	if (if_running) {
+		rxq = idpf_find_rxq(vport, qid);
+		q_vector = rxq->q_vector;
+
 		qs = idpf_create_queue_list(vport, qid, &num_qs);
 		if (!qs) {
 			err = -ENOMEM;

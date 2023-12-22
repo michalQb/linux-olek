@@ -880,8 +880,6 @@ int idpf_xdp_rxq_info_init_all(struct idpf_vport *vport)
 				q = rx_qgrp->singleq.rxqs[j];
 
 			idpf_xdp_rxq_info_init(q);
-			if (test_bit(j, config_data->af_xdp_zc_qps))
-				napi_schedule(&q->q_vector->napi);
 		}
 	}
 
