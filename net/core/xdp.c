@@ -21,6 +21,8 @@
 #include <trace/events/xdp.h>
 #include <net/xdp_sock_drv.h>
 
+#include "dev.h"
+
 #define REG_STATE_NEW		0x0
 #define REG_STATE_REGISTERED	0x1
 #define REG_STATE_UNREGISTERED	0x2
@@ -644,6 +646,42 @@ struct sk_buff *__xdp_build_skb_from_buff(struct sk_buff *skb,
 	return skb;
 }
 EXPORT_SYMBOL_GPL(__xdp_build_skb_from_buff);
+
+struct sk_buff *xdp_build_skb_from_zc(struct napi_struct *napi,
+				      struct xdp_buff *xdp)
+{
+	const struct xdp_rxq_info *rxq = xdp->rxq;
+	u32 totallen, metalen;
+	struct sk_buff *skb;
+
+	if (!napi) {
+		napi = napi_by_id(rxq->napi_id);
+		if (unlikely(!napi))
+			return NULL;
+	}
+
+	totallen = xdp->data_end - xdp->data_meta;
+
+	skb = __napi_alloc_skb(napi, totallen, GFP_ATOMIC | __GFP_NOWARN);
+	if (unlikely(!skb))
+		return NULL;
+
+	skb_put_data(skb, xdp->data_meta, totallen);
+
+	metalen = xdp->data - xdp->data_meta;
+	if (metalen) {
+		skb_metadata_set(skb, metalen);
+		__skb_pull(skb, metalen);
+	}
+
+	skb_record_rx_queue(skb, rxq->queue_index);
+	skb->protocol = eth_type_trans(skb, rxq->dev);
+
+	xsk_buff_free(xdp);
+
+	return skb;
+}
+EXPORT_SYMBOL_GPL(xdp_build_skb_from_zc);
 
 struct sk_buff *__xdp_build_skb_from_frame(struct xdp_frame *xdpf,
 					   struct sk_buff *skb,

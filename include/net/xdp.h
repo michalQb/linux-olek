@@ -273,7 +273,16 @@ void xdp_warn(const char *msg, const char *func, const int line);
 
 struct sk_buff *__xdp_build_skb_from_buff(struct sk_buff *skb,
 					  const struct xdp_buff *xdp);
-#define xdp_build_skb_from_buff(xdp) __xdp_build_skb_from_buff(NULL, xdp)
+struct sk_buff *xdp_build_skb_from_zc(struct napi_struct *napi,
+				      struct xdp_buff *xdp);
+
+static inline struct sk_buff *xdp_build_skb_from_buff(struct xdp_buff *xdp)
+{
+	if (xdp->rxq->mem.type == MEM_TYPE_XSK_BUFF_POOL)
+		return xdp_build_skb_from_zc(NULL, xdp);
+
+	return __xdp_build_skb_from_buff(NULL, xdp);
+}
 
 struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp);
 struct sk_buff *__xdp_build_skb_from_frame(struct xdp_frame *xdpf,
