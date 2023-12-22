@@ -908,6 +908,8 @@ static void idpf_get_ethtool_stats(struct net_device *netdev,
 
 			if (!txq)
 				idpf_add_empty_queue_stats(&data, qtype);
+			else if (test_bit(__IDPF_Q_XDP, txq->flags))
+				continue;
 			else
 				idpf_add_queue_stats(&data, txq);
 		}
@@ -954,7 +956,7 @@ static void idpf_get_ethtool_stats(struct net_device *netdev,
 			if (is_splitq)
 				continue;
 
-			if (rxq)
+			if (rxq && !test_bit(__IDPF_Q_XSK, rxq->flags))
 				page_pool_get_stats(rxq->pp, &pp_stats);
 		}
 	}
@@ -964,7 +966,8 @@ static void idpf_get_ethtool_stats(struct net_device *netdev,
 			struct idpf_queue *rxbufq =
 				&vport->rxq_grps[i].splitq.bufq_sets[j].bufq;
 
-			page_pool_get_stats(rxbufq->pp, &pp_stats);
+			if (!test_bit(__IDPF_Q_XSK, rxbufq->flags))
+				page_pool_get_stats(rxbufq->pp, &pp_stats);
 		}
 	}
 
@@ -976,45 +979,6 @@ static void idpf_get_ethtool_stats(struct net_device *netdev,
 	rcu_read_unlock();
 
 	idpf_vport_ctrl_unlock(netdev);
-}
-
-/**
- * idpf_find_rxq - find rxq from q index
- * @vport: virtual port associated to queue
- * @q_num: q index used to find queue
- *
- * returns pointer to rx queue
- */
-static struct idpf_queue *idpf_find_rxq(struct idpf_vport *vport, int q_num)
-{
-	int q_grp, q_idx;
-
-	if (!idpf_is_queue_model_split(vport->rxq_model))
-		return vport->rxq_grps->singleq.rxqs[q_num];
-
-	q_grp = q_num / IDPF_DFLT_SPLITQ_RXQ_PER_GROUP;
-	q_idx = q_num % IDPF_DFLT_SPLITQ_RXQ_PER_GROUP;
-
-	return &vport->rxq_grps[q_grp].splitq.rxq_sets[q_idx]->rxq;
-}
-
-/**
- * idpf_find_txq - find txq from q index
- * @vport: virtual port associated to queue
- * @q_num: q index used to find queue
- *
- * returns pointer to tx queue
- */
-static struct idpf_queue *idpf_find_txq(struct idpf_vport *vport, int q_num)
-{
-	int q_grp;
-
-	if (!idpf_is_queue_model_split(vport->txq_model))
-		return vport->txqs[q_num];
-
-	q_grp = q_num / IDPF_DFLT_SPLITQ_TXQ_PER_GROUP;
-
-	return vport->txq_grps[q_grp].complq;
 }
 
 /**
