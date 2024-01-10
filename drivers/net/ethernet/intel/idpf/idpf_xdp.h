@@ -8,6 +8,8 @@
 
 struct idpf_vport;
 
+int idpf_xdp_rxq_info_init(struct idpf_queue *rxq);
+int idpf_xdp_rxq_info_deinit(struct idpf_queue *rxq);
 int idpf_xdp_rxq_info_init_all(const struct idpf_vport *vport);
 void idpf_xdp_rxq_info_deinit_all(const struct idpf_vport *vport);
 void idpf_copy_xdp_prog_to_qs(const struct idpf_vport *vport,

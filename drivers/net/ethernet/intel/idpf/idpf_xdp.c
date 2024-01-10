@@ -39,13 +39,13 @@ static int idpf_rxq_for_each(const struct idpf_vport *vport,
 }
 
 /**
- * idpf_xdp_rxq_info_init - Setup XDP RxQ info for a given Rx queue
+ * __idpf_xdp_rxq_info_init - Setup XDP RxQ info for a given Rx queue
  * @rxq: Rx queue for which the resources are setup
  * @arg: flag indicating if the HW works in split queue mode
  *
  * Return: 0 on success, negative on failure.
  */
-static int idpf_xdp_rxq_info_init(struct idpf_queue *rxq, void *arg)
+static int __idpf_xdp_rxq_info_init(struct idpf_queue *rxq, void *arg)
 {
 	const struct idpf_vport *vport = rxq->vport;
 	int err;
@@ -60,6 +60,7 @@ static int idpf_xdp_rxq_info_init(struct idpf_queue *rxq, void *arg)
 		err = xdp_rxq_info_reg_mem_model(&rxq->xdp_rxq,
 						 MEM_TYPE_XSK_BUFF_POOL,
 						 NULL);
+		xsk_pool_set_rxq_info(rxq->xsk_rx, &rxq->xdp_rxq);
 	} else {
 		const struct page_pool *pp;
 
@@ -80,6 +81,15 @@ unreg:
 	return err;
 }
 
+int idpf_xdp_rxq_info_init(struct idpf_queue *rxq)
+{
+	struct idpf_vport *vport = rxq->vport;
+	void *arg;
+
+	arg = (void *)(size_t)idpf_is_queue_model_split(vport->rxq_model);
+	return __idpf_xdp_rxq_info_init(rxq, arg);
+}
+
 /**
  * idpf_xdp_rxq_info_init_all - initialize RxQ info for all Rx queues in vport
  * @vport: vport to setup the info
@@ -92,14 +102,14 @@ int idpf_xdp_rxq_info_init_all(const struct idpf_vport *vport)
 
 	arg = (void *)(size_t)idpf_is_queue_model_split(vport->rxq_model);
 
-	return idpf_rxq_for_each(vport, idpf_xdp_rxq_info_init, arg);
+	return idpf_rxq_for_each(vport, __idpf_xdp_rxq_info_init, arg);
 }
 
 /**
- * idpf_xdp_rxq_info_deinit - Deinit XDP RxQ info for a given Rx queue
+ * __idpf_xdp_rxq_info_deinit - Deinit XDP RxQ info for a given Rx queue
  * @rxq: Rx queue for which the resources are destroyed
  */
-static int idpf_xdp_rxq_info_deinit(struct idpf_queue *rxq, void *arg)
+static int __idpf_xdp_rxq_info_deinit(struct idpf_queue *rxq, void *arg)
 {
 	rxq->xdpqs = NULL;
 	rxq->num_xdp_txq = 0;
@@ -112,13 +122,18 @@ static int idpf_xdp_rxq_info_deinit(struct idpf_queue *rxq, void *arg)
 	return 0;
 }
 
+int idpf_xdp_rxq_info_deinit(struct idpf_queue *rxq)
+{
+	return __idpf_xdp_rxq_info_deinit(rxq, NULL);
+}
+
 /**
  * idpf_xdp_rxq_info_deinit_all - deinit RxQ info for all Rx queues in vport
  * @vport: vport to setup the info
  */
 void idpf_xdp_rxq_info_deinit_all(const struct idpf_vport *vport)
 {
-	idpf_rxq_for_each(vport, idpf_xdp_rxq_info_deinit, NULL);
+	idpf_rxq_for_each(vport, __idpf_xdp_rxq_info_deinit, NULL);
 }
 
 static int idpf_xdp_rxq_assign_prog(struct idpf_queue *rxq, void *arg)

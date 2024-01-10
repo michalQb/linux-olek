@@ -757,8 +757,8 @@ int idpf_rx_bufs_init_all(struct idpf_vport *vport)
  */
 int idpf_rx_desc_alloc(struct idpf_queue *rxq, bool bufq, s32 q_model)
 {
+	struct device *dev = &rxq->vport->adapter->pdev->dev;
 	enum virtchnl2_queue_type type;
-	struct device *dev = rxq->dev;
 
 	if (bufq)
 		rxq->size = rxq->desc_count *
@@ -1524,6 +1524,11 @@ int idpf_vport_queues_alloc(struct idpf_vport *vport)
 	if (err)
 		goto err_out;
 
+	err = idpf_vport_init_fast_path_txqs(vport);
+	if (err)
+		goto err_out;
+	idpf_vport_xdpq_get(vport);
+
 	err = idpf_tx_desc_alloc_all(vport);
 	if (err)
 		goto err_out;
@@ -1532,13 +1537,8 @@ int idpf_vport_queues_alloc(struct idpf_vport *vport)
 	if (err)
 		goto err_out;
 
-	err = idpf_vport_init_fast_path_txqs(vport);
-	if (err)
-		goto err_out;
-
 	prog = vport->adapter->vport_config[vport->idx]->user_config.xdp_prog;
 	idpf_copy_xdp_prog_to_qs(vport, prog);
-	idpf_vport_xdpq_get(vport);
 
 	return 0;
 

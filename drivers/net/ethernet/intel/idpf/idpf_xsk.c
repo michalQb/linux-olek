@@ -5,6 +5,7 @@
 
 #include "idpf.h"
 #include "idpf_xsk.h"
+#include "idpf_xdp.h"
 
 /**
  * idpf_xsk_setup_queue - set xsk_pool pointer from netdev to the queue structure
@@ -117,6 +118,13 @@ idpf_qp_cfg_qs(struct idpf_vport *vport, struct idpf_queue **qs, int num_qs)
 				netdev_err(vport->netdev, "Could not allocate buffer for RX queue.\n");
 				break;
 			}
+
+			err = idpf_xdp_rxq_info_init(q);
+			if (err) {
+				netdev_err(vport->netdev, "Could not allocate buffer for RX queue.\n");
+				break;
+			}
+
 			if (!splitq)
 				err = idpf_rx_bufs_init(q, LIBIE_RX_BUF_MTU);
 			break;
@@ -162,6 +170,7 @@ idpf_qp_clean_qs(struct idpf_vport *vport, struct idpf_queue **qs, int num_qs)
 		switch (q->q_type) {
 		case VIRTCHNL2_QUEUE_TYPE_RX:
 			idpf_rx_desc_rel(q, false, vport->rxq_model);
+			idpf_xdp_rxq_info_deinit(q);
 			break;
 		case VIRTCHNL2_QUEUE_TYPE_RX_BUFFER:
 			idpf_rx_desc_rel(q, true, vport->rxq_model);
@@ -406,7 +415,8 @@ static int idpf_qp_dis(struct idpf_vport *vport, struct idpf_q_vector *q_vector,
 	if (err) {
 		netdev_err(vport->netdev, "Could not disable queues for index %d, error = %d\n",
 			   q_idx, err);
-		goto err_send_msg;
+		//goto err_send_msg;
+		//TODO: Fix FW
 	}
 
 	napi_disable(&q_vector->napi);
@@ -541,7 +551,8 @@ int idpf_xsk_pool_setup(struct idpf_vport *vport, struct xsk_buff_pool *pool,
 		if (err) {
 			netdev_err(vport->netdev, "Cannot disable queues for XSK setup, error = %d\n",
 				   err);
-			goto xsk_pool_if_up;
+			//goto xsk_pool_if_up;
+			//TODO: Fix FW!!!!
 		}
 	}
 
@@ -933,7 +944,7 @@ static bool idpf_xsk_tx_flush_bulk(struct libie_xdp_tx_bulk *bq)
 static bool idpf_xsk_run_prog(struct xdp_buff *xdp,
 			      struct libie_xdp_tx_bulk *bq)
 {
-	return libie_xdp_run_prog(xdp, bq, idpf_xsk_tx_flush_bulk);
+	return libie_xsk_run_prog(xdp, bq, idpf_xsk_tx_flush_bulk);
 }
 
 static void idpf_xsk_finalize_rx(struct libie_xdp_tx_bulk *bq)
@@ -1034,7 +1045,7 @@ int idpf_clean_rx_irq_zc(struct idpf_queue *rxq, int budget)
 		pkt_len = FIELD_GET(VIRTCHNL2_RX_FLEX_DESC_ADV_LEN_PBUF_M,
 				    field);
 
-		xdp = libie_xsk_process_buff(rxq->xsk, buf_id, pkt_len);
+		xdp = libie_xsk_process_buff(rx_bufq->xsk, buf_id, pkt_len);
 		if (!xdp)
 			goto next;
 
@@ -1081,7 +1092,7 @@ skip_refill:
 		return rs.packets;
 	}
 
-	return unlikely(failure) ? budget : rs.bytes;
+	return unlikely(failure) ? budget : rs.packets;
 }
 
 /**
