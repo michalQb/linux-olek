@@ -549,7 +549,7 @@ __libie_xdp_run_flush(struct xdp_buff *xdp, struct libie_xdp_tx_bulk *bq,
 
 #define libie_xdp_run_prog(xdp, bq, fl)					\
 	(__libie_xdp_run_flush(xdp, bq, __libie_xdp_run_prog, fl) ==	\
-	 XDP_PASS)
+	 LIBIE_XDP_PASS)
 
 static __always_inline void
 libie_xdp_finalize_rx(struct libie_xdp_tx_bulk *bq,
