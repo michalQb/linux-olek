@@ -1003,19 +1003,23 @@ idpf_xsk_rx_skb(struct xdp_buff *xdp,
  */
 int idpf_clean_rx_irq_zc(struct idpf_queue *rxq, int budget)
 {
+	struct {
+		bool valid;
+		u32 buf_id;
+	} bufqs[IDPF_MAX_BUFQS_PER_RXQ_GRP] = { };
 	struct libie_rq_onstack_stats rs = { };
-	struct idpf_queue *rx_bufq = NULL;
 	u32 ntc = rxq->next_to_clean;
 	struct libie_xdp_tx_bulk bq;
-	u32 buf_id, to_refill;
 	bool failure = false;
+	u32 to_refill;
 
 	libie_xsk_tx_init_bulk(&bq, rxq->xdp_prog, rxq->xdp_rxq.dev,
 			       rxq->xdpqs, rxq->num_xdp_txq);
 
 	while (likely(rs.packets < budget)) {
 		const struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc;
-		u32 field, rxdid, pkt_len, bufq_id, xdp_act;
+		u32 field, rxdid, bufq_id, buf_id, pkt_len, xdp_act;
+		struct idpf_queue *rx_bufq = NULL;
 		struct xdp_buff *xdp;
 
 		rx_desc = &rxq->rx[ntc].flex_adv_nic_3_wb;
@@ -1045,6 +1049,9 @@ int idpf_clean_rx_irq_zc(struct idpf_queue *rxq, int budget)
 		pkt_len = FIELD_GET(VIRTCHNL2_RX_FLEX_DESC_ADV_LEN_PBUF_M,
 				    field);
 
+		bufqs[bufq_id].buf_id = buf_id;
+		bufqs[bufq_id].valid = true;
+
 		xdp = libie_xsk_process_buff(rx_bufq->xsk, buf_id, pkt_len);
 		if (!xdp)
 			goto next;
@@ -1059,7 +1066,6 @@ int idpf_clean_rx_irq_zc(struct idpf_queue *rxq, int budget)
 
 		rs.bytes += pkt_len;
 		rs.packets++;
-
 next:
 		IDPF_RX_BUMP_NTC(rxq, ntc);
 	}
@@ -1072,17 +1078,19 @@ next:
 	u64_stats_add(&rxq->q_stats.rx.bytes, rs.bytes);
 	u64_stats_update_end(&rxq->stats_sync);
 
-	if (!rx_bufq)
-		goto skip_refill;
+	for (u32 i = 0; i < rxq->rxq_grp->splitq.num_bufq_sets; i++) {
+		struct idpf_queue *q = &rxq->rxq_grp->splitq.bufq_sets[i].bufq;
 
-	IDPF_RX_BUMP_NTC(rx_bufq, buf_id);
-	rx_bufq->next_to_clean = buf_id;
+		if (bufqs[i].valid) {
+			IDPF_RX_BUMP_NTC(q, bufqs[i].buf_id);
+			q->next_to_clean = bufqs[i].buf_id;
+		}
 
-	to_refill = IDPF_DESC_UNUSED(rx_bufq);
-	if (to_refill > IDPF_QUEUE_QUARTER(rx_bufq))
-		failure |= !idpf_alloc_rx_buffers_zc(rx_bufq, to_refill);
+		to_refill = IDPF_DESC_UNUSED(q);
+		if (to_refill > IDPF_QUEUE_QUARTER(q))
+			failure |= !idpf_alloc_rx_buffers_zc(q, to_refill);
+	}
 
-skip_refill:
 	if (xsk_uses_need_wakeup(rxq->xsk_rx)) {
 		if (failure || rxq->next_to_clean == rxq->next_to_use)
 			xsk_set_rx_need_wakeup(rxq->xsk_rx);

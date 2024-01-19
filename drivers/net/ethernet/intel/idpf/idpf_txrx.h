@@ -759,6 +759,7 @@ struct idpf_rxq_group {
 		} singleq;
 		struct {
 			u16 num_rxq_sets;
+			u16 num_bufq_sets;
 			struct idpf_rxq_set *rxq_sets[IDPF_LARGE_MAX_Q];
 			struct idpf_bufq_set *bufq_sets;
 		} splitq;

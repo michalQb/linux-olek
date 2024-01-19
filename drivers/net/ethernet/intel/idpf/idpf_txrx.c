@@ -1395,6 +1395,7 @@ static int idpf_rxq_group_alloc(struct idpf_vport *vport, u16 num_rxq)
 			}
 		}
 
+		rx_qgrp->splitq.num_bufq_sets = vport->num_bufqs_per_qgrp;
 		rx_qgrp->splitq.bufq_sets = kcalloc(vport->num_bufqs_per_qgrp,
 						    sizeof(struct idpf_bufq_set),
 						    GFP_KERNEL);
