@@ -170,13 +170,32 @@ union idpf_tx_flex_desc {
 };
 
 /**
+ * enum idpf_tx_buf_type - Type of &idpf_tx_buf to act on Tx completion
+ * @IDPF_TX_BUF_EMPTY: Unused, no action required
+ * @IDPF_TX_BUF_SKB: &sk_buff, unmap and consume_skb(), update stats
+ * @IDPF_TX_BUF_FRAG: Mapped skb, only unmap DMA
+ * @IDPF_TX_BUF_RSVD: Indicates ring entry is reserved, i.e. buffer is empty
+ *		      but should not be used, typically corresponds to context
+ *		      descriptor entry, no action required during cleaning
+#ifdef CONFIG_XDP
+ * @IDPF_TX_BUF_XDP: &xdp_buff, unmap and page_frag_free(), update stats
+#endif
+ */
+enum idpf_tx_buf_type {
+	IDPF_TX_BUF_EMPTY        = 0U,
+	IDPF_TX_BUF_SKB,
+	IDPF_TX_BUF_FRAG,
+	IDPF_TX_BUF_RSVD,
+};
+
+/**
  * struct idpf_tx_buf
- * @next_to_watch: Next descriptor to clean
+ * @next_to_watch: Next descriptor to clean // TODO: remove
  * @skb: Pointer to the skb
- * @dma: DMA address
- * @len: DMA length
  * @bytecount: Number of bytes
- * @gso_segs: Number of GSO segments
+ * @gso_segs: Number of GSO segments* @eop_idx: Index in descriptor/buffer ring of last buffer for this packet
+ * @nr_frags: Total number of non empty buffers representing this packet
+ * @type: Type of buffer, &idpf_tx_buf_type
  * @compl_tag: Splitq only, unique identifier for a buffer. Used to compare
  *	       with completion tag returned in buffer completion event.
  *	       Because the completion tag is expected to be the same in all
@@ -190,20 +209,22 @@ union idpf_tx_flex_desc {
  * @ctx_entry: Singleq only. Used to indicate the corresponding entry
  *	       in the descriptor ring was used for a context descriptor and
  *	       this buffer entry should be skipped.
+ * @dma: DMA address
+ * @len: DMA length
  */
 struct idpf_tx_buf {
-	void *next_to_watch;
+	void *next_to_watch; //TODO: remove
 	struct sk_buff *skb;
-	DEFINE_DMA_UNMAP_ADDR(dma);
-	DEFINE_DMA_UNMAP_LEN(len);
 	unsigned int bytecount;
 	unsigned short gso_segs;
+	u16 eop_idx;
+	u16 nr_frags:8;
 
-	union {
-		int compl_tag;
-
-		bool ctx_entry;
-	};
+	u16 type:8;
+	u16 compl_tag;
+	bool ctx_entry; // TODO: remove
+	DEFINE_DMA_UNMAP_LEN(len);
+	DEFINE_DMA_UNMAP_ADDR(dma);
 };
 
 struct idpf_tx_stash {
