@@ -222,6 +222,7 @@ static void idpf_tx_singleq_map(struct idpf_queue *tx_q,
 		/* record length, and DMA address */
 		dma_unmap_len_set(tx_buf, len, size);
 		dma_unmap_addr_set(tx_buf, dma, dma);
+		tx_buf->type = IDPF_TX_BUF_FRAG;
 
 		/* align size to end of page */
 		max_data += -dma & (IDPF_TX_MAX_READ_REQ_SIZE - 1);
@@ -235,13 +236,16 @@ static void idpf_tx_singleq_map(struct idpf_queue *tx_q,
 								  offsets,
 								  max_data,
 								  td_tag);
-			tx_desc++;
-			i++;
-
-			if (i == tx_q->desc_count) {
+			if (unlikely(++i == tx_q->desc_count)) {
+				tx_buf = &tx_q->tx_buf[0];
 				tx_desc = IDPF_BASE_TX_DESC(tx_q, 0);
 				i = 0;
+			} else {
+				tx_buf++;
+				tx_desc++;
 			}
+
+			tx_buf->type = IDPF_TX_BUF_RSVD;
 
 			dma += max_data;
 			size -= max_data;
@@ -255,12 +259,14 @@ static void idpf_tx_singleq_map(struct idpf_queue *tx_q,
 
 		tx_desc->qw1 = idpf_tx_singleq_build_ctob(td_cmd, offsets,
 							  size, td_tag);
-		tx_desc++;
-		i++;
 
-		if (i == tx_q->desc_count) {
+		if (unlikely(++i == tx_q->desc_count)) {
+			tx_buf = &tx_q->tx_buf[0];
 			tx_desc = IDPF_BASE_TX_DESC(tx_q, 0);
 			i = 0;
+		} else {
+			tx_buf++;
+			tx_desc++;
 		}
 
 		size = skb_frag_size(frag);
@@ -268,8 +274,6 @@ static void idpf_tx_singleq_map(struct idpf_queue *tx_q,
 
 		dma = skb_frag_dma_map(tx_q->dev, frag, 0, size,
 				       DMA_TO_DEVICE);
-
-		tx_buf = &tx_q->tx_buf[i];
 	}
 
 	skb_tx_timestamp(first->skb);
@@ -280,10 +284,10 @@ static void idpf_tx_singleq_map(struct idpf_queue *tx_q,
 	tx_desc->qw1 = idpf_tx_singleq_build_ctob(td_cmd, offsets,
 						  size, td_tag);
 
-	IDPF_SINGLEQ_BUMP_RING_IDX(tx_q, i);
+	first->type = IDPF_TX_BUF_SKB;
+	first->eop_idx = i;
 
-	/* set next_to_watch value indicating a packet is present */
-	first->next_to_watch = tx_desc;
+	IDPF_SINGLEQ_BUMP_RING_IDX(tx_q, i);
 
 	nq = netdev_get_tx_queue(tx_q->vport->netdev, tx_q->idx);
 	netdev_tx_sent_queue(nq, first->bytecount);
@@ -304,8 +308,7 @@ idpf_tx_singleq_get_ctx_desc(struct idpf_queue *txq)
 	struct idpf_base_tx_ctx_desc *ctx_desc;
 	int ntu = txq->next_to_use;
 
-	memset(&txq->tx_buf[ntu], 0, sizeof(struct idpf_tx_buf));
-	txq->tx_buf[ntu].ctx_entry = true;
+	txq->tx_buf[ntu].type = IDPF_TX_BUF_CTX;
 
 	ctx_desc = IDPF_BASE_TX_CTX_DESC(txq, ntu);
 
@@ -467,21 +470,15 @@ static bool idpf_tx_singleq_clean(struct idpf_queue *tx_q, int napi_budget,
 		 * such. We can skip this descriptor since there is no buffer
 		 * to clean.
 		 */
-		if (tx_buf->ctx_entry) {
-			/* Clear this flag here to avoid stale flag values when
-			 * this buffer is used for actual data in the future.
-			 * There are cases where the tx_buf struct / the flags
-			 * field will not be cleared before being reused.
-			 */
-			tx_buf->ctx_entry = false;
+		if (unlikely(tx_buf->type <= IDPF_TX_BUF_RSVD)) {
+			tx_buf->type = IDPF_TX_BUF_EMPTY;
 			goto fetch_next_txq_desc;
 		}
 
-		/* if next_to_watch is not set then no work pending */
-		eop_desc = (struct idpf_base_tx_desc *)tx_buf->next_to_watch;
-		if (!eop_desc)
+		if (unlikely(tx_buf->type != IDPF_TX_BUF_SKB))
 			break;
 
+		eop_desc = IDPF_BASE_TX_DESC(tx_q, tx_buf->eop_idx);
 		/* prevent any other reads prior to eop_desc */
 		smp_rmb();
 
@@ -506,8 +503,8 @@ static bool idpf_tx_singleq_clean(struct idpf_queue *tx_q, int napi_budget,
 				 DMA_TO_DEVICE);
 
 		/* clear tx_buf data */
-		tx_buf->skb = NULL;
-		dma_unmap_len_set(tx_buf, len, 0);
+		tx_buf->type = IDPF_TX_BUF_EMPTY;
+		tx_buf->nr_frags = 0;
 
 		/* unmap remaining buffers */
 		while (tx_desc != eop_desc) {
@@ -528,6 +525,7 @@ static bool idpf_tx_singleq_clean(struct idpf_queue *tx_q, int napi_budget,
 					       DMA_TO_DEVICE);
 				dma_unmap_len_set(tx_buf, len, 0);
 			}
+			tx_buf->type = IDPF_TX_BUF_EMPTY;
 		}
 
 		/* update budget only if we did something */
