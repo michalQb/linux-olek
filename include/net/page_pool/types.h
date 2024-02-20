@@ -71,9 +71,6 @@ struct page_pool_params {
 	struct_group_tagged(page_pool_params_slow, slow,
 		struct net_device *netdev;
 		unsigned int	flags;
-/* private: used by test code only */
-		void (*init_callback)(struct page *page, void *arg);
-		void *init_arg;
 	);
 };
 
@@ -133,7 +130,6 @@ struct page_pool {
 	int cpuid;
 	u32 pages_state_hold_cnt;
 
-	bool has_init_callback:1;	/* slow::init_callback is set */
 	bool dma_map:1;			/* Perform DMA mapping */
 	bool dma_sync:1;		/* Perform DMA sync */
 #ifdef CONFIG_PAGE_POOL_STATS
