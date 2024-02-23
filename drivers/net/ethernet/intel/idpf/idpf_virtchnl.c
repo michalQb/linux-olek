@@ -760,21 +760,19 @@ static int idpf_wait_for_selected_marker_events(struct idpf_vport *vport,
 						struct idpf_queue **qs,
 						int num_qs)
 {
-	int event;
+	bool markers_rcvd = true;
 	int i;
 
-	for (i = 0; i < num_qs; i++)
-		set_bit(__IDPF_Q_SW_MARKER, qs[i]->flags);
+	for (i = 0; i < num_qs; i++) {
+		struct idpf_queue *txq = qs[i];
 
-	event = wait_event_timeout(vport->sw_marker_wq,
-				   test_and_clear_bit(IDPF_VPORT_SW_MARKER,
-						      vport->flags),
-				   msecs_to_jiffies(500));
+		set_bit(__IDPF_Q_SW_MARKER, txq->flags);
+		idpf_wait_for_sw_marker_completion(txq);
 
-	for (i = 0; i < num_qs; i++)
-		clear_bit(__IDPF_Q_POLL_MODE, qs[i]->flags);
+		markers_rcvd &= !test_bit(__IDPF_Q_SW_MARKER, txq->flags);
+	}
 
-	if (event)
+	if (markers_rcvd)
 		return 0;
 
 	dev_warn(&vport->adapter->pdev->dev, "Failed to receive marker packets\n");
@@ -2260,21 +2258,11 @@ int idpf_send_enable_queues_msg(struct idpf_vport *vport)
  */
 int idpf_send_disable_queues_msg(struct idpf_vport *vport)
 {
-	int err, i;
+	int err;
 
 	err = idpf_send_ena_dis_queues_msg(vport, VIRTCHNL2_OP_DISABLE_QUEUES);
 	if (err)
 		return err;
-
-	/* switch to poll mode as interrupts will be disabled after disable
-	 * queues virtchnl message is sent
-	 */
-	for (i = 0; i < vport->num_txq; i++)
-		set_bit(__IDPF_Q_POLL_MODE, vport->txqs[i]->flags);
-
-	/* schedule the napi to receive all the marker packets */
-	for (i = 0; i < vport->num_q_vectors; i++)
-		napi_schedule(&vport->q_vectors[i].napi);
 
 	return idpf_wait_for_marker_event(vport);
 }
@@ -2323,15 +2311,9 @@ int idpf_send_disable_selected_queues_msg(struct idpf_vport *vport,
 	if (!tx_qs)
 		return -ENOMEM;
 
-	for (i = 0; i < num_q; i++) {
-		if (qs[i]->q_type == VIRTCHNL2_QUEUE_TYPE_TX) {
-			set_bit(__IDPF_Q_POLL_MODE, qs[i]->flags);
+	for (i = 0; i < num_q; i++)
+		if (qs[i]->q_type == VIRTCHNL2_QUEUE_TYPE_TX)
 			tx_qs[tx_idx++] = qs[i];
-		}
-
-		if (qs[i]->q_type == VIRTCHNL2_QUEUE_TYPE_TX_COMPLETION)
-			napi_schedule(&qs[i]->q_vector->napi);
-	}
 
 	err = idpf_wait_for_selected_marker_events(vport, tx_qs, tx_idx);
 

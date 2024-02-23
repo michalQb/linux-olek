@@ -1550,31 +1550,6 @@ err_out:
 }
 
 /**
- * idpf_tx_handle_sw_marker - Handle queue marker packet
- * @tx_q: tx queue to handle software marker
- */
-void idpf_tx_handle_sw_marker(struct idpf_queue *tx_q)
-{
-	struct idpf_vport *vport = tx_q->vport;
-	int i;
-
-	clear_bit(__IDPF_Q_SW_MARKER, tx_q->flags);
-	/* Hardware must write marker packets to all queues associated with
-	 * completion queues. So check if all queues received marker packets
-	 */
-	for (i = 0; i < vport->num_txq; i++)
-		/* If we're still waiting on any other TXQ marker completions,
-		 * just return now since we cannot wake up the marker_wq yet.
-		 */
-		if (test_bit(__IDPF_Q_SW_MARKER, vport->txqs[i]->flags))
-			return;
-
-	/* Drain complete */
-	set_bit(IDPF_VPORT_SW_MARKER, vport->flags);
-	wake_up(&vport->sw_marker_wq);
-}
-
-/**
  * idpf_tx_clean_stashed_bufs - clean bufs that were stored for
  * out of order completions
  * @txq: queue to clean
@@ -1863,6 +1838,23 @@ idpf_tx_handle_rs_cmpl_fb(struct idpf_queue *txq,
 }
 
 /**
+ * idpf_tx_update_complq_indexes - update completion queue indexes 
+ * @complq: completion queue being updated
+ * @ntc: current "next to clean" index value
+ * @gen_flag: current "genearation" flag value
+ */
+static void idpf_tx_update_complq_indexes(struct idpf_queue *complq,
+					  int ntc, bool gen_flag)
+{
+	ntc += complq->desc_count;
+	complq->next_to_clean = ntc;
+	if (gen_flag)
+		set_bit(__IDPF_Q_GEN_CHK, complq->flags);
+	else
+		clear_bit(__IDPF_Q_GEN_CHK, complq->flags);
+}
+
+/**
  * idpf_tx_finalize_complq - Finalize completion queue cleaning
  * @complq: completion queue to finalize
  * @ntc: next to complete index
@@ -1914,12 +1906,7 @@ static void idpf_tx_finalize_complq(struct idpf_queue *complq, int ntc,
 		tx_q->cleaned_pkts = 0;
 	}
 
-	ntc += complq->desc_count;
-	complq->next_to_clean = ntc;
-	if (gen_flag)
-		set_bit(__IDPF_Q_GEN_CHK, complq->flags);
-	else
-		clear_bit(__IDPF_Q_GEN_CHK, complq->flags);
+	idpf_tx_update_complq_indexes(complq, ntc, gen_flag);
 }
 
 /**
@@ -1955,6 +1942,7 @@ static bool idpf_tx_clean_complq(struct idpf_queue *complq, int budget,
 
 		ctype = idpf_parse_compl_desc(tx_desc, complq, &tx_q,
 					      gen_flag);
+
 		switch (ctype) {
 		case IDPF_TXD_COMPLT_RE:
 			if (unlikely(!flow))
@@ -1974,9 +1962,6 @@ static bool idpf_tx_clean_complq(struct idpf_queue *complq, int budget,
 				idpf_tx_handle_rs_cmpl_qb(tx_q, tx_desc,
 							  &cleaned_stats,
 							  budget);
-			break;
-		case IDPF_TXD_COMPLT_SW_MARKER:
-			idpf_tx_handle_sw_marker(tx_q);
 			break;
 		case -ENODATA:
 			goto exit_clean_complq;
@@ -2018,6 +2003,60 @@ exit_clean_complq:
 	idpf_tx_finalize_complq(complq, ntc, gen_flag, cleaned);
 
 	return !!complq_budget;
+}
+
+/**
+ * idpf_wait_for_sw_marker_completion - wait for SW marker of disabled Tx queue
+ * @txq: disabled Tx queue
+ */
+void idpf_wait_for_sw_marker_completion(struct idpf_queue *txq)
+{
+	struct idpf_queue *complq = txq->txq_grp->complq;
+	struct idpf_splitq_4b_tx_compl_desc *tx_desc;
+	s16 ntc = complq->next_to_clean;
+	unsigned long timeout;
+	bool flow, gen_flag;
+	u32 pos = ntc;
+
+	if (!test_bit(__IDPF_Q_SW_MARKER, txq->flags))
+		return;
+
+	flow = test_bit(__IDPF_Q_FLOW_SCH_EN, complq->flags);
+	gen_flag = test_bit(__IDPF_Q_GEN_CHK, complq->flags);
+
+	timeout = jiffies + msecs_to_jiffies(IDPF_WAIT_FOR_MARKER_TIMEO);
+	tx_desc = flow ? &complq->comp[pos].common : &complq->comp_4b[pos];
+	ntc -= complq->desc_count;
+
+	do {
+		struct idpf_queue *tx_q;
+		int ctype;
+
+		ctype = idpf_parse_compl_desc(tx_desc, complq, &tx_q,
+					      gen_flag);
+		if (ctype == IDPF_TXD_COMPLT_SW_MARKER) {
+			clear_bit(__IDPF_Q_SW_MARKER, tx_q->flags);
+			if (txq == tx_q)
+				break;
+		} else if (ctype == -ENODATA) {
+			usleep_range(500, 1000);
+			continue;
+		}
+
+		pos++;
+		ntc++;
+		if (unlikely(!ntc)) {
+			ntc -= complq->desc_count;
+			pos = 0;
+			gen_flag = !gen_flag;
+		}
+
+		tx_desc = flow ? &complq->comp[pos].common :
+			  &complq->comp_4b[pos];
+		prefetch(tx_desc);
+	} while (time_before(jiffies, timeout));
+
+	idpf_tx_update_complq_indexes(complq, ntc, gen_flag);
 }
 
 /**
@@ -3923,15 +3962,7 @@ static int idpf_vport_splitq_napi_poll(struct napi_struct *napi, int budget)
 	else
 		idpf_vport_intr_set_wb_on_itr(q_vector);
 
-	/* Switch to poll mode in the tear-down path after sending disable
-	 * queues virtchnl message, as the interrupts will be disabled after
-	 * that
-	 */
-	if (unlikely(q_vector->num_txq && test_bit(__IDPF_Q_POLL_MODE,
-						   q_vector->tx[0]->flags)))
-		return budget;
-	else
-		return work_done;
+	return work_done;
 }
 
 /**

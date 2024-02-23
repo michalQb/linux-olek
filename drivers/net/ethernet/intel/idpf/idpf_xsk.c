@@ -415,8 +415,7 @@ static int idpf_qp_dis(struct idpf_vport *vport, struct idpf_q_vector *q_vector,
 	if (err) {
 		netdev_err(vport->netdev, "Could not disable queues for index %d, error = %d\n",
 			   q_idx, err);
-		//goto err_send_msg;
-		//TODO: Fix FW
+		goto err_send_msg;
 	}
 
 	napi_disable(&q_vector->napi);
@@ -551,8 +550,7 @@ int idpf_xsk_pool_setup(struct idpf_vport *vport, struct xsk_buff_pool *pool,
 		if (err) {
 			netdev_err(vport->netdev, "Cannot disable queues for XSK setup, error = %d\n",
 				   err);
-			//goto xsk_pool_if_up;
-			//TODO: Fix FW!!!!
+			goto xsk_pool_if_up;
 		}
 	}
 
@@ -812,9 +810,6 @@ static u32 idpf_clean_xdp_irq_zc(struct idpf_queue *complq)
 		}
 
 		switch (ctype) {
-		case IDPF_TXD_COMPLT_SW_MARKER:
-			idpf_tx_handle_sw_marker(xdpq);
-			break;
 		case -ENODATA:
 			goto clean_xdpq;
 		case -EINVAL:

@@ -37,6 +37,7 @@ struct idpf_vport_max_q;
 #define IDPF_MB_MAX_ERR			20
 #define IDPF_NUM_CHUNKS_PER_MSG(struct_sz, chunk_sz)	\
 	((IDPF_CTLQ_MAX_BUF_LEN - (struct_sz)) / (chunk_sz))
+#define IDPF_WAIT_FOR_MARKER_TIMEO	500
 #define IDPF_WAIT_FOR_EVENT_TIMEO_MIN	2000
 #define IDPF_WAIT_FOR_EVENT_TIMEO	60000
 
@@ -291,13 +292,10 @@ enum idpf_vport_reset_cause {
 /**
  * enum idpf_vport_flags - Vport flags
  * @IDPF_VPORT_DEL_QUEUES: To send delete queues message
- * @IDPF_VPORT_SW_MARKER: Indicate TX pipe drain software marker packets
- *			  processing is done
  * @IDPF_VPORT_FLAGS_NBITS: Must be last
  */
 enum idpf_vport_flags {
 	IDPF_VPORT_DEL_QUEUES,
-	IDPF_VPORT_SW_MARKER,
 	IDPF_VPORT_FLAGS_NBITS,
 };
 
@@ -361,7 +359,6 @@ struct idpf_port_stats {
  * @vc_msg: Virtchnl message buffer
  * @vc_state: Virtchnl message state
  * @vchnl_wq: Wait queue for virtchnl messages
- * @sw_marker_wq: workqueue for marker packets
  * @vc_buf_lock: Lock to protect virtchnl buffer
  */
 struct idpf_vport {
@@ -419,7 +416,6 @@ struct idpf_vport {
 	DECLARE_BITMAP(vc_state, IDPF_VC_NBITS);
 
 	wait_queue_head_t vchnl_wq;
-	wait_queue_head_t sw_marker_wq;
 	struct mutex vc_buf_lock;
 };
 

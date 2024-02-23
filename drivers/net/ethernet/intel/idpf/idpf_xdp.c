@@ -254,9 +254,6 @@ static u32 idpf_clean_xdp_irq(struct idpf_queue *xdpq)
 		}
 
 		switch (ctype) {
-		case IDPF_TXD_COMPLT_SW_MARKER:
-			idpf_tx_handle_sw_marker(xdpq);
-			break;
 		case -ENODATA:
 			goto exit_xdp_irq;
 		case -EINVAL:

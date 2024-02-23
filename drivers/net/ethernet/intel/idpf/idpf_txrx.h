@@ -311,7 +311,6 @@ struct idpf_ptype_state {
  *			 and RFLGQ_GEN is the SW bit.
  * @__IDPF_Q_FLOW_SCH_EN: Enable flow scheduling
  * @__IDPF_Q_SW_MARKER: Used to indicate TX queue marker completions
- * @__IDPF_Q_POLL_MODE: Enable poll mode
  * @__IDPF_Q_FLAGS_NBITS: Must be last
  * @__IDPF_Q_XSK: Queue used to handle the AF_XDP socket
  */
@@ -320,7 +319,6 @@ enum idpf_queue_flags_t {
 	__IDPF_RFLQ_GEN_CHK,
 	__IDPF_Q_FLOW_SCH_EN,
 	__IDPF_Q_SW_MARKER,
-	__IDPF_Q_POLL_MODE,
 	__IDPF_Q_XDP,
 	__IDPF_Q_XSK,
 
@@ -954,12 +952,12 @@ struct virtchnl2_rx_flex_desc_adv_nic_3;
 int idpf_rx_process_skb_fields(struct idpf_queue *rxq, struct sk_buff *skb,
 			       const struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc);
 int idpf_tso(struct sk_buff *skb, struct idpf_tx_offload_params *off);
-void idpf_tx_handle_sw_marker(struct idpf_queue *tx_q);
 int idpf_rx_desc_alloc(struct idpf_queue *rxq, bool bufq, s32 q_model);
 void idpf_rx_desc_rel(struct idpf_queue *rxq, bool bufq, s32 q_model);
 int idpf_tx_desc_alloc(struct idpf_queue *tx_q, bool bufq);
 void idpf_tx_desc_rel(struct idpf_queue *txq, bool bufq);
 int idpf_rx_bufs_init(struct idpf_queue *rxbufq, enum libie_rx_buf_type type);
+void idpf_wait_for_sw_marker_completion(struct idpf_queue *txq);
 
 /**
  * idpf_xdpq_update_tail - Updates the XDP Tx queue tail register
