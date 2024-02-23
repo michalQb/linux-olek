@@ -36,6 +36,7 @@ struct idpf_vport_max_q;
 #define IDPF_NUM_CHUNKS_PER_MSG(struct_sz, chunk_sz)	\
 	((IDPF_CTLQ_MAX_BUF_LEN - (struct_sz)) / (chunk_sz))
 
+#define IDPF_WAIT_FOR_MARKER_TIMEO	500
 #define IDPF_MAX_WAIT			500
 
 /* available message levels */
@@ -212,13 +213,10 @@ struct idpf_dev_ops {
 /**
  * enum idpf_vport_flags - Vport flags
  * @IDPF_VPORT_DEL_QUEUES: To send delete queues message
- * @IDPF_VPORT_SW_MARKER: Indicate TX pipe drain software marker packets
- *			  processing is done
  * @IDPF_VPORT_FLAGS_NBITS: Must be last
  */
 enum idpf_vport_flags {
 	IDPF_VPORT_DEL_QUEUES,
-	IDPF_VPORT_SW_MARKER,
 	IDPF_VPORT_FLAGS_NBITS,
 };
 
@@ -265,7 +263,6 @@ enum idpf_vport_flags {
  * @vport_stats: vport stats reported by HW
  * @link_up: True if link is up
  * @link_speed_mbps: Link speed in mbps
- * @sw_marker_wq: workqueue for marker packets
  */
 struct idpf_vport {
 	u16 num_txq;
@@ -309,8 +306,6 @@ struct idpf_vport {
 
 	bool link_up;
 	u32 link_speed_mbps;
-
-	wait_queue_head_t sw_marker_wq;
 };
 
 /**
