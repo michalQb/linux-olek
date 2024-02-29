@@ -183,9 +183,10 @@ union idpf_tx_flex_desc {
  */
 enum idpf_tx_buf_type {
 	IDPF_TX_BUF_EMPTY        = 0U,
+	IDPF_TX_BUF_CTX,
+	IDPF_TX_BUF_RSVD,
 	IDPF_TX_BUF_SKB,
 	IDPF_TX_BUF_FRAG,
-	IDPF_TX_BUF_RSVD,
 };
 
 /**

@@ -89,11 +89,24 @@ static void idpf_tx_buf_rel(struct idpf_queue *tx_q, struct idpf_tx_buf *tx_buf)
  */
 static void idpf_tx_buf_rel_all(struct idpf_queue *txq)
 {
-	u16 i;
+	struct idpf_tx_stash *stash;
+	struct hlist_node *tmp;
+	u16 i, tag;
 
 	/* Buffers already cleared, nothing to do */
 	if (!txq->tx_buf)
 		return;
+
+	/* If a TX timeout occurred, there are potentially still bufs in the
+	 * hash table, free them here.
+	 */
+	hash_for_each_safe(txq->sched_buf_hash, tag, tmp, stash, hlist) {
+		if (stash) {
+			idpf_tx_buf_rel(txq, &stash->buf);
+			hash_del(&stash->hlist);
+			idpf_buf_lifo_push(&txq->buf_stack, stash);
+		}
+	}
 
 	/* Free all the Tx buffer sk_buffs */
 	for (i = 0; i < txq->desc_count; i++)
@@ -1544,7 +1557,7 @@ static int idpf_stash_flow_sch_buffers(struct idpf_queue *txq,
 {
 	struct idpf_tx_stash *stash;
 
-	if (unlikely(!tx_buf->type))
+	if (unlikely(tx_buf->type <= IDPF_TX_BUF_RSVD))
 		return 0;
 
 	stash = idpf_buf_lifo_pop(&txq->buf_stack);
@@ -1569,6 +1582,7 @@ static int idpf_stash_flow_sch_buffers(struct idpf_queue *txq,
 	hash_add(txq->sched_buf_hash, &stash->hlist, stash->buf.compl_tag);
 
 	tx_buf->type = IDPF_TX_BUF_EMPTY;
+	tx_buf->nr_frags = 0;
 
 	return 0;
 }
@@ -1628,9 +1642,11 @@ static bool idpf_tx_splitq_clean(struct idpf_queue *tx_q, u16 end,
 		 * it's corresponding entry in the buffer ring is reserved.  We
 		 * can skip this descriptor since there is no buffer to clean.
 		 */
-		if (tx_buf->type == IDPF_TX_BUF_RSVD)
+		if (tx_buf->type <= IDPF_TX_BUF_RSVD)
 			goto fetch_next_txq_desc;
 
+		if (unlikely(tx_buf->type != IDPF_TX_BUF_SKB))
+			break;
 		eop_idx = tx_buf->eop_idx;
 
 		if (descs_only) {
@@ -1644,9 +1660,6 @@ static bool idpf_tx_splitq_clean(struct idpf_queue *tx_q, u16 end,
 			while (ntc != eop_idx) {
 				idpf_tx_splitq_clean_bump_ntc(tx_q, ntc,
 							      tx_desc, tx_buf);
-
-				if (!tx_buf->type)
-					continue;
 
 				idpf_stash_flow_sch_buffers(tx_q, tx_buf);
 			}
@@ -1708,21 +1721,20 @@ static bool idpf_tx_clean_buf_ring(struct idpf_queue *txq, u16 compl_tag,
 {
 	u16 idx = compl_tag & txq->compl_tag_bufid_m;
 	struct idpf_tx_buf *tx_buf = NULL;
-	u16 ntc, eop_idx, orig_idx = idx;
+	u16 ntc, orig_idx = idx;
 
 	tx_buf = &txq->tx_buf[idx];
 
-	if (unlikely(!tx_buf->type || tx_buf->compl_tag != compl_tag))
+	if (unlikely(tx_buf->type <= IDPF_TX_BUF_RSVD ||
+		     tx_buf->compl_tag != compl_tag))
 		return false;
-
-	eop_idx = tx_buf->eop_idx;
 
 	if (tx_buf->type == IDPF_TX_BUF_SKB)
 		idpf_tx_splitq_clean_hdr(txq, tx_buf, cleaned, budget);
 
-	while (idx != eop_idx) {
-		idpf_tx_clean_buf_ring_bump_ntc(txq, idx, tx_buf);
+	idpf_tx_clean_buf_ring_bump_ntc(txq, idx, tx_buf);
 
+	while (tx_buf->compl_tag == compl_tag) {
 		if (tx_buf->type == IDPF_TX_BUF_FRAG) {
 			dma_unmap_page(txq->dev,
 				       dma_unmap_addr(tx_buf, dma),
@@ -1732,6 +1744,8 @@ static bool idpf_tx_clean_buf_ring(struct idpf_queue *txq, u16 compl_tag,
 		}
 
 		tx_buf->type = IDPF_TX_BUF_EMPTY;
+
+		idpf_tx_clean_buf_ring_bump_ntc(txq, idx, tx_buf);
 	}
 
 	/* It's possible the packet we just cleaned was an out of order
@@ -1749,7 +1763,7 @@ static bool idpf_tx_clean_buf_ring(struct idpf_queue *txq, u16 compl_tag,
 	ntc = txq->next_to_clean;
 	tx_buf = &txq->tx_buf[ntc];
 
-	if (tx_buf->type == IDPF_TX_BUF_RSVD)
+	if (tx_buf->type == IDPF_TX_BUF_CTX)
 		idpf_tx_clean_buf_ring_bump_ntc(txq, ntc, tx_buf);
 
 	/* If ntc still points to a different "first" buffer, clean the
@@ -1763,10 +1777,9 @@ static bool idpf_tx_clean_buf_ring(struct idpf_queue *txq, u16 compl_tag,
 					   true)))
 		goto clean_buf_ring_out;
 
-	/* Otherwise, bump idx to point to the start of the next packet and
-	 * update next_to_clean to reflect the cleaning that was done above.
+	/* Otherwise, update next_to_clean to reflect the cleaning that was
+	 * done above.
 	 */
-	idpf_tx_clean_buf_ring_bump_ntc(txq, idx, tx_buf);
 	txq->next_to_clean = idx;
 
 clean_buf_ring_out:
@@ -2565,7 +2578,7 @@ idpf_tx_splitq_get_ctx_desc(struct idpf_queue *txq)
 	struct idpf_flex_tx_ctx_desc *desc;
 	int i = txq->next_to_use;
 
-	txq->tx_buf[i].type = IDPF_TX_BUF_RSVD;
+	txq->tx_buf[i].type = IDPF_TX_BUF_CTX;
 
 	/* grab the next descriptor */
 	desc = IDPF_FLEX_TX_CTX_DESC(txq, i);
