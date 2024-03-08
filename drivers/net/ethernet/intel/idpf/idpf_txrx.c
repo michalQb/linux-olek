@@ -1935,23 +1935,26 @@ fetch_next_desc:
 			continue;
 
 		*cleaned += tx_q->cleaned_pkts;
-
-		/* Update BQL */
 		nq = netdev_get_tx_queue(tx_q->vport->netdev, tx_q->idx);
-
-		dont_wake = !complq_ok || IDPF_TX_BUF_RSV_LOW(tx_q) ||
-			    np->state != __IDPF_VPORT_UP ||
-			    !netif_carrier_ok(tx_q->vport->netdev);
-		/* Check if the TXQ needs to and can be restarted */
-		__netif_txq_completed_wake(nq, tx_q->cleaned_pkts, tx_q->cleaned_bytes,
-					   IDPF_DESC_UNUSED(tx_q), IDPF_TX_WAKE_THRESH,
-					   dont_wake);
+		netdev_tx_completed_queue(nq, tx_q->cleaned_pkts, tx_q->cleaned_bytes);
 
 		/* Reset cleaned stats for the next time this queue is
 		 * cleaned
 		 */
 		tx_q->cleaned_bytes = 0;
 		tx_q->cleaned_pkts = 0;
+
+		/* Check if the TXQ needs to and can be restarted */
+		if (unlikely(netif_tx_queue_stopped(nq) && complq_ok &&
+			     netif_carrier_ok(tx_q->vport->netdev) &&
+			     !IDPF_TX_BUF_RSV_LOW(tx_q) &&
+			     (IDPF_DESC_UNUSED(tx_q) >= IDPF_TX_WAKE_THRESH))) {
+			/* Make sure any other threads stopping queue after
+			 * this see new next_to_clean.
+			 */
+			smp_mb();
+			netif_tx_wake_queue(nq);
+		}
 	}
 
 	ntc += complq->desc_count;
@@ -1998,6 +2001,31 @@ void idpf_tx_splitq_build_flow_desc(union idpf_tx_flex_desc *desc,
 }
 
 /**
+ * __idpf_tx_maybe_stop_common - 2nd level check for common Tx stop conditions
+ * @tx_q: the queue to be checked
+ * @size: the size buffer we want to assure is available
+ *
+ * Returns -EBUSY if a stop is needed, else 0
+ */
+static int __idpf_tx_maybe_stop_common(struct idpf_queue *tx_q,
+				       unsigned int size)
+{
+	netif_stop_subqueue(tx_q->vport->netdev, tx_q->idx);
+
+	/* Memory barrier before checking head and tail */
+	smp_mb();
+
+	/* Check again in a case another CPU has just made room available. */
+	if (likely(IDPF_DESC_UNUSED(tx_q) < size))
+		return -EBUSY;
+
+	/* A reprieve! - use start_subqueue because it doesn't call schedule */
+	netif_start_subqueue(tx_q->vport->netdev, tx_q->idx);
+
+	return 0;
+}
+
+/**
  * idpf_tx_maybe_stop_common - 1st level check for common Tx stop conditions
  * @tx_q: the queue to be checked
  * @size: number of descriptors we want to assure is available
@@ -2006,8 +2034,6 @@ void idpf_tx_splitq_build_flow_desc(union idpf_tx_flex_desc *desc,
  */
 int idpf_tx_maybe_stop_common(struct idpf_queue *tx_q, unsigned int size)
 {
-	struct netdev_queue *nq;
-
 	if (likely(IDPF_DESC_UNUSED(tx_q) >= size))
 		return 0;
 
@@ -2015,9 +2041,7 @@ int idpf_tx_maybe_stop_common(struct idpf_queue *tx_q, unsigned int size)
 	u64_stats_inc(&tx_q->q_stats.tx.q_busy);
 	u64_stats_update_end(&tx_q->stats_sync);
 
-	nq = netdev_get_tx_queue(tx_q->vport->netdev, tx_q->idx);
-
-	return netif_txq_maybe_stop(nq, IDPF_DESC_UNUSED(tx_q), size, size);
+	return __idpf_tx_maybe_stop_common(tx_q, size);
 }
 
 /**
