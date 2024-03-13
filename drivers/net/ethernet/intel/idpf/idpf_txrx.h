@@ -147,7 +147,7 @@ do {								\
  */
 #define IDPF_TX_COMPLQ_PENDING(txq)	\
 	(((txq)->num_completions_pending >= (txq)->complq->num_completions ? \
-	0 : U64_MAX) + \
+	0 : U32_MAX) + \
 	(txq)->num_completions_pending - (txq)->complq->num_completions)
 
 #define IDPF_TX_SPLITQ_COMPL_TAG_WIDTH	16
@@ -764,7 +764,7 @@ struct idpf_queue {
 	u16 tx_max_bufs;
 	u8 tx_min_pkt_len;
 
-	u32 num_completions;
+	u64 num_completions;
 
 	struct idpf_buf_lifo buf_stack;
 
@@ -889,7 +889,7 @@ struct idpf_txq_group {
 
 	struct idpf_queue *complq;
 
-	u32 num_completions_pending;
+	u64 num_completions_pending;
 };
 
 /**
@@ -1012,13 +1012,12 @@ static inline void idpf_vport_intr_set_wb_on_itr(struct idpf_q_vector *q_vector)
 	if (q_vector->wb_on_itr)
 		return;
 
+	q_vector->wb_on_itr = true;
 	reg = &q_vector->intr_reg;
 
 	writel(reg->dyn_ctl_wb_on_itr_m | reg->dyn_ctl_intena_msk_m |
 	       IDPF_NO_ITR_UPDATE_IDX << reg->dyn_ctl_itridx_s,
 	       reg->dyn_ctl);
-
-	q_vector->wb_on_itr = true;
 }
 
 int idpf_vport_singleq_napi_poll(struct napi_struct *napi, int budget);

@@ -135,8 +135,11 @@ static void idpf_tx_buf_rel_all(struct idpf_queue *txq)
  */
 static void idpf_tx_desc_rel(struct idpf_queue *txq, bool bufq)
 {
-	if (bufq)
+	if (bufq) {
 		idpf_tx_buf_rel_all(txq);
+		netdev_tx_reset_queue(netdev_get_tx_queue(txq->vport->netdev,
+							  txq->idx));
+	}
 
 	if (!txq->desc_ring)
 		return;
