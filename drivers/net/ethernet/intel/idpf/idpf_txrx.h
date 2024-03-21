@@ -6,6 +6,7 @@
 
 #include <linux/dim.h>
 
+#include <net/libeth/cache.h>
 #include <net/page_pool/helpers.h>
 #include <net/tcp.h>
 #include <net/netdev_queues.h>
@@ -528,35 +529,45 @@ struct idpf_intr_reg {
  * @affinity_mask: CPU affinity mask
  */
 struct idpf_q_vector {
+	__libeth_cacheline_group_begin(read_mostly);
 	struct idpf_vport *vport;
-	struct napi_struct napi;
-	u16 v_idx;
-	struct idpf_intr_reg intr_reg;
 
+	u16 num_rxq;
 	u16 num_txq;
+	u16 num_bufq;
 	u16 num_complq;
+	struct idpf_rx_queue **rx;
 	struct idpf_tx_queue **tx;
+	struct idpf_buf_queue **bufq;
 	struct idpf_compl_queue **complq;
+
+	struct idpf_intr_reg intr_reg;
+	__libeth_cacheline_group_end(read_mostly);
+
+	__libeth_cacheline_group_begin(read_write);
+	struct napi_struct napi;
+	u16 total_events;
 
 	struct dim tx_dim;
 	u16 tx_itr_value;
 	bool tx_intr_mode;
 	u32 tx_itr_idx;
 
-	u16 num_rxq;
-	struct idpf_rx_queue **rx;
 	struct dim rx_dim;
 	u16 rx_itr_value;
 	bool rx_intr_mode;
 	u32 rx_itr_idx;
+	__libeth_cacheline_group_end(read_write);
 
-	u16 num_bufq;
-	struct idpf_buf_queue **bufq;
-
-	u16 total_events;
+	__libeth_cacheline_group_begin(cold);
+	u16 v_idx;
 
 	cpumask_var_t affinity_mask;
+	__libeth_cacheline_group_end(cold);
 };
+__libeth_cacheline_group_assert(struct idpf_q_vector, read_mostly, 112);
+__libeth_cacheline_group_assert(struct idpf_q_vector, read_write,
+				432 + 2 * sizeof(struct dim));
 
 struct idpf_rx_queue_stats {
 	u64_stats_t packets;
@@ -641,6 +652,7 @@ struct idpf_txq_stash {
  * @rx_max_pkt_size: RX max packet size
  */
 struct idpf_rx_queue {
+	__libeth_cacheline_group_begin(read_mostly);
 	union {
 		union virtchnl2_rx_desc *rx;
 		struct virtchnl2_singleq_rx_buf_desc *single_buf;
@@ -663,19 +675,23 @@ struct idpf_rx_queue {
 	DECLARE_BITMAP(flags, __IDPF_Q_FLAGS_NBITS);
 	u16 idx;
 	u16 desc_count;
+
+	u32 rxdids;
+	const struct idpf_rx_ptype_decoded *rx_ptype_lkup;
+	__libeth_cacheline_group_end(read_mostly);
+
+	__libeth_cacheline_group_begin(read_write);
 	u16 next_to_use;
 	u16 next_to_clean;
 	u16 next_to_alloc;
 
-	u32 rxdids;
-
-	const struct idpf_rx_ptype_decoded *rx_ptype_lkup;
 	struct sk_buff *skb;
 
 	struct u64_stats_sync stats_sync;
 	struct idpf_rx_queue_stats q_stats;
+	__libeth_cacheline_group_end(read_write);
 
-	/* Slowpath */
+	__libeth_cacheline_group_begin(cold);
 	u32 q_id;
 	u32 size;
 	dma_addr_t dma;
@@ -686,7 +702,11 @@ struct idpf_rx_queue {
 	u16 rx_hbuf_size;
 	u16 rx_buf_size;
 	u16 rx_max_pkt_size;
+	__libeth_cacheline_group_end(cold);
 } ____cacheline_aligned;
+__libeth_cacheline_set_assert(struct idpf_rx_queue, 64,
+			      80 + sizeof(struct u64_stats_sync),
+			      32);
 
 /**
  * struct idpf_tx_queue - software structure represting a transmit queue
@@ -750,6 +770,7 @@ struct idpf_rx_queue {
  * @q_vector: Backreference to associated vector
  */
 struct idpf_tx_queue {
+	__libeth_cacheline_group_begin(read_mostly);
 	union {
 		struct idpf_base_tx_desc *base_tx;
 		struct idpf_base_tx_ctx_desc *base_ctx;
@@ -766,10 +787,16 @@ struct idpf_tx_queue {
 	DECLARE_BITMAP(flags, __IDPF_Q_FLAGS_NBITS);
 	u16 idx;
 	u16 desc_count;
-	u16 next_to_use;
-	u16 next_to_clean;
+
+	u16 tx_min_pkt_len;
+	u16 compl_tag_gen_s;
 
 	struct net_device *netdev;
+	__libeth_cacheline_group_end(read_mostly);
+
+	__libeth_cacheline_group_begin(read_write);
+	u16 next_to_use;
+	u16 next_to_clean;
 
 	union {
 		u32 cleaned_bytes;
@@ -778,26 +805,27 @@ struct idpf_tx_queue {
 	u16 cleaned_pkts;
 
 	u16 tx_max_bufs;
-	u16 tx_min_pkt_len;
+	struct idpf_txq_stash *stash;
 
 	u16 compl_tag_bufid_m;
-	u16 compl_tag_gen_s;
-
 	u16 compl_tag_cur_gen;
 	u16 compl_tag_gen_max;
 
-	struct idpf_txq_stash *stash;
-
 	struct u64_stats_sync stats_sync;
 	struct idpf_tx_queue_stats q_stats;
+	__libeth_cacheline_group_end(read_write);
 
-	/* Slowpath */
+	__libeth_cacheline_group_begin(cold);
 	u32 q_id;
 	u32 size;
 	dma_addr_t dma;
 
 	struct idpf_q_vector *q_vector;
+	__libeth_cacheline_group_end(cold);
 } ____cacheline_aligned;
+__libeth_cacheline_set_assert(struct idpf_tx_queue, 64,
+			      96 + sizeof(struct u64_stats_sync),
+			      32);
 
 /**
  * struct idpf_buf_queue - software structure represting a buffer queue
@@ -822,6 +850,7 @@ struct idpf_tx_queue {
  * @rx_buf_size: Buffer size
  */
 struct idpf_buf_queue {
+	__libeth_cacheline_group_begin(read_mostly);
 	struct virtchnl2_splitq_rx_buf_desc *split_buf;
 	struct {
 		struct idpf_rx_buf *buf;
@@ -832,12 +861,16 @@ struct idpf_buf_queue {
 	void __iomem *tail;
 
 	DECLARE_BITMAP(flags, __IDPF_Q_FLAGS_NBITS);
-	u16 desc_count;
-	u16 next_to_use;
-	u16 next_to_clean;
-	u16 next_to_alloc;
+	u32 desc_count;
+	__libeth_cacheline_group_end(read_mostly);
 
-	/* Slowpath */
+	__libeth_cacheline_group_begin(read_write);
+	u32 next_to_use;
+	u32 next_to_clean;
+	u32 next_to_alloc;
+	__libeth_cacheline_group_end(read_write);
+
+	__libeth_cacheline_group_begin(cold);
 	u32 q_id;
 	u32 size;
 	dma_addr_t dma;
@@ -847,7 +880,9 @@ struct idpf_buf_queue {
 	u16 rx_buffer_low_watermark;
 	u16 rx_hbuf_size;
 	u16 rx_buf_size;
+	__libeth_cacheline_group_end(cold);
 } ____cacheline_aligned;
+__libeth_cacheline_set_assert(struct idpf_buf_queue, 64, 16, 32);
 
 /**
  * struct idpf_compl_queue - software structure represting a completion queue
@@ -870,25 +905,33 @@ struct idpf_buf_queue {
  * @q_vector: Backreference to associated vector
  */
 struct idpf_compl_queue {
+	__libeth_cacheline_group_begin(read_mostly);
 	struct idpf_splitq_tx_compl_desc *comp;
 	struct idpf_txq_group *txq_grp;
 
 	DECLARE_BITMAP(flags, __IDPF_Q_FLAGS_NBITS);
-	u16 desc_count;
-	u16 next_to_use;
-	u16 next_to_clean;
+	u32 desc_count;
 
-	struct net_device *netdev;
 	u32 clean_budget;
-	u32 num_completions;
+	struct net_device *netdev;
+	__libeth_cacheline_group_end(read_mostly);
 
-	/* Slowpath */
+	__libeth_cacheline_group_begin(read_write);
+	u32 next_to_use;
+	u32 next_to_clean;
+
+	u32 num_completions;
+	__libeth_cacheline_group_end(read_write);
+
+	__libeth_cacheline_group_begin(cold);
 	u32 q_id;
 	u32 size;
 	dma_addr_t dma;
 
 	struct idpf_q_vector *q_vector;
+	__libeth_cacheline_group_end(cold);
 } ____cacheline_aligned;
+__libeth_cacheline_set_assert(struct idpf_compl_queue, 48, 16, 32);
 
 /**
  * struct idpf_sw_queue
@@ -903,13 +946,21 @@ struct idpf_compl_queue {
  * lockless buffer management system and are strictly software only constructs.
  */
 struct idpf_sw_queue {
+	__libeth_cacheline_group_begin(read_mostly);
 	u32 *ring;
 
 	DECLARE_BITMAP(flags, __IDPF_Q_FLAGS_NBITS);
-	u16 desc_count;
-	u16 next_to_use;
-	u16 next_to_clean;
+	u32 desc_count;
+	__libeth_cacheline_group_end(read_mostly);
+
+	__libeth_cacheline_group_begin(read_write);
+	u32 next_to_use;
+	u32 next_to_clean;
+	__libeth_cacheline_group_end(read_write);
 } ____cacheline_aligned;
+__libeth_cacheline_group_assert(struct idpf_sw_queue, read_mostly, 32);
+__libeth_cacheline_group_assert(struct idpf_sw_queue, read_write, 16);
+__libeth_cacheline_struct_assert(struct idpf_sw_queue, 128);
 
 /**
  * struct idpf_rxq_set
