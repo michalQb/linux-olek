@@ -205,6 +205,12 @@ static inline void *xsk_buff_raw_get_data(struct xsk_buff_pool *pool, u64 addr)
 	return xp_raw_get_data(pool, addr);
 }
 
+static inline struct xdp_desc_ctx
+xsk_buff_raw_get_ctx(const struct xsk_buff_pool *pool, u64 addr)
+{
+	return xp_raw_get_ctx(pool, addr);
+}
+
 #define XDP_TXMD_FLAGS_VALID ( \
 		XDP_TXMD_FLAGS_TIMESTAMP | \
 		XDP_TXMD_FLAGS_CHECKSUM | \
@@ -400,6 +406,12 @@ static inline dma_addr_t xsk_buff_raw_get_dma(struct xsk_buff_pool *pool,
 static inline void *xsk_buff_raw_get_data(struct xsk_buff_pool *pool, u64 addr)
 {
 	return NULL;
+}
+
+static inline struct xdp_desc_ctx
+xsk_buff_raw_get_ctx(const struct xsk_buff_pool *pool, u64 addr)
+{
+	return (struct xdp_desc_ctx){ };
 }
 
 static inline bool xsk_buff_valid_tx_metadata(struct xsk_tx_metadata *meta)
