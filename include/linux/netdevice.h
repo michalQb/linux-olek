@@ -1651,6 +1651,7 @@ struct net_device_ops {
  *	even if those aren't HWTSTAMP_SOURCE_NETDEV.
  * @IFF_LLTX: device supports lockless Tx. Mainly used by logical interfaces,
  *	such as tunnels.
+ * @IFF_NETNS_LOCAL: interface can't change network namespaces
  * @IFF_LOGICAL: combines @IFF_NO_QUEUE and @IFF_LLTX, used by logical
  *	interfaces to avoid overhead from locking and Qdisc.
  */
@@ -1690,6 +1691,7 @@ enum netdev_priv_flags {
 	IFF_CHANGE_PROTO_DOWN		= BIT_ULL(32),
 	IFF_SEE_ALL_HWTSTAMP_REQUESTS	= BIT_ULL(33),
 	IFF_LLTX			= BIT_ULL(34),
+	IFF_NETNS_LOCAL			= BIT_ULL(35),
 	IFF_LOGICAL			= IFF_NO_QUEUE | IFF_LLTX,
 };
 

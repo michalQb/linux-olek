@@ -498,7 +498,7 @@ void hsr_dev_setup(struct net_device *dev)
 	dev->header_ops = &hsr_header_ops;
 	dev->netdev_ops = &hsr_device_ops;
 	SET_NETDEV_DEVTYPE(dev, &hsr_type);
-	dev->priv_flags |= IFF_LOGICAL | IFF_DISABLE_NETPOLL;
+	dev->priv_flags |= IFF_LOGICAL | IFF_DISABLE_NETPOLL | IFF_NETNS_LOCAL;
 
 	dev->needs_free_netdev = true;
 
@@ -512,10 +512,6 @@ void hsr_dev_setup(struct net_device *dev)
 	 * hsr_header_create() etc.
 	 */
 	dev->features |= NETIF_F_VLAN_CHALLENGED;
-	/* Not sure about this. Taken from bridge code. netdev_features.h says
-	 * it means "Does not change network namespaces".
-	 */
-	dev->features |= NETIF_F_NETNS_LOCAL;
 }
 
 /* Return true if dev is a HSR master; return false otherwise.

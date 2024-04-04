@@ -1655,9 +1655,6 @@ static void vrf_setup(struct net_device *dev)
 	/* Fill in device structure with ethernet-generic values. */
 	eth_hw_addr_random(dev);
 
-	/* don't allow vrf devices to change network namespaces. */
-	dev->features |= NETIF_F_NETNS_LOCAL;
-
 	/* does not make sense for a VLAN to be added to a vrf device */
 	dev->features   |= NETIF_F_VLAN_CHALLENGED;
 
@@ -1669,8 +1666,7 @@ static void vrf_setup(struct net_device *dev)
 	dev->hw_features = dev->features;
 	dev->hw_enc_features = dev->features;
 
-	/* default to no qdisc; user can add if desired */
-	dev->priv_flags |= IFF_LOGICAL;
+	dev->priv_flags |= IFF_LOGICAL | IFF_NETNS_LOCAL;
 	dev->priv_flags |= IFF_NO_RX_HANDLER;
 	dev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
 

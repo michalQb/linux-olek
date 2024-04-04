@@ -111,12 +111,11 @@ static void lowpan_setup(struct net_device *ldev)
 	/* We need an ipv6hdr as minimum len when calling xmit */
 	ldev->hard_header_len	= sizeof(struct ipv6hdr);
 	ldev->flags		= IFF_BROADCAST | IFF_MULTICAST;
-	ldev->priv_flags	|= IFF_NO_QUEUE;
+	ldev->priv_flags	|= IFF_NO_QUEUE | IFF_NETNS_LOCAL;
 
 	ldev->netdev_ops	= &lowpan_netdev_ops;
 	ldev->header_ops	= &lowpan_header_ops;
 	ldev->needs_free_netdev	= true;
-	ldev->features		|= NETIF_F_NETNS_LOCAL;
 }
 
 static int lowpan_validate(struct nlattr *tb[], struct nlattr *data[],

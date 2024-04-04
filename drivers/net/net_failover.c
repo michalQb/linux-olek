@@ -727,11 +727,10 @@ struct failover *net_failover_create(struct net_device *standby_dev)
 
 	/* Initialize the device options */
 	failover_dev->priv_flags |= IFF_UNICAST_FLT | IFF_LOGICAL;
+	/* Don't allow failover devices to change network namespaces. */
+	failover_dev->priv_flags |= IFF_NETNS_LOCAL;
 	failover_dev->priv_flags &= ~(IFF_XMIT_DST_RELEASE |
 				       IFF_TX_SKB_SHARING);
-
-	/* Don't allow failover devices to change network namespaces. */
-	failover_dev->features |= NETIF_F_NETNS_LOCAL;
 
 	failover_dev->hw_features = FAILOVER_VLAN_FEATURES |
 				    NETIF_F_HW_VLAN_CTAG_TX |

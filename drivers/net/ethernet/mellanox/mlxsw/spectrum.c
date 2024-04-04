@@ -1693,10 +1693,10 @@ static int mlxsw_sp_port_create(struct mlxsw_sp *mlxsw_sp, u16 local_port,
 
 	netif_carrier_off(dev);
 
-	dev->features |= NETIF_F_NETNS_LOCAL | NETIF_F_SG |
-			 NETIF_F_HW_VLAN_CTAG_FILTER | NETIF_F_HW_TC;
+	dev->features |= NETIF_F_SG | NETIF_F_HW_VLAN_CTAG_FILTER |
+			 NETIF_F_HW_TC;
 	dev->hw_features |= NETIF_F_HW_TC | NETIF_F_LOOPBACK;
-	dev->priv_flags |= IFF_LLTX;
+	dev->priv_flags |= IFF_LLTX | IFF_NETNS_LOCAL;
 
 	dev->min_mtu = 0;
 	dev->max_mtu = ETH_MAX_MTU;
