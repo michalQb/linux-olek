@@ -4585,7 +4585,7 @@ static int dpaa2_eth_netdev_init(struct net_device *net_dev)
 	dpaa2_eth_detect_features(priv);
 
 	/* Capabilities listing */
-	supported |= IFF_LIVE_ADDR_CHANGE;
+	supported |= IFF_LIVE_ADDR_CHANGE | IFF_LLTX;
 
 	if (options & DPNI_OPT_NO_MAC_FILTER)
 		not_supported |= IFF_UNICAST_FLT;
@@ -4599,7 +4599,7 @@ static int dpaa2_eth_netdev_init(struct net_device *net_dev)
 	net_dev->features = NETIF_F_RXCSUM |
 			    NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
 			    NETIF_F_SG | NETIF_F_HIGHDMA |
-			    NETIF_F_LLTX | NETIF_F_HW_TC | NETIF_F_TSO;
+			    NETIF_F_HW_TC | NETIF_F_TSO;
 	net_dev->gso_max_segs = DPAA2_ETH_ENQUEUE_MAX_FDS;
 	net_dev->hw_features = net_dev->features;
 	net_dev->xdp_features = NETDEV_XDP_ACT_BASIC |

@@ -726,12 +726,9 @@ struct failover *net_failover_create(struct net_device *standby_dev)
 	failover_dev->ethtool_ops = &failover_ethtool_ops;
 
 	/* Initialize the device options */
-	failover_dev->priv_flags |= IFF_UNICAST_FLT | IFF_NO_QUEUE;
+	failover_dev->priv_flags |= IFF_UNICAST_FLT | IFF_NO_QUEUE | IFF_LLTX;
 	failover_dev->priv_flags &= ~(IFF_XMIT_DST_RELEASE |
 				       IFF_TX_SKB_SHARING);
-
-	/* don't acquire failover netdev's netif_tx_lock when transmitting */
-	failover_dev->features |= NETIF_F_LLTX;
 
 	/* Don't allow failover devices to change network namespaces. */
 	failover_dev->features |= NETIF_F_NETNS_LOCAL;

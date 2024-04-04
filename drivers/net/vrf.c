@@ -1655,9 +1655,6 @@ static void vrf_setup(struct net_device *dev)
 	/* Fill in device structure with ethernet-generic values. */
 	eth_hw_addr_random(dev);
 
-	/* don't acquire vrf device's netif_tx_lock when transmitting */
-	dev->features |= NETIF_F_LLTX;
-
 	/* don't allow vrf devices to change network namespaces. */
 	dev->features |= NETIF_F_NETNS_LOCAL;
 
@@ -1676,6 +1673,8 @@ static void vrf_setup(struct net_device *dev)
 	dev->priv_flags |= IFF_NO_QUEUE;
 	dev->priv_flags |= IFF_NO_RX_HANDLER;
 	dev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
+	/* don't acquire vrf device's netif_tx_lock when transmitting */
+	dev->priv_flags |= IFF_LLTX;
 
 	/* VRF devices do not care about MTU, but if the MTU is set
 	 * too low then the ipv4 and ipv6 protocols are disabled

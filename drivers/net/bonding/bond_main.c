@@ -5876,6 +5876,8 @@ void bond_setup(struct net_device *bond_dev)
 	/* Initialize the device options */
 	bond_dev->flags |= IFF_MASTER;
 	bond_dev->priv_flags |= IFF_BONDING | IFF_UNICAST_FLT | IFF_NO_QUEUE;
+	/* don't acquire bond device's netif_tx_lock when transmitting */
+	bond_dev->priv_flags |= IFF_LLTX;
 	bond_dev->priv_flags &= ~(IFF_XMIT_DST_RELEASE | IFF_TX_SKB_SHARING);
 
 #ifdef CONFIG_XFRM_OFFLOAD
@@ -5884,9 +5886,6 @@ void bond_setup(struct net_device *bond_dev)
 	INIT_LIST_HEAD(&bond->ipsec_list);
 	spin_lock_init(&bond->ipsec_lock);
 #endif /* CONFIG_XFRM_OFFLOAD */
-
-	/* don't acquire bond device's netif_tx_lock when transmitting */
-	bond_dev->features |= NETIF_F_LLTX;
 
 	/* By default, we declare the bond to be fully
 	 * VLAN hardware accelerated capable. Special

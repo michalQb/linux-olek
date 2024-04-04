@@ -498,7 +498,7 @@ void hsr_dev_setup(struct net_device *dev)
 	dev->header_ops = &hsr_header_ops;
 	dev->netdev_ops = &hsr_device_ops;
 	SET_NETDEV_DEVTYPE(dev, &hsr_type);
-	dev->priv_flags |= IFF_NO_QUEUE | IFF_DISABLE_NETPOLL;
+	dev->priv_flags |= IFF_NO_QUEUE | IFF_DISABLE_NETPOLL | IFF_LLTX;
 
 	dev->needs_free_netdev = true;
 
@@ -508,8 +508,6 @@ void hsr_dev_setup(struct net_device *dev)
 
 	dev->features = dev->hw_features;
 
-	/* Prevent recursive tx locking */
-	dev->features |= NETIF_F_LLTX;
 	/* VLAN on top of HSR needs testing and probably some work on
 	 * hsr_header_create() etc.
 	 */

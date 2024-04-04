@@ -769,7 +769,7 @@ static int xfrmi_dev_init(struct net_device *dev)
 	if (err)
 		return err;
 
-	dev->features |= NETIF_F_LLTX;
+	dev->priv_flags |= IFF_LLTX;
 	dev->features |= XFRMI_FEATURES;
 	dev->hw_features |= XFRMI_FEATURES;
 

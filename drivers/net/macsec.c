@@ -3524,7 +3524,8 @@ static int macsec_dev_init(struct net_device *dev)
 		return err;
 
 	dev->features = real_dev->features & MACSEC_FEATURES;
-	dev->features |= NETIF_F_LLTX | NETIF_F_GSO_SOFTWARE;
+	dev->features |= NETIF_F_GSO_SOFTWARE;
+	dev->priv_flags |= IFF_LLTX;
 	dev->pcpu_stat_type = NETDEV_PCPU_STAT_TSTATS;
 
 	macsec_set_head_tail_room(dev);
@@ -3555,7 +3556,6 @@ static netdev_features_t macsec_fix_features(struct net_device *dev,
 
 	features &= (real_dev->features & MACSEC_FEATURES) |
 		    NETIF_F_GSO_SOFTWARE | NETIF_F_SOFT_FEATURES;
-	features |= NETIF_F_LLTX;
 
 	return features;
 }
