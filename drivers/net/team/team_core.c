@@ -983,10 +983,14 @@ static void team_port_disable(struct team *team,
 
 #define TEAM_VLAN_FEATURES (NETIF_F_HW_CSUM | NETIF_F_SG | \
 			    NETIF_F_FRAGLIST | NETIF_F_GSO_SOFTWARE | \
-			    NETIF_F_HIGHDMA | NETIF_F_LRO)
+			    NETIF_F_LRO)
 
 #define TEAM_ENC_FEATURES	(NETIF_F_HW_CSUM | NETIF_F_SG | \
 				 NETIF_F_RXCSUM | NETIF_F_GSO_SOFTWARE)
+
+#define TEAM_PRIV_FLAGS		(IFF_XMIT_DST_RELEASE | \
+				 IFF_XMIT_DST_RELEASE_PERM | \
+				 IFF_HIGHDMA)
 
 static void __team_compute_features(struct team *team)
 {
@@ -994,9 +998,8 @@ static void __team_compute_features(struct team *team)
 	netdev_features_t vlan_features = TEAM_VLAN_FEATURES &
 					  NETIF_F_ALL_FOR_ALL;
 	netdev_features_t enc_features  = TEAM_ENC_FEATURES;
+	u64 priv_flags = TEAM_PRIV_FLAGS & IFF_ALL_FOR_ALL;
 	unsigned short max_hard_header_len = ETH_HLEN;
-	unsigned int dst_release_flag = IFF_XMIT_DST_RELEASE |
-					IFF_XMIT_DST_RELEASE_PERM;
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(port, &team->port_list, list) {
@@ -1008,8 +1011,10 @@ static void __team_compute_features(struct team *team)
 						  port->dev->hw_enc_features,
 						  TEAM_ENC_FEATURES);
 
+		priv_flags = netdev_increment_priv_flags(priv_flags,
+							 port->dev->priv_flags,
+							 TEAM_PRIV_FLAGS);
 
-		dst_release_flag &= port->dev->priv_flags;
 		if (port->dev->hard_header_len > max_hard_header_len)
 			max_hard_header_len = port->dev->hard_header_len;
 	}
@@ -1021,9 +1026,7 @@ static void __team_compute_features(struct team *team)
 				     NETIF_F_HW_VLAN_STAG_TX;
 	team->dev->hard_header_len = max_hard_header_len;
 
-	team->dev->priv_flags &= ~IFF_XMIT_DST_RELEASE;
-	if (dst_release_flag == (IFF_XMIT_DST_RELEASE | IFF_XMIT_DST_RELEASE_PERM))
-		team->dev->priv_flags |= IFF_XMIT_DST_RELEASE;
+	netdev_increment_priv_flags_finalize(team->dev, priv_flags);
 }
 
 static void team_compute_features(struct team *team)

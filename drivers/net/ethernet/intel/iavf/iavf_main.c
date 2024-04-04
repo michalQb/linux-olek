@@ -4769,7 +4769,6 @@ int iavf_process_config(struct iavf_adapter *adapter)
 	hw_enc_features = NETIF_F_SG			|
 			  NETIF_F_IP_CSUM		|
 			  NETIF_F_IPV6_CSUM		|
-			  NETIF_F_HIGHDMA		|
 			  NETIF_F_SOFT_FEATURES	|
 			  NETIF_F_TSO			|
 			  NETIF_F_TSO_ECN		|
@@ -4832,7 +4831,7 @@ int iavf_process_config(struct iavf_adapter *adapter)
 		adapter->flags |= IAVF_FLAG_FDIR_ENABLED;
 	}
 
-	netdev->priv_flags |= IFF_UNICAST_FLT;
+	netdev->priv_flags |= IFF_UNICAST_FLT | IFF_HIGHDMA;
 
 	/* Do not turn on offloads when they are requested to be turned off.
 	 * TSO needs minimum 576 bytes to work correctly.

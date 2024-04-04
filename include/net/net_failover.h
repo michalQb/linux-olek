@@ -32,9 +32,13 @@ void net_failover_destroy(struct failover *failover);
 
 #define FAILOVER_VLAN_FEATURES	(NETIF_F_HW_CSUM | NETIF_F_SG | \
 				 NETIF_F_FRAGLIST | NETIF_F_ALL_TSO | \
-				 NETIF_F_HIGHDMA | NETIF_F_LRO)
+				 NETIF_F_LRO)
 
 #define FAILOVER_ENC_FEATURES	(NETIF_F_HW_CSUM | NETIF_F_SG | \
 				 NETIF_F_RXCSUM | NETIF_F_ALL_TSO)
+
+#define FAILOVER_PRIV_FLAGS	(IFF_XMIT_DST_RELEASE | \
+				 IFF_XMIT_DST_RELEASE_PERM | \
+				 IFF_HIGHDMA)
 
 #endif /* _NET_FAILOVER_H */

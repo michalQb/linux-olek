@@ -1661,7 +1661,7 @@ static void vrf_setup(struct net_device *dev)
 	/* enable offload features */
 	dev->features   |= NETIF_F_GSO_SOFTWARE;
 	dev->features   |= NETIF_F_RXCSUM | NETIF_F_HW_CSUM | NETIF_F_SCTP_CRC;
-	dev->features   |= NETIF_F_SG | NETIF_F_FRAGLIST | NETIF_F_HIGHDMA;
+	dev->features   |= NETIF_F_SG | NETIF_F_FRAGLIST;
 
 	dev->hw_features = dev->features;
 	dev->hw_enc_features = dev->features;
@@ -1669,6 +1669,7 @@ static void vrf_setup(struct net_device *dev)
 	dev->priv_flags |= IFF_LOGICAL | IFF_NETNS_LOCAL;
 	dev->priv_flags |= IFF_NO_RX_HANDLER;
 	dev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
+	dev->priv_flags |= IFF_HIGHDMA;
 
 	/* VRF devices do not care about MTU, but if the MTU is set
 	 * too low then the ipv4 and ipv6 protocols are disabled

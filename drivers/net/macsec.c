@@ -3511,7 +3511,7 @@ static netdev_tx_t macsec_start_xmit(struct sk_buff *skb,
 }
 
 #define MACSEC_FEATURES \
-	(NETIF_F_SG | NETIF_F_HIGHDMA | NETIF_F_FRAGLIST)
+	(NETIF_F_SG | NETIF_F_FRAGLIST)
 
 static int macsec_dev_init(struct net_device *dev)
 {
@@ -3525,7 +3525,7 @@ static int macsec_dev_init(struct net_device *dev)
 
 	dev->features = real_dev->features & MACSEC_FEATURES;
 	dev->features |= NETIF_F_GSO_SOFTWARE;
-	dev->priv_flags |= IFF_LLTX;
+	dev->priv_flags |= IFF_LLTX | (real_dev->priv_flags & IFF_HIGHDMA);
 	dev->pcpu_stat_type = NETDEV_PCPU_STAT_TSTATS;
 
 	macsec_set_head_tail_room(dev);

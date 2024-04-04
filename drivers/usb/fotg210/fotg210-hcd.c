@@ -5015,7 +5015,7 @@ static int fotg210_run(struct usb_hcd *hcd)
 	 * can return segments above 4GB, if the device allows.
 	 *
 	 * NOTE:  the dma mask is visible through dev->dma_mask, so
-	 * drivers can pass this info along ... like NETIF_F_HIGHDMA,
+	 * drivers can pass this info along ... IFF_HIGHDMA,
 	 * Scsi_Host.highmem_io, and so forth.  It's readonly to all
 	 * host side drivers though.
 	 */

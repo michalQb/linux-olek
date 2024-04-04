@@ -2277,9 +2277,9 @@ qlcnic_setup_netdev(struct qlcnic_adapter *adapter, struct net_device *netdev)
 
 	netdev->features |= (NETIF_F_SG | NETIF_F_IP_CSUM | NETIF_F_RXCSUM |
 			     NETIF_F_IPV6_CSUM | NETIF_F_GRO |
-			     NETIF_F_HW_VLAN_CTAG_RX | NETIF_F_HIGHDMA);
+			     NETIF_F_HW_VLAN_CTAG_RX);
 	netdev->vlan_features |= (NETIF_F_SG | NETIF_F_IP_CSUM |
-				  NETIF_F_IPV6_CSUM | NETIF_F_HIGHDMA);
+				  NETIF_F_IPV6_CSUM);
 
 	if (QLCNIC_IS_TSO_CAPABLE(adapter)) {
 		netdev->features |= (NETIF_F_TSO | NETIF_F_TSO6);
@@ -2312,7 +2312,7 @@ qlcnic_setup_netdev(struct qlcnic_adapter *adapter, struct net_device *netdev)
 	}
 
 	netdev->hw_features = netdev->features;
-	netdev->priv_flags |= IFF_UNICAST_FLT;
+	netdev->priv_flags |= IFF_UNICAST_FLT | IFF_HIGHDMA;
 	netdev->irq = adapter->msix_entries[0].vector;
 
 	/* MTU range: 68 - 9600 */

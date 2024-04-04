@@ -3291,9 +3291,10 @@ int mlx4_en_init_netdev(struct mlx4_en_dev *mdev, int port,
 	}
 
 	dev->vlan_features = dev->hw_features;
+	dev->priv_flags |= IFF_HIGHDMA;
 
 	dev->hw_features |= NETIF_F_RXCSUM | NETIF_F_RXHASH;
-	dev->features = dev->hw_features | NETIF_F_HIGHDMA |
+	dev->features = dev->hw_features |
 			NETIF_F_HW_VLAN_CTAG_TX | NETIF_F_HW_VLAN_CTAG_RX |
 			NETIF_F_HW_VLAN_CTAG_FILTER;
 	dev->hw_features |= NETIF_F_LOOPBACK |

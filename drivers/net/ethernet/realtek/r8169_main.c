@@ -5408,7 +5408,7 @@ static int rtl_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	if (sizeof(dma_addr_t) > 4 && tp->mac_version >= RTL_GIGA_MAC_VER_18 &&
 	    !dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64)))
-		dev->features |= NETIF_F_HIGHDMA;
+		dev->priv_flags |= IFF_HIGHDMA;
 
 	rtl_init_rxcfg(tp);
 

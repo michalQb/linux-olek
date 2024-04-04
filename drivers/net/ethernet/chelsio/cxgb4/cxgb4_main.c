@@ -6207,7 +6207,7 @@ static void free_some_resources(struct adapter *adapter)
 #define TSO_FLAGS (NETIF_F_TSO | NETIF_F_TSO6 | NETIF_F_TSO_ECN | \
 		   NETIF_F_GSO_UDP_L4)
 #define VLAN_FEAT (NETIF_F_SG | NETIF_F_IP_CSUM | TSO_FLAGS | \
-		   NETIF_F_GRO | NETIF_F_IPV6_CSUM | NETIF_F_HIGHDMA)
+		   NETIF_F_GRO | NETIF_F_IPV6_CSUM)
 #define SEGMENT_SIZE 128
 
 static int t4_get_chip_type(struct adapter *adap, int ver)
@@ -6811,7 +6811,7 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 			NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
 			NETIF_F_RXCSUM | NETIF_F_RXHASH | NETIF_F_GRO |
 			NETIF_F_HW_VLAN_CTAG_TX | NETIF_F_HW_VLAN_CTAG_RX |
-			NETIF_F_HW_TC | NETIF_F_NTUPLE | NETIF_F_HIGHDMA;
+			NETIF_F_HW_TC | NETIF_F_NTUPLE;
 
 		if (chip_ver > CHELSIO_T5) {
 			netdev->hw_enc_features |= NETIF_F_IP_CSUM |
@@ -6847,7 +6847,7 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		}
 #endif /* CONFIG_CHELSIO_IPSEC_INLINE */
 
-		netdev->priv_flags |= IFF_UNICAST_FLT;
+		netdev->priv_flags |= IFF_UNICAST_FLT | IFF_HIGHDMA;
 
 		/* MTU range: 81 - 9600 */
 		netdev->min_mtu = 81;              /* accommodate SACK */

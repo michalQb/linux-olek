@@ -2952,7 +2952,7 @@ static int enic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 #endif
 
 	if (using_dac)
-		netdev->features |= NETIF_F_HIGHDMA;
+		netdev->priv_flags |= IFF_HIGHDMA;
 
 	netdev->priv_flags |= IFF_UNICAST_FLT;
 

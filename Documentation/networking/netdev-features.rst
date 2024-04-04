@@ -123,11 +123,6 @@ gso_size. On segmentation, it segments the payload on gso_size boundaries and
 replicates the network and UDP headers (fixing up the last one if less than
 gso_size).
 
- * Transmit DMA from high memory
-
-On platforms where this is relevant, NETIF_F_HIGHDMA signals that
-ndo_start_xmit can handle skbs with frags in high memory.
-
  * Transmit scatter-gather
 
 Those features say that ndo_start_xmit can handle fragmented skbs:

@@ -1372,13 +1372,14 @@ static int altera_tse_probe(struct platform_device *pdev)
 	 * so it is turned off
 	 */
 	ndev->hw_features &= ~NETIF_F_SG;
-	ndev->features |= ndev->hw_features | NETIF_F_HIGHDMA;
+	ndev->features |= ndev->hw_features;
 
 	/* VLAN offloading of tagging, stripping and filtering is not
 	 * supported by hardware, but driver will accommodate the
 	 * extra 4-byte VLAN tag for processing by upper layers
 	 */
 	ndev->features |= NETIF_F_HW_VLAN_CTAG_RX;
+	ndev->priv_flags |= IFF_HIGHDMA;
 
 	/* setup NAPI interface */
 	netif_napi_add(ndev, &priv->napi, tse_poll);

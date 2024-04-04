@@ -3507,7 +3507,7 @@ vmxnet3_declare_features(struct vmxnet3_adapter *adapter)
 	netdev->hw_features = NETIF_F_SG | NETIF_F_RXCSUM |
 		NETIF_F_HW_CSUM | NETIF_F_HW_VLAN_CTAG_TX |
 		NETIF_F_HW_VLAN_CTAG_RX | NETIF_F_TSO | NETIF_F_TSO6 |
-		NETIF_F_LRO | NETIF_F_HIGHDMA;
+		NETIF_F_LRO;
 
 	if (VMXNET3_VERSION_GE_4(adapter)) {
 		netdev->hw_features |= NETIF_F_GSO_UDP_TUNNEL |
@@ -3572,6 +3572,7 @@ vmxnet3_declare_features(struct vmxnet3_adapter *adapter)
 				~(NETIF_F_HW_VLAN_CTAG_TX |
 				  NETIF_F_HW_VLAN_CTAG_RX);
 	netdev->features = netdev->hw_features | NETIF_F_HW_VLAN_CTAG_FILTER;
+	netdev->priv_flags |= IFF_HIGHDMA;
 }
 
 

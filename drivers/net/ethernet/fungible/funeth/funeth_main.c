@@ -1356,7 +1356,7 @@ static const struct net_device_ops fun_netdev_ops = {
 #define TSO_FLAGS (NETIF_F_TSO | NETIF_F_TSO6 | NETIF_F_TSO_ECN | \
 		   NETIF_F_GSO_UDP_L4)
 #define VLAN_FEAT (NETIF_F_SG | NETIF_F_HW_CSUM | TSO_FLAGS | \
-		   GSO_ENCAP_FLAGS | NETIF_F_HIGHDMA)
+		   GSO_ENCAP_FLAGS)
 
 static void fun_dflt_rss_indir(struct funeth_priv *fp, unsigned int nrx)
 {
@@ -1766,11 +1766,12 @@ static int fun_create_netdev(struct fun_ethdev *ed, unsigned int portid)
 	if (fp->port_caps & FUN_PORT_CAP_ENCAP_OFFLOADS)
 		netdev->hw_features |= GSO_ENCAP_FLAGS;
 
-	netdev->features |= netdev->hw_features | NETIF_F_HIGHDMA;
+	netdev->features |= netdev->hw_features;
 	netdev->vlan_features = netdev->features & VLAN_FEAT;
 	netdev->mpls_features = netdev->vlan_features;
 	netdev->hw_enc_features = netdev->hw_features;
 	netdev->xdp_features = NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT;
+	netdev->priv_flags |= IFF_HIGHDMA;
 
 	netdev->min_mtu = ETH_MIN_MTU;
 	netdev->max_mtu = FUN_MAX_MTU;

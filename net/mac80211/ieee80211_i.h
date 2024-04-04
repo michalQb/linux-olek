@@ -1992,11 +1992,11 @@ void ieee80211_color_collision_detection_work(struct work_struct *work);
 /* interface handling */
 #define MAC80211_SUPPORTED_FEATURES_TX	(NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM | \
 					 NETIF_F_HW_CSUM | NETIF_F_SG | \
-					 NETIF_F_HIGHDMA | NETIF_F_GSO_SOFTWARE | \
-					 NETIF_F_HW_TC)
+					 NETIF_F_GSO_SOFTWARE | NETIF_F_HW_TC)
 #define MAC80211_SUPPORTED_FEATURES_RX	(NETIF_F_RXCSUM)
 #define MAC80211_SUPPORTED_FEATURES	(MAC80211_SUPPORTED_FEATURES_TX | \
 					 MAC80211_SUPPORTED_FEATURES_RX)
+#define MAC80211_SUPPORTED_PRIV_FLAGS	(IFF_HIGHDMA)
 
 int ieee80211_iface_init(void);
 void ieee80211_iface_exit(void);

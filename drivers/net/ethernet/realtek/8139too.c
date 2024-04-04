@@ -1008,11 +1008,12 @@ static int rtl8139_init_one(struct pci_dev *pdev,
 	 * through the use of skb_copy_and_csum_dev we enable these
 	 * features
 	 */
-	dev->features |= NETIF_F_SG | NETIF_F_HW_CSUM | NETIF_F_HIGHDMA;
+	dev->features |= NETIF_F_SG | NETIF_F_HW_CSUM;
 	dev->vlan_features = dev->features;
 
 	dev->hw_features |= NETIF_F_RXALL;
 	dev->hw_features |= NETIF_F_RXFCS;
+	dev->priv_flags |= IFF_HIGHDMA;
 
 	/* MTU range: 68 - 1770 */
 	dev->min_mtu = ETH_MIN_MTU;

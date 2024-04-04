@@ -903,10 +903,10 @@ static struct lock_class_key macvlan_netdev_addr_lock_key;
 #define ALWAYS_ON_FEATURES ALWAYS_ON_OFFLOADS
 
 #define MACVLAN_FEATURES \
-	(NETIF_F_SG | NETIF_F_HW_CSUM | NETIF_F_HIGHDMA | NETIF_F_FRAGLIST | \
-	 NETIF_F_GSO | NETIF_F_TSO | NETIF_F_LRO | \
-	 NETIF_F_TSO_ECN | NETIF_F_TSO6 | NETIF_F_GRO | NETIF_F_RXCSUM | \
-	 NETIF_F_HW_VLAN_CTAG_FILTER | NETIF_F_HW_VLAN_STAG_FILTER)
+	(NETIF_F_SG | NETIF_F_HW_CSUM | NETIF_F_FRAGLIST | NETIF_F_GSO | \
+	 NETIF_F_TSO | NETIF_F_LRO | NETIF_F_TSO_ECN | NETIF_F_TSO6 | \
+	 NETIF_F_GRO | NETIF_F_RXCSUM | NETIF_F_HW_VLAN_CTAG_FILTER | \
+	 NETIF_F_HW_VLAN_STAG_FILTER)
 
 #define MACVLAN_STATE_MASK \
 	((1<<__LINK_STATE_NOCARRIER) | (1<<__LINK_STATE_DORMANT))
@@ -933,6 +933,7 @@ static int macvlan_init(struct net_device *dev)
 	dev->vlan_features	|= ALWAYS_ON_OFFLOADS;
 	dev->hw_enc_features    |= dev->features;
 	dev->priv_flags		|= IFF_LLTX;
+	dev->priv_flags		|= (lowerdev->priv_flags & IFF_HIGHDMA);
 	netif_inherit_tso_max(dev, lowerdev);
 	dev->hard_header_len	= lowerdev->hard_header_len;
 	macvlan_set_lockdep_class(dev);

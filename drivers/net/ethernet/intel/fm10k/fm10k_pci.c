@@ -2008,10 +2008,8 @@ static int fm10k_sw_init(struct fm10k_intfc *interface,
 		hw->mac.ops.set_dma_mask(hw, dma_get_mask(&pdev->dev));
 
 	/* update netdev with DMA restrictions */
-	if (dma_get_mask(&pdev->dev) > DMA_BIT_MASK(32)) {
-		netdev->features |= NETIF_F_HIGHDMA;
-		netdev->vlan_features |= NETIF_F_HIGHDMA;
-	}
+	if (dma_get_mask(&pdev->dev) > DMA_BIT_MASK(32))
+		netdev->priv_flags |= IFF_HIGHDMA;
 
 	/* reset and initialize the hardware so it is in a known state */
 	err = hw->mac.ops.reset_hw(hw);

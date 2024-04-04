@@ -1600,7 +1600,7 @@ tsi108_init_one(struct platform_device *pdev)
 	 * a new function skb_csum_dev() in net/core/skbuff.c).
 	 */
 
-	dev->features = NETIF_F_HIGHDMA;
+	dev->priv_flags |= IFF_HIGHDMA;
 
 	spin_lock_init(&data->txlock);
 	spin_lock_init(&data->misclock);

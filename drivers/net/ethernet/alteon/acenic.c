@@ -589,7 +589,7 @@ static int acenic_probe_one(struct pci_dev *pdev,
 	}
 	ap->name = dev->name;
 
-	dev->features |= NETIF_F_HIGHDMA;
+	dev->priv_flags |= IFF_HIGHDMA;
 
 	pci_set_drvdata(pdev, dev);
 

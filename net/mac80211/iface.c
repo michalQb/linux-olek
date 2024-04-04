@@ -2191,6 +2191,8 @@ int ieee80211_if_add(struct ieee80211_local *local, const char *name,
 
 		ndev->features |= local->hw.netdev_features;
 		ndev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
+		ndev->priv_flags |= local->hw.netdev_priv_flags &
+				    MAC80211_SUPPORTED_PRIV_FLAGS;
 		ndev->hw_features |= ndev->features &
 					MAC80211_SUPPORTED_FEATURES_TX;
 		sdata->vif.netdev_features = local->hw.netdev_features;

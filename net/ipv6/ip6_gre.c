@@ -1464,7 +1464,6 @@ static void ip6gre_tunnel_setup(struct net_device *dev)
 
 #define GRE6_FEATURES (NETIF_F_SG |		\
 		       NETIF_F_FRAGLIST |	\
-		       NETIF_F_HIGHDMA |	\
 		       NETIF_F_HW_CSUM)
 
 static void ip6gre_tnl_init_features(struct net_device *dev)
@@ -1486,7 +1485,7 @@ static void ip6gre_tnl_init_features(struct net_device *dev)
 	dev->features |= NETIF_F_GSO_SOFTWARE;
 	dev->hw_features |= NETIF_F_GSO_SOFTWARE;
 
-	dev->priv_flags |= IFF_LLTX;
+	dev->priv_flags |= IFF_LLTX | IFF_HIGHDMA;
 }
 
 static int ip6gre_tunnel_init_common(struct net_device *dev)

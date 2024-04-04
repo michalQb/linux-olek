@@ -3764,11 +3764,12 @@ static void ena_set_dev_offloads(struct ena_com_dev_get_features_ctx *feat,
 	netdev->features =
 		dev_features |
 		NETIF_F_SG |
-		NETIF_F_RXHASH |
-		NETIF_F_HIGHDMA;
+		NETIF_F_RXHASH;
 
 	netdev->hw_features |= netdev->features;
 	netdev->vlan_features |= netdev->features;
+
+	netdev->priv_flags |= IFF_HIGHDMA;
 }
 
 static void ena_set_conf_feat_params(struct ena_adapter *adapter,

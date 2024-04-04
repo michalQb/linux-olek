@@ -1535,7 +1535,6 @@ static int ionic_init_nic_features(struct ionic_lif *lif)
 		return err;
 
 	/* tell the netdev what we actually can support */
-	netdev->features |= NETIF_F_HIGHDMA;
 
 	if (lif->hw_features & IONIC_ETH_HW_VLAN_TX_TAG)
 		netdev->hw_features |= NETIF_F_HW_VLAN_CTAG_TX;
@@ -1576,7 +1575,8 @@ static int ionic_init_nic_features(struct ionic_lif *lif)
 	netdev->vlan_features |= netdev->features & ~NETIF_F_VLAN_FEATURES;
 
 	netdev->priv_flags |= IFF_UNICAST_FLT |
-			      IFF_LIVE_ADDR_CHANGE;
+			      IFF_LIVE_ADDR_CHANGE |
+			      IFF_HIGHDMA;
 
 	netdev->xdp_features = NETDEV_XDP_ACT_BASIC    |
 			       NETDEV_XDP_ACT_REDIRECT |

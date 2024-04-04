@@ -3580,15 +3580,16 @@ static void ice_set_netdev_features(struct net_device *netdev)
 	netdev_features_t dflt_features;
 	netdev_features_t tso_features;
 
+	netdev->priv_flags |= IFF_HIGHDMA;
+
 	if (ice_is_safe_mode(pf)) {
 		/* safe mode */
-		netdev->features = NETIF_F_SG | NETIF_F_HIGHDMA;
+		netdev->features = NETIF_F_SG;
 		netdev->hw_features = netdev->features;
 		return;
 	}
 
 	dflt_features = NETIF_F_SG	|
-			NETIF_F_HIGHDMA	|
 			NETIF_F_NTUPLE	|
 			NETIF_F_RXHASH;
 

@@ -692,7 +692,7 @@ static int starfire_init_one(struct pci_dev *pdev,
 	dev->features |= NETIF_F_HW_VLAN_CTAG_RX | NETIF_F_HW_VLAN_CTAG_FILTER;
 #endif /* VLAN_RX_KILL_VID */
 #ifdef ADDR_64BITS
-	dev->features |= NETIF_F_HIGHDMA;
+	dev->priv_flags |= IFF_HIGHDMA;
 #endif /* ADDR_64BITS */
 
 	/* Serial EEPROM reads are hidden by the hardware. */

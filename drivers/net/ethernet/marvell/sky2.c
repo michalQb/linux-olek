@@ -4637,7 +4637,7 @@ static struct net_device *sky2_init_netdev(struct sky2_hw *hw, unsigned port,
 	dev->hw_features |= NETIF_F_IP_CSUM | NETIF_F_SG | NETIF_F_TSO;
 
 	if (highmem)
-		dev->features |= NETIF_F_HIGHDMA;
+		dev->priv_flags |= IFF_HIGHDMA;
 
 	/* Enable receive hashing unless hardware is known broken */
 	if (!(hw->flags & SKY2_HW_RSS_BROKEN))

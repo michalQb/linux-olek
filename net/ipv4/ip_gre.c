@@ -975,7 +975,6 @@ static const struct net_device_ops ipgre_netdev_ops = {
 
 #define GRE_FEATURES (NETIF_F_SG |		\
 		      NETIF_F_FRAGLIST |	\
-		      NETIF_F_HIGHDMA |		\
 		      NETIF_F_HW_CSUM)
 
 static void ipgre_tunnel_setup(struct net_device *dev)
@@ -1011,7 +1010,7 @@ static void __gre_tunnel_init(struct net_device *dev)
 	dev->features |= NETIF_F_GSO_SOFTWARE;
 	dev->hw_features |= NETIF_F_GSO_SOFTWARE;
 
-	dev->priv_flags |= IFF_LLTX;
+	dev->priv_flags |= IFF_LLTX | IFF_HIGHDMA;
 }
 
 static int ipgre_tunnel_init(struct net_device *dev)

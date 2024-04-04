@@ -900,16 +900,16 @@ static void qede_init_ndev(struct qede_dev *edev)
 					  NETIF_F_GSO_GRE_CSUM);
 	}
 
-	ndev->vlan_features = hw_features | NETIF_F_RXHASH | NETIF_F_RXCSUM |
-			      NETIF_F_HIGHDMA;
+	ndev->vlan_features = hw_features | NETIF_F_RXHASH | NETIF_F_RXCSUM;
 	ndev->features = hw_features | NETIF_F_RXHASH | NETIF_F_RXCSUM |
-			 NETIF_F_HW_VLAN_CTAG_RX | NETIF_F_HIGHDMA |
+			 NETIF_F_HW_VLAN_CTAG_RX |
 			 NETIF_F_HW_VLAN_CTAG_FILTER | NETIF_F_HW_VLAN_CTAG_TX;
 
 	ndev->hw_features = hw_features;
 
 	ndev->xdp_features = NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT |
 			     NETDEV_XDP_ACT_NDO_XMIT;
+	ndev->priv_flags |= IFF_HIGHDMA;
 
 	/* MTU range: 46 - 9600 */
 	ndev->min_mtu = ETH_ZLEN - ETH_HLEN;

@@ -1824,7 +1824,6 @@ static const struct net_device_ops ip6_tnl_netdev_ops = {
 
 #define IPXIPX_FEATURES (NETIF_F_SG |		\
 			 NETIF_F_FRAGLIST |	\
-			 NETIF_F_HIGHDMA |	\
 			 NETIF_F_GSO_SOFTWARE |	\
 			 NETIF_F_HW_CSUM)
 
@@ -1846,7 +1845,7 @@ static void ip6_tnl_dev_setup(struct net_device *dev)
 	dev->type = ARPHRD_TUNNEL6;
 	dev->flags |= IFF_NOARP;
 	dev->addr_len = sizeof(struct in6_addr);
-	dev->priv_flags |= IFF_LLTX;
+	dev->priv_flags |= IFF_LLTX | IFF_HIGHDMA;
 	dev->pcpu_stat_type = NETDEV_PCPU_STAT_TSTATS;
 	netif_keep_dst(dev);
 

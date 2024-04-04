@@ -2993,7 +2993,7 @@ static int gem_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	dev->hw_features = NETIF_F_SG | NETIF_F_HW_CSUM | NETIF_F_RXCSUM;
 	dev->features = dev->hw_features;
 	if (pci_using_dac)
-		dev->features |= NETIF_F_HIGHDMA;
+		dev->priv_flags |= IFF_HIGHDMA;
 
 	/* MTU range: 68 - 1500 (Jumbo mode is broken) */
 	dev->min_mtu = GEM_MIN_MTU;

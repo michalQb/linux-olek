@@ -1222,7 +1222,7 @@ static int hix5hd2_dev_probe(struct platform_device *pdev)
 
 	INIT_WORK(&priv->tx_timeout_task, hix5hd2_tx_timeout_task);
 	ndev->watchdog_timeo = 6 * HZ;
-	ndev->priv_flags |= IFF_UNICAST_FLT;
+	ndev->priv_flags |= IFF_UNICAST_FLT | IFF_HIGHDMA;
 	ndev->netdev_ops = &hix5hd2_netdev_ops;
 	ndev->ethtool_ops = &hix5hd2_ethtools_ops;
 	SET_NETDEV_DEV(ndev, dev);
@@ -1230,7 +1230,7 @@ static int hix5hd2_dev_probe(struct platform_device *pdev)
 	if (HAS_CAP_TSO(priv->hw_cap))
 		ndev->hw_features |= NETIF_F_SG;
 
-	ndev->features |= ndev->hw_features | NETIF_F_HIGHDMA;
+	ndev->features |= ndev->hw_features;
 	ndev->vlan_features |= ndev->features;
 
 	ret = hix5hd2_init_hw_desc_queue(priv);

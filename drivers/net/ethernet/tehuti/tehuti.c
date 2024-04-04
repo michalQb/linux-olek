@@ -1978,8 +1978,7 @@ bdx_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		ndev->if_port = port;
 		ndev->features = NETIF_F_IP_CSUM | NETIF_F_SG | NETIF_F_TSO |
 		    NETIF_F_HW_VLAN_CTAG_TX | NETIF_F_HW_VLAN_CTAG_RX |
-		    NETIF_F_HW_VLAN_CTAG_FILTER | NETIF_F_RXCSUM |
-		    NETIF_F_HIGHDMA;
+		    NETIF_F_HW_VLAN_CTAG_FILTER | NETIF_F_RXCSUM;
 
 		ndev->hw_features = NETIF_F_IP_CSUM | NETIF_F_SG |
 			NETIF_F_TSO | NETIF_F_HW_VLAN_CTAG_TX;
@@ -2021,6 +2020,8 @@ bdx_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 #ifdef BDX_LLTX
 		ndev->priv_flags |= IFF_LLTX;
 #endif
+		ndev->priv_flags |= IFF_HIGHDMA;
+
 		/* MTU range: 60 - 16384 */
 		ndev->min_mtu = ETH_ZLEN;
 		ndev->max_mtu = BDX_MAX_MTU;

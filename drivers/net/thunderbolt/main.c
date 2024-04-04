@@ -1328,7 +1328,8 @@ static int tbnet_probe(struct tb_service *svc, const struct tb_service_id *id)
 	 */
 	dev->hw_features = NETIF_F_SG | NETIF_F_ALL_TSO | NETIF_F_GRO |
 			   NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM;
-	dev->features = dev->hw_features | NETIF_F_HIGHDMA;
+	dev->features = dev->hw_features;
+	dev->priv_flags |= IFF_HIGHDMA;
 	dev->hard_header_len += sizeof(struct thunderbolt_ip_frame_header);
 
 	netif_napi_add(dev, &net->napi, tbnet_poll);

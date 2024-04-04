@@ -2155,7 +2155,7 @@ static int ns83820_init_one(struct pci_dev *pci_dev,
 	if (using_dac) {
 		printk(KERN_INFO "%s: using 64 bit addressing.\n",
 			ndev->name);
-		ndev->features |= NETIF_F_HIGHDMA;
+		ndev->priv_flags |= IFF_HIGHDMA;
 	}
 
 	printk(KERN_INFO "%s: ns83820 v" VERSION ": DP83820 v%u.%u: %pM io=0x%08lx irq=%d f=%s\n",
@@ -2163,7 +2163,7 @@ static int ns83820_init_one(struct pci_dev *pci_dev,
 		(unsigned)readl(dev->base + SRR) >> 8,
 		(unsigned)readl(dev->base + SRR) & 0xff,
 		ndev->dev_addr, addr, pci_dev->irq,
-		(ndev->features & NETIF_F_HIGHDMA) ? "h,sg" : "sg"
+		(ndev->priv_flags & IFF_HIGHDMA) ? "h,sg" : "sg"
 		);
 
 #ifdef PHY_CODE_IS_FINISHED

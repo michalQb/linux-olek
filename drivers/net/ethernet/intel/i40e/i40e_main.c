@@ -13665,7 +13665,6 @@ static int i40e_config_netdev(struct i40e_vsi *vsi)
 
 	hw_enc_features = NETIF_F_SG			|
 			  NETIF_F_HW_CSUM		|
-			  NETIF_F_HIGHDMA		|
 			  NETIF_F_SOFT_FEATURES		|
 			  NETIF_F_TSO			|
 			  NETIF_F_TSO_ECN		|
@@ -13794,6 +13793,7 @@ static int i40e_config_netdev(struct i40e_vsi *vsi)
 
 	netdev->priv_flags |= IFF_UNICAST_FLT;
 	netdev->priv_flags |= IFF_SUPP_NOFCS;
+	netdev->priv_flags |= IFF_HIGHDMA;
 	/* Setup netdev TC information */
 	i40e_vsi_config_netdev_tc(vsi, vsi->tc_config.enabled_tc);
 

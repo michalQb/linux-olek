@@ -3412,7 +3412,7 @@ static int illegal_highdma(struct net_device *dev, struct sk_buff *skb)
 #ifdef CONFIG_HIGHMEM
 	int i;
 
-	if (!(dev->features & NETIF_F_HIGHDMA)) {
+	if (!(dev->priv_flags & IFF_HIGHDMA)) {
 		for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
 			skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
 
@@ -10334,10 +10334,6 @@ int register_netdevice(struct net_device *dev)
 	if (dev->hw_enc_features & NETIF_F_TSO)
 		dev->hw_enc_features |= NETIF_F_TSO_MANGLEID;
 
-	/* Make NETIF_F_HIGHDMA inheritable to VLAN devices.
-	 */
-	dev->vlan_features |= NETIF_F_HIGHDMA;
-
 	/* Make NETIF_F_SG inheritable to tunnel devices.
 	 */
 	dev->hw_enc_features |= NETIF_F_SG | NETIF_F_GSO_PARTIAL;
@@ -11519,6 +11515,27 @@ netdev_features_t netdev_increment_features(netdev_features_t all,
 	return all;
 }
 EXPORT_SYMBOL(netdev_increment_features);
+
+u64 netdev_increment_priv_flags(u64 all, u64 one, u64 mask)
+{
+	all |= one & IFF_ONE_FOR_ALL & mask;
+	all &= one | ~IFF_ALL_FOR_ALL;
+
+	return all;
+}
+EXPORT_SYMBOL(netdev_increment_priv_flags);
+
+void netdev_increment_priv_flags_finalize(struct net_device *dev,
+					  u64 priv_flags)
+{
+	dev->priv_flags |= priv_flags;
+
+	dev->priv_flags &= ~IFF_XMIT_DST_RELEASE;
+	if ((priv_flags & (IFF_XMIT_DST_RELEASE | IFF_XMIT_DST_RELEASE_PERM)) ==
+	    (IFF_XMIT_DST_RELEASE | IFF_XMIT_DST_RELEASE_PERM))
+		dev->priv_flags |= IFF_XMIT_DST_RELEASE;
+}
+EXPORT_SYMBOL(netdev_increment_priv_flags_finalize);
 
 static struct hlist_head * __net_init netdev_create_hash(void)
 {

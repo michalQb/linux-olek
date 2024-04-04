@@ -3200,7 +3200,7 @@ static void cxgb3_init_iscsi_mac(struct net_device *dev)
 
 #define TSO_FLAGS (NETIF_F_TSO | NETIF_F_TSO6 | NETIF_F_TSO_ECN)
 #define VLAN_FEAT (NETIF_F_SG | NETIF_F_IP_CSUM | TSO_FLAGS | \
-			NETIF_F_IPV6_CSUM | NETIF_F_HIGHDMA)
+			NETIF_F_IPV6_CSUM)
 static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	int i, err;
@@ -3308,7 +3308,7 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 				    NETIF_F_HW_VLAN_CTAG_TX;
 		netdev->vlan_features |= netdev->features & VLAN_FEAT;
 
-		netdev->features |= NETIF_F_HIGHDMA;
+		netdev->priv_flags |= IFF_HIGHDMA;
 
 		netdev->netdev_ops = &cxgb_netdev_ops;
 		netdev->ethtool_ops = &cxgb_ethtool_ops;

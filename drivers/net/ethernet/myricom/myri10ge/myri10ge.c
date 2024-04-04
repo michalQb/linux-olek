@@ -3864,13 +3864,15 @@ static int myri10ge_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	/* fake NETIF_F_HW_VLAN_CTAG_RX for good GRO performance */
 	netdev->hw_features |= NETIF_F_HW_VLAN_CTAG_RX;
 
-	netdev->features = netdev->hw_features | NETIF_F_HIGHDMA;
+	netdev->features = netdev->hw_features;
 
 	netdev->vlan_features |= mgp->features;
 	if (mgp->fw_ver_tiny < 37)
 		netdev->vlan_features &= ~NETIF_F_TSO6;
 	if (mgp->fw_ver_tiny < 32)
 		netdev->vlan_features &= ~NETIF_F_TSO;
+
+	netdev->priv_flags |= IFF_HIGHDMA;
 
 	/* make sure we can get an irq, and that MSI can be
 	 * setup (if available). */

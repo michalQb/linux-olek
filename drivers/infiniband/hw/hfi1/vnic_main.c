@@ -588,9 +588,10 @@ struct net_device *hfi1_vnic_alloc_rn(struct ib_device *device,
 	rn->free_rdma_netdev = hfi1_vnic_free_rn;
 	rn->set_id = hfi1_vnic_set_vesw_id;
 
-	netdev->features = NETIF_F_HIGHDMA | NETIF_F_SG;
+	netdev->features = NETIF_F_SG;
 	netdev->hw_features = netdev->features;
 	netdev->vlan_features = netdev->features;
+	netdev->priv_flags |= IFF_HIGHDMA;
 	netdev->watchdog_timeo = msecs_to_jiffies(HFI_TX_TIMEOUT_MS);
 	netdev->netdev_ops = &hfi1_netdev_ops;
 	mutex_init(&vinfo->lock);

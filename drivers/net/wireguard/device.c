@@ -276,7 +276,7 @@ static void wg_setup(struct net_device *dev)
 	struct wg_device *wg = netdev_priv(dev);
 	enum { WG_NETDEV_FEATURES = NETIF_F_HW_CSUM | NETIF_F_RXCSUM |
 				    NETIF_F_SG | NETIF_F_GSO |
-				    NETIF_F_GSO_SOFTWARE | NETIF_F_HIGHDMA };
+				    NETIF_F_GSO_SOFTWARE };
 	const int overhead = MESSAGE_MINIMUM_LENGTH + sizeof(struct udphdr) +
 			     max(sizeof(struct ipv6hdr), sizeof(struct iphdr));
 
@@ -288,7 +288,7 @@ static void wg_setup(struct net_device *dev)
 	dev->needed_tailroom = noise_encrypted_len(MESSAGE_PADDING_MULTIPLE);
 	dev->type = ARPHRD_NONE;
 	dev->flags = IFF_POINTOPOINT | IFF_NOARP;
-	dev->priv_flags |= IFF_LOGICAL;
+	dev->priv_flags |= IFF_LOGICAL | IFF_HIGHDMA;
 	dev->features |= WG_NETDEV_FEATURES;
 	dev->hw_features |= WG_NETDEV_FEATURES;
 	dev->hw_enc_features |= WG_NETDEV_FEATURES;

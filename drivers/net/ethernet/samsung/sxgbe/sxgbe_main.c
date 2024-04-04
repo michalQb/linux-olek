@@ -2107,11 +2107,11 @@ struct sxgbe_priv_data *sxgbe_drv_probe(struct device *device,
 	ndev->hw_features = NETIF_F_SG | NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
 		NETIF_F_RXCSUM | NETIF_F_TSO | NETIF_F_TSO6 |
 		NETIF_F_GRO;
-	ndev->features |= ndev->hw_features | NETIF_F_HIGHDMA;
+	ndev->features |= ndev->hw_features;
 	ndev->watchdog_timeo = msecs_to_jiffies(TX_TIMEO);
 
 	/* assign filtering support */
-	ndev->priv_flags |= IFF_UNICAST_FLT;
+	ndev->priv_flags |= IFF_UNICAST_FLT | IFF_HIGHDMA;
 
 	/* MTU range: 68 - 9000 */
 	ndev->min_mtu = MIN_MTU;

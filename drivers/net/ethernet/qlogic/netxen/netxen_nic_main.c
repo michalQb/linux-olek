@@ -1351,10 +1351,8 @@ netxen_setup_netdev(struct netxen_adapter *adapter,
 
 	netdev->vlan_features |= netdev->hw_features;
 
-	if (adapter->pci_using_dac) {
-		netdev->features |= NETIF_F_HIGHDMA;
-		netdev->vlan_features |= NETIF_F_HIGHDMA;
-	}
+	if (adapter->pci_using_dac)
+		netdev->priv_flags |= IFF_HIGHDMA;
 
 	if (adapter->capabilities & NX_FW_CAPABILITY_FVLANTX)
 		netdev->hw_features |= NETIF_F_HW_VLAN_CTAG_TX;

@@ -420,9 +420,8 @@ static int ntb_netdev_probe(struct device *client_dev)
 	dev = netdev_priv(ndev);
 	dev->ndev = ndev;
 	dev->pdev = pdev;
-	ndev->features = NETIF_F_HIGHDMA;
 
-	ndev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
+	ndev->priv_flags |= IFF_LIVE_ADDR_CHANGE | IFF_HIGHDMA;
 
 	ndev->hw_features = ndev->features;
 	ndev->watchdog_timeo = msecs_to_jiffies(NTB_TX_TIMEOUT_MS);

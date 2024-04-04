@@ -229,7 +229,6 @@ static void netkit_setup(struct net_device *dev)
 		NETIF_F_HW_CSUM |
 		NETIF_F_RXCSUM |
 		NETIF_F_SCTP_CRC |
-		NETIF_F_HIGHDMA |
 		NETIF_F_GSO_SOFTWARE |
 		NETIF_F_GSO_ENCAP_ALL;
 
@@ -242,6 +241,7 @@ static void netkit_setup(struct net_device *dev)
 	dev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
 	dev->priv_flags |= IFF_PHONY_HEADROOM;
 	dev->priv_flags |= IFF_LOGICAL;
+	dev->priv_flags |= IFF_HIGHDMA;
 
 	dev->ethtool_ops = &netkit_ethtool_ops;
 	dev->netdev_ops  = &netkit_netdev_ops;

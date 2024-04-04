@@ -1652,8 +1652,13 @@ struct net_device_ops {
  * @IFF_LLTX: device supports lockless Tx. Mainly used by logical interfaces,
  *	such as tunnels.
  * @IFF_NETNS_LOCAL: interface can't change network namespaces
+ * @IFF_HIGHDMA: device can transmit buffers from high memory
  * @IFF_LOGICAL: combines @IFF_NO_QUEUE and @IFF_LLTX, used by logical
  *	interfaces to avoid overhead from locking and Qdisc.
+ * @IFF_ONE_FOR_ALL: if one interface supports them, enable them for all in
+ *	netdev_intrement_priv_flags()
+ * @IFF_ALL_FOR_ALL: if at least one interface doesn't support them, disable
+ * them for all in netdev_intrement_priv_flags()
  */
 enum netdev_priv_flags {
 	IFF_802_1Q_VLAN			= 1<<0,
@@ -1692,7 +1697,11 @@ enum netdev_priv_flags {
 	IFF_SEE_ALL_HWTSTAMP_REQUESTS	= BIT_ULL(33),
 	IFF_LLTX			= BIT_ULL(34),
 	IFF_NETNS_LOCAL			= BIT_ULL(35),
+	IFF_HIGHDMA			= BIT_ULL(36),
 	IFF_LOGICAL			= IFF_NO_QUEUE | IFF_LLTX,
+	IFF_ONE_FOR_ALL			= IFF_HIGHDMA,
+	IFF_ALL_FOR_ALL			= IFF_XMIT_DST_RELEASE |
+					  IFF_XMIT_DST_RELEASE_PERM,
 };
 
 #define IFF_802_1Q_VLAN			IFF_802_1Q_VLAN
@@ -4937,6 +4946,10 @@ static inline netdev_features_t netdev_get_wanted_features(
 }
 netdev_features_t netdev_increment_features(netdev_features_t all,
 	netdev_features_t one, netdev_features_t mask);
+
+u64 netdev_increment_priv_flags(u64 all, u64 one, u64 mask);
+void netdev_increment_priv_flags_finalize(struct net_device *dev,
+					  u64 priv_flags);
 
 /* Allow TSO being used on stacked device :
  * Performing the GSO segmentation before last device

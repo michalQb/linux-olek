@@ -1031,11 +1031,11 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		netdev->mem_start = mmio_start;
 		netdev->mem_end = mmio_start + mmio_len - 1;
 		netdev->ml_priv = adapter;
-		netdev->priv_flags |= IFF_LLTX;
+		netdev->priv_flags |= IFF_LLTX | IFF_HIGHDMA;
 		netdev->hw_features |= NETIF_F_SG | NETIF_F_IP_CSUM |
 			NETIF_F_RXCSUM;
 		netdev->features |= NETIF_F_SG | NETIF_F_IP_CSUM |
-			NETIF_F_RXCSUM | NETIF_F_HIGHDMA;
+			NETIF_F_RXCSUM;
 
 		if (vlan_tso_capable(adapter)) {
 			netdev->features |=

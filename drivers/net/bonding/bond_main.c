@@ -1419,7 +1419,7 @@ static netdev_features_t bond_fix_features(struct net_device *dev,
 
 #define BOND_VLAN_FEATURES	(NETIF_F_HW_CSUM | NETIF_F_SG | \
 				 NETIF_F_FRAGLIST | NETIF_F_GSO_SOFTWARE | \
-				 NETIF_F_HIGHDMA | NETIF_F_LRO)
+				 NETIF_F_LRO)
 
 #define BOND_ENC_FEATURES	(NETIF_F_HW_CSUM | NETIF_F_SG | \
 				 NETIF_F_RXCSUM | NETIF_F_GSO_SOFTWARE)
@@ -1427,11 +1427,12 @@ static netdev_features_t bond_fix_features(struct net_device *dev,
 #define BOND_MPLS_FEATURES	(NETIF_F_HW_CSUM | NETIF_F_SG | \
 				 NETIF_F_GSO_SOFTWARE)
 
+#define BOND_PRIV_FLAGS		(IFF_XMIT_DST_RELEASE | \
+				 IFF_XMIT_DST_RELEASE_PERM | \
+				 IFF_HIGHDMA)
 
 static void bond_compute_features(struct bonding *bond)
 {
-	unsigned int dst_release_flag = IFF_XMIT_DST_RELEASE |
-					IFF_XMIT_DST_RELEASE_PERM;
 	netdev_features_t vlan_features = BOND_VLAN_FEATURES;
 	netdev_features_t enc_features  = BOND_ENC_FEATURES;
 #ifdef CONFIG_XFRM_OFFLOAD
@@ -1439,6 +1440,7 @@ static void bond_compute_features(struct bonding *bond)
 #endif /* CONFIG_XFRM_OFFLOAD */
 	netdev_features_t mpls_features  = BOND_MPLS_FEATURES;
 	struct net_device *bond_dev = bond->dev;
+	u64 priv_flags = BOND_PRIV_FLAGS;
 	struct list_head *iter;
 	struct slave *slave;
 	unsigned short max_hard_header_len = ETH_HLEN;
@@ -1449,6 +1451,7 @@ static void bond_compute_features(struct bonding *bond)
 		goto done;
 	vlan_features &= NETIF_F_ALL_FOR_ALL;
 	mpls_features &= NETIF_F_ALL_FOR_ALL;
+	priv_flags &= IFF_ALL_FOR_ALL;
 
 	bond_for_each_slave(bond, slave, iter) {
 		vlan_features = netdev_increment_features(vlan_features,
@@ -1468,7 +1471,10 @@ static void bond_compute_features(struct bonding *bond)
 							  slave->dev->mpls_features,
 							  BOND_MPLS_FEATURES);
 
-		dst_release_flag &= slave->dev->priv_flags;
+		priv_flags = netdev_increment_priv_flags(priv_flags,
+							 slave->dev->priv_flags,
+							 BOND_PRIV_FLAGS);
+
 		if (slave->dev->hard_header_len > max_hard_header_len)
 			max_hard_header_len = slave->dev->hard_header_len;
 
@@ -1489,11 +1495,7 @@ done:
 	netif_set_tso_max_segs(bond_dev, tso_max_segs);
 	netif_set_tso_max_size(bond_dev, tso_max_size);
 
-	bond_dev->priv_flags &= ~IFF_XMIT_DST_RELEASE;
-	if ((bond_dev->priv_flags & IFF_XMIT_DST_RELEASE_PERM) &&
-	    dst_release_flag == (IFF_XMIT_DST_RELEASE | IFF_XMIT_DST_RELEASE_PERM))
-		bond_dev->priv_flags |= IFF_XMIT_DST_RELEASE;
-
+	netdev_increment_priv_flags_finalize(bond_dev, priv_flags);
 	netdev_change_features(bond_dev);
 }
 

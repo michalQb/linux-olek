@@ -2082,12 +2082,12 @@ static int setup_nic_devices(struct octeon_device *octeon_dev)
 
 		lio->msg_enable = netif_msg_init(debug, DEFAULT_MSG_ENABLE);
 
-		lio->dev_capability = NETIF_F_HIGHDMA
-				      | NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM
+		lio->dev_capability = NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM
 				      | NETIF_F_SG | NETIF_F_RXCSUM
 				      | NETIF_F_TSO | NETIF_F_TSO6
 				      | NETIF_F_GRO
 				      | NETIF_F_LRO;
+		netdev->priv_flags |= IFF_HIGHDMA;
 		netif_set_tso_max_size(netdev, OCTNIC_GSO_MAX_SIZE);
 
 		/* Copy of transmit encapsulation capabilities:

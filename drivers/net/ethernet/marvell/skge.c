@@ -3829,7 +3829,7 @@ static struct net_device *skge_devinit(struct skge_hw *hw, int port,
 	dev->max_mtu = ETH_JUMBO_MTU;
 
 	if (highmem)
-		dev->features |= NETIF_F_HIGHDMA;
+		dev->priv_flags |= IFF_HIGHDMA;
 
 	skge = netdev_priv(dev);
 	netif_napi_add(dev, &skge->napi, skge_poll);

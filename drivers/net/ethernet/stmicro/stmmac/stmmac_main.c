@@ -7657,7 +7657,7 @@ int stmmac_dvr_probe(struct device *device,
 		}
 	}
 
-	ndev->features |= ndev->hw_features | NETIF_F_HIGHDMA;
+	ndev->features |= ndev->hw_features;
 	ndev->watchdog_timeo = msecs_to_jiffies(watchdog);
 #ifdef STMMAC_VLAN_TAG_USED
 	/* Both mac100 and gmac support receive VLAN tag detection */
@@ -7714,7 +7714,7 @@ int stmmac_dvr_probe(struct device *device,
 	if (flow_ctrl)
 		priv->flow_ctrl = FLOW_AUTO;	/* RX/TX pause on */
 
-	ndev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
+	ndev->priv_flags |= IFF_LIVE_ADDR_CHANGE | IFF_HIGHDMA;
 
 	/* Setup channels NAPI */
 	stmmac_napi_add(ndev);

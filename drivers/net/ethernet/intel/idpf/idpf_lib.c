@@ -779,8 +779,9 @@ static int idpf_cfg_netdev(struct idpf_vport *vport)
 	netdev->min_mtu = ETH_MIN_MTU;
 	netdev->max_mtu = vport->max_mtu;
 
-	dflt_features = NETIF_F_SG	|
-			NETIF_F_HIGHDMA;
+	netdev->priv_flags |= IFF_HIGHDMA;
+
+	dflt_features = NETIF_F_SG;
 
 	if (idpf_is_cap_ena_all(adapter, IDPF_RSS_CAPS, IDPF_CAP_RSS))
 		dflt_features |= NETIF_F_RXHASH;

@@ -1414,7 +1414,6 @@ static void ipip6_dev_free(struct net_device *dev)
 
 #define SIT_FEATURES (NETIF_F_SG	   | \
 		      NETIF_F_FRAGLIST	   | \
-		      NETIF_F_HIGHDMA	   | \
 		      NETIF_F_GSO_SOFTWARE | \
 		      NETIF_F_HW_CSUM)
 
@@ -1435,7 +1434,7 @@ static void ipip6_tunnel_setup(struct net_device *dev)
 	dev->flags		= IFF_NOARP;
 	netif_keep_dst(dev);
 	dev->addr_len		= 4;
-	dev->priv_flags		|= IFF_LLTX;
+	dev->priv_flags		|= IFF_LLTX | IFF_HIGHDMA;
 	dev->features		|= SIT_FEATURES;
 	dev->hw_features	|= SIT_FEATURES;
 	dev->pcpu_stat_type	= NETDEV_PCPU_STAT_TSTATS;

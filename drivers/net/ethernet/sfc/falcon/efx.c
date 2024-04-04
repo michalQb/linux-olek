@@ -2873,7 +2873,6 @@ static int ef4_pci_probe(struct pci_dev *pci_dev,
 		return -ENOMEM;
 	efx = netdev_priv(net_dev);
 	efx->type = (const struct ef4_nic_type *) entry->driver_data;
-	efx->fixed_features |= NETIF_F_HIGHDMA;
 
 	pci_set_drvdata(pci_dev, efx);
 	SET_NETDEV_DEV(net_dev, &pci_dev->dev);
@@ -2899,7 +2898,7 @@ static int ef4_pci_probe(struct pci_dev *pci_dev,
 			      NETIF_F_RXCSUM);
 	/* Mask for features that also apply to VLAN devices */
 	net_dev->vlan_features |= (NETIF_F_HW_CSUM | NETIF_F_SG |
-				   NETIF_F_HIGHDMA | NETIF_F_RXCSUM);
+				   NETIF_F_RXCSUM);
 
 	net_dev->hw_features = net_dev->features & ~efx->fixed_features;
 

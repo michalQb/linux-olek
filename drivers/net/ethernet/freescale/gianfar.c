@@ -3242,7 +3242,8 @@ static int gfar_probe(struct platform_device *ofdev)
 		dev->hw_features = NETIF_F_IP_CSUM | NETIF_F_SG |
 				   NETIF_F_RXCSUM;
 		dev->features |= NETIF_F_IP_CSUM | NETIF_F_SG |
-				 NETIF_F_RXCSUM | NETIF_F_HIGHDMA;
+				 NETIF_F_RXCSUM;
+		dev->priv_flags |= IFF_HIGHDMA;
 	}
 
 	if (priv->device_flags & FSL_GIANFAR_DEV_HAS_VLAN) {

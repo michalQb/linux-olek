@@ -716,7 +716,7 @@ jme_set_clean_rxdesc(struct jme_adapter *jme, int i)
 	rxdesc->desc1.bufaddrl	= cpu_to_le32(
 					(__u64)rxbi->mapping & 0xFFFFFFFFUL);
 	rxdesc->desc1.datalen	= cpu_to_le16(rxbi->len);
-	if (jme->dev->features & NETIF_F_HIGHDMA)
+	if (jme->dev->priv_flags & IFF_HIGHDMA)
 		rxdesc->desc1.flags = RXFLAG_64BIT;
 	wmb();
 	rxdesc->desc1.flags	|= RXFLAG_OWN | RXFLAG_INT;
@@ -2005,7 +2005,7 @@ jme_map_tx_skb(struct jme_adapter *jme, struct sk_buff *skb, int idx)
 	struct jme_ring *txring = &(jme->txring[0]);
 	struct txdesc *txdesc = txring->desc, *ctxdesc;
 	struct jme_buffer_info *txbi = txring->bufinf, *ctxbi;
-	bool hidma = jme->dev->features & NETIF_F_HIGHDMA;
+	bool hidma = jme->dev->priv_flags & IFF_HIGHDMA;
 	int i, nr_frags = skb_shinfo(skb)->nr_frags;
 	int mask = jme->tx_ring_mask;
 	u32 len;
@@ -2969,7 +2969,7 @@ jme_init_one(struct pci_dev *pdev,
 						NETIF_F_HW_VLAN_CTAG_TX |
 						NETIF_F_HW_VLAN_CTAG_RX;
 	if (using_dac)
-		netdev->features	|=	NETIF_F_HIGHDMA;
+		netdev->priv_flags	|=	IFF_HIGHDMA;
 
 	/* MTU range: 1280 - 9202*/
 	netdev->min_mtu = IPV6_MIN_MTU;

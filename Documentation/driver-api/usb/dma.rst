@@ -78,7 +78,7 @@ and effects like cache-trashing can impose subtle penalties.
   way to expose these capabilities ... and in any case, HIGHMEM is mostly a
   design wart specific to x86_32.  So your best bet is to ensure you never
   pass a highmem buffer into a USB driver.  That's easy; it's the default
-  behavior.  Just don't override it; e.g. with ``NETIF_F_HIGHDMA``.
+  behavior.  Just don't override it; e.g. with ``IFF_HIGHDMA``.
 
   This may force your callers to do some bounce buffering, copying from
   high memory to "normal" DMA memory.  If you can come up with a good way

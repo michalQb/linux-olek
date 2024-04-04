@@ -290,8 +290,7 @@ static const struct ethtool_ops ifb_ethtool_ops = {
 
 #define IFB_FEATURES (NETIF_F_HW_CSUM | NETIF_F_SG  | NETIF_F_FRAGLIST	| \
 		      NETIF_F_GSO_SOFTWARE | NETIF_F_GSO_ENCAP_ALL	| \
-		      NETIF_F_HIGHDMA | NETIF_F_HW_VLAN_CTAG_TX		| \
-		      NETIF_F_HW_VLAN_STAG_TX)
+		      NETIF_F_HW_VLAN_CTAG_TX | NETIF_F_HW_VLAN_STAG_TX)
 
 static void ifb_dev_free(struct net_device *dev)
 {
@@ -325,6 +324,7 @@ static void ifb_setup(struct net_device *dev)
 
 	dev->flags |= IFF_NOARP;
 	dev->flags &= ~IFF_MULTICAST;
+	dev->priv_flags |= IFF_HIGHDMA;
 	dev->priv_flags &= ~IFF_TX_SKB_SHARING;
 	netif_keep_dst(dev);
 	eth_hw_addr_random(dev);
