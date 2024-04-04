@@ -108,7 +108,7 @@ static void dummy_setup(struct net_device *dev)
 	/* Fill in device structure with ethernet-generic values. */
 	dev->flags |= IFF_NOARP;
 	dev->flags &= ~IFF_MULTICAST;
-	dev->priv_flags |= IFF_LIVE_ADDR_CHANGE | IFF_NO_QUEUE | IFF_LLTX;
+	dev->priv_flags |= IFF_LIVE_ADDR_CHANGE | IFF_LOGICAL;
 	dev->features	|= NETIF_F_SG | NETIF_F_FRAGLIST;
 	dev->features	|= NETIF_F_GSO_SOFTWARE;
 	dev->features	|= NETIF_F_HW_CSUM | NETIF_F_HIGHDMA;

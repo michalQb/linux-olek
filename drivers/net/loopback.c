@@ -174,8 +174,7 @@ static void gen_lo_setup(struct net_device *dev,
 	dev->addr_len		= ETH_ALEN;	/* 6	*/
 	dev->type		= ARPHRD_LOOPBACK;	/* 0x0001*/
 	dev->flags		= IFF_LOOPBACK;
-	dev->priv_flags		|= IFF_LIVE_ADDR_CHANGE | IFF_NO_QUEUE;
-	dev->priv_flags		|= IFF_LLTX;
+	dev->priv_flags		|= IFF_LIVE_ADDR_CHANGE | IFF_LOGICAL;
 	netif_keep_dst(dev);
 	dev->hw_features	= NETIF_F_GSO_SOFTWARE;
 	dev->features		= NETIF_F_SG | NETIF_F_FRAGLIST

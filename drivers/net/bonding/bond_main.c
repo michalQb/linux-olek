@@ -5875,9 +5875,7 @@ void bond_setup(struct net_device *bond_dev)
 
 	/* Initialize the device options */
 	bond_dev->flags |= IFF_MASTER;
-	bond_dev->priv_flags |= IFF_BONDING | IFF_UNICAST_FLT | IFF_NO_QUEUE;
-	/* don't acquire bond device's netif_tx_lock when transmitting */
-	bond_dev->priv_flags |= IFF_LLTX;
+	bond_dev->priv_flags |= IFF_BONDING | IFF_UNICAST_FLT | IFF_LOGICAL;
 	bond_dev->priv_flags &= ~(IFF_XMIT_DST_RELEASE | IFF_TX_SKB_SHARING);
 
 #ifdef CONFIG_XFRM_OFFLOAD

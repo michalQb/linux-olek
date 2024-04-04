@@ -62,7 +62,7 @@ static const struct net_device_ops nlmon_ops = {
 static void nlmon_setup(struct net_device *dev)
 {
 	dev->type = ARPHRD_NETLINK;
-	dev->priv_flags |= IFF_NO_QUEUE | IFF_LLTX;
+	dev->priv_flags |= IFF_LOGICAL;
 
 	dev->netdev_ops	= &nlmon_ops;
 	dev->ethtool_ops = &nlmon_ethtool_ops;

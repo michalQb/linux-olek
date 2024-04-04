@@ -2180,7 +2180,7 @@ static void team_setup(struct net_device *dev)
 	dev->needs_free_netdev = true;
 	dev->priv_destructor = team_destructor;
 	dev->priv_flags &= ~(IFF_XMIT_DST_RELEASE | IFF_TX_SKB_SHARING);
-	dev->priv_flags |= IFF_NO_QUEUE;
+	dev->priv_flags |= IFF_LOGICAL;
 	dev->priv_flags |= IFF_TEAM;
 
 	/*
@@ -2188,7 +2188,7 @@ static void team_setup(struct net_device *dev)
 	 * bring us to promisc mode in case a unicast addr is added.
 	 * Let this up to underlay drivers.
 	 */
-	dev->priv_flags |= IFF_UNICAST_FLT | IFF_LIVE_ADDR_CHANGE | IFF_LLTX;
+	dev->priv_flags |= IFF_UNICAST_FLT | IFF_LIVE_ADDR_CHANGE;
 
 	dev->features |= NETIF_F_GRO;
 

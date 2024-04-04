@@ -956,7 +956,7 @@ static void gtp_link_setup(struct net_device *dev)
 	dev->flags = IFF_POINTOPOINT | IFF_NOARP | IFF_MULTICAST;
 
 	dev->pcpu_stat_type = NETDEV_PCPU_STAT_TSTATS;
-	dev->priv_flags	|= IFF_NO_QUEUE | IFF_LLTX;
+	dev->priv_flags	|= IFF_LOGICAL;
 	netif_keep_dst(dev);
 
 	dev->needed_headroom	= LL_MAX_HEADER + max_gtp_header_len;

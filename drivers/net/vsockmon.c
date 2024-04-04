@@ -82,7 +82,7 @@ static const struct ethtool_ops vsockmon_ethtool_ops = {
 static void vsockmon_setup(struct net_device *dev)
 {
 	dev->type = ARPHRD_VSOCKMON;
-	dev->priv_flags |= IFF_NO_QUEUE | IFF_LLTX;
+	dev->priv_flags |= IFF_LOGICAL;
 
 	dev->netdev_ops	= &vsockmon_ops;
 	dev->ethtool_ops = &vsockmon_ethtool_ops;
