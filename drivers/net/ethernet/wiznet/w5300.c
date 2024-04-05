@@ -607,7 +607,7 @@ static int w5300_probe(struct platform_device *pdev)
 	/* This chip doesn't support VLAN packets with normal MTU,
 	 * so disable VLAN for this device.
 	 */
-	ndev->features |= NETIF_F_VLAN_CHALLENGED;
+	ndev->priv_flags |= IFF_VLAN_CHALLENGED;
 
 	err = register_netdev(ndev);
 	if (err < 0)

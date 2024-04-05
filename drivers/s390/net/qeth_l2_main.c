@@ -1093,7 +1093,7 @@ static int qeth_l2_setup_netdev(struct qeth_card *card)
 	card->dev->priv_flags |= IFF_UNICAST_FLT;
 
 	if (IS_OSM(card)) {
-		card->dev->features |= NETIF_F_VLAN_CHALLENGED;
+		card->dev->priv_flags |= IFF_VLAN_CHALLENGED;
 	} else {
 		if (!IS_VM_NIC(card))
 			card->dev->hw_features |= NETIF_F_HW_VLAN_CTAG_FILTER;

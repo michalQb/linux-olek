@@ -44,7 +44,7 @@ static int features_prepare_data(const struct ethnl_req_info *req_base,
 	ethnl_features_to_bitmap32(data->hw, dev->hw_features);
 	ethnl_features_to_bitmap32(data->wanted, dev->wanted_features);
 	ethnl_features_to_bitmap32(data->active, dev->features);
-	ethnl_features_to_bitmap32(data->nochange, NETIF_F_NEVER_CHANGE);
+	ethnl_features_to_bitmap32(data->nochange, 0);
 	all_features = GENMASK_ULL(NETDEV_FEATURE_COUNT - 1, 0);
 	ethnl_features_to_bitmap32(data->all, all_features);
 

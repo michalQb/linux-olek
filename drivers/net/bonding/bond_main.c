@@ -1864,8 +1864,8 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev,
 
 	/* vlan challenged mutual exclusion */
 	/* no need to lock since we're protected by rtnl_lock */
-	if (slave_dev->features & NETIF_F_VLAN_CHALLENGED) {
-		slave_dbg(bond_dev, slave_dev, "is NETIF_F_VLAN_CHALLENGED\n");
+	if (slave_dev->priv_flags & IFF_VLAN_CHALLENGED) {
+		slave_dbg(bond_dev, slave_dev, "is IFF_VLAN_CHALLENGED\n");
 		if (vlan_uses_dev(bond_dev)) {
 			SLAVE_NL_ERR(bond_dev, slave_dev, extack,
 				     "Can not enslave VLAN challenged device to VLAN enabled bond");
@@ -1874,7 +1874,7 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev,
 			slave_warn(bond_dev, slave_dev, "enslaved VLAN challenged slave. Adding VLANs will be blocked as long as it is part of bond.\n");
 		}
 	} else {
-		slave_dbg(bond_dev, slave_dev, "is !NETIF_F_VLAN_CHALLENGED\n");
+		slave_dbg(bond_dev, slave_dev, "is !IFF_VLAN_CHALLENGED\n");
 	}
 
 	if (slave_dev->features & NETIF_F_HW_ESP)
@@ -2363,10 +2363,10 @@ static int __bond_release_one(struct net_device *bond_dev,
 			      bool all, bool unregister)
 {
 	struct bonding *bond = netdev_priv(bond_dev);
+	u64 old_priv_flags = bond_dev->priv_flags;
 	struct slave *slave, *oldcurrent;
 	struct sockaddr_storage ss;
 	int old_flags = bond_dev->flags;
-	netdev_features_t old_features = bond_dev->features;
 
 	/* slave is not a slave or master is not master of this slave */
 	if (!(slave_dev->flags & IFF_SLAVE) ||
@@ -2470,8 +2470,8 @@ static int __bond_release_one(struct net_device *bond_dev,
 	}
 
 	bond_compute_features(bond);
-	if (!(bond_dev->features & NETIF_F_VLAN_CHALLENGED) &&
-	    (old_features & NETIF_F_VLAN_CHALLENGED))
+	if (!(bond_dev->priv_flags & IFF_VLAN_CHALLENGED) &&
+	    (old_priv_flags & IFF_VLAN_CHALLENGED))
 		slave_info(bond_dev, slave_dev, "last VLAN challenged slave left bond - VLAN blocking is removed\n");
 
 	vlan_vids_del_by_dev(slave_dev, bond_dev);

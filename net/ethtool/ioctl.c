@@ -96,8 +96,7 @@ static int ethtool_get_features(struct net_device *dev, void __user *useraddr)
 		features[i].available = (u32)(dev->hw_features >> (32 * i));
 		features[i].requested = (u32)(dev->wanted_features >> (32 * i));
 		features[i].active = (u32)(dev->features >> (32 * i));
-		features[i].never_changed =
-			(u32)(NETIF_F_NEVER_CHANGE >> (32 * i));
+		features[i].never_changed = 0;
 	}
 
 	sizeaddr = useraddr + offsetof(struct ethtool_gfeatures, size);

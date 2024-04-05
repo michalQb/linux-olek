@@ -11503,7 +11503,6 @@ netdev_features_t netdev_increment_features(netdev_features_t all,
 {
 	if (mask & NETIF_F_HW_CSUM)
 		mask |= NETIF_F_CSUM_MASK;
-	mask |= NETIF_F_VLAN_CHALLENGED;
 
 	all |= one & (NETIF_F_ONE_FOR_ALL | NETIF_F_CSUM_MASK) & mask;
 	all &= one | ~NETIF_F_ALL_FOR_ALL;
@@ -11518,6 +11517,8 @@ EXPORT_SYMBOL(netdev_increment_features);
 
 u64 netdev_increment_priv_flags(u64 all, u64 one, u64 mask)
 {
+	mask |= IFF_VLAN_CHALLENGED;
+
 	all |= one & IFF_ONE_FOR_ALL & mask;
 	all &= one | ~IFF_ALL_FOR_ALL;
 

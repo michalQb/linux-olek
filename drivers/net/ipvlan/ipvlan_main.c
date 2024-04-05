@@ -113,9 +113,6 @@ static void ipvlan_port_destroy(struct net_device *dev)
 	(NETIF_F_SG | NETIF_F_HW_CSUM | \
 	 NETIF_F_GSO_ROBUST | NETIF_F_GSO_SOFTWARE | NETIF_F_GSO_ENCAP_ALL)
 
-#define IPVLAN_ALWAYS_ON \
-	(IPVLAN_ALWAYS_ON_OFLOADS | NETIF_F_VLAN_CHALLENGED)
-
 #define IPVLAN_FEATURES \
 	(NETIF_F_SG | NETIF_F_HW_CSUM | NETIF_F_FRAGLIST | \
 	 NETIF_F_GSO | NETIF_F_ALL_TSO | NETIF_F_GSO_ROBUST | \
@@ -137,11 +134,12 @@ static int ipvlan_init(struct net_device *dev)
 	dev->state = (dev->state & ~IPVLAN_STATE_MASK) |
 		     (phy_dev->state & IPVLAN_STATE_MASK);
 	dev->features = phy_dev->features & IPVLAN_FEATURES;
-	dev->features |= IPVLAN_ALWAYS_ON;
+	dev->features |= IPVLAN_ALWAYS_ON_OFLOADS;
 	dev->vlan_features = phy_dev->vlan_features & IPVLAN_FEATURES;
 	dev->vlan_features |= IPVLAN_ALWAYS_ON_OFLOADS;
 	dev->hw_enc_features |= dev->features;
 	dev->priv_flags |= IFF_LLTX | (phy_dev->priv_flags & IFF_HIGHDMA);
+	dev->priv_flags |= IFF_VLAN_CHALLENGED;
 	netif_inherit_tso_max(dev, phy_dev);
 	dev->hard_header_len = phy_dev->hard_header_len;
 
@@ -245,8 +243,8 @@ static netdev_features_t ipvlan_fix_features(struct net_device *dev,
 	features &= (ipvlan->sfeatures | ~IPVLAN_FEATURES);
 	features = netdev_increment_features(ipvlan->phy_dev->features,
 					     features, features);
-	features |= IPVLAN_ALWAYS_ON;
-	features &= (IPVLAN_FEATURES | IPVLAN_ALWAYS_ON);
+	features |= IPVLAN_ALWAYS_ON_OFLOADS;
+	features &= (IPVLAN_FEATURES | IPVLAN_ALWAYS_ON_OFLOADS);
 
 	return features;
 }

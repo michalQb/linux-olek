@@ -1653,6 +1653,7 @@ struct net_device_ops {
  *	such as tunnels.
  * @IFF_NETNS_LOCAL: interface can't change network namespaces
  * @IFF_HIGHDMA: device can transmit buffers from high memory
+ * @IFF_VLAN_CHALLENGED: device can't handle VLAN packets
  * @IFF_LOGICAL: combines @IFF_NO_QUEUE and @IFF_LLTX, used by logical
  *	interfaces to avoid overhead from locking and Qdisc.
  * @IFF_ONE_FOR_ALL: if one interface supports them, enable them for all in
@@ -1698,8 +1699,9 @@ enum netdev_priv_flags {
 	IFF_LLTX			= BIT_ULL(34),
 	IFF_NETNS_LOCAL			= BIT_ULL(35),
 	IFF_HIGHDMA			= BIT_ULL(36),
+	IFF_VLAN_CHALLENGED		= BIT_ULL(37),
 	IFF_LOGICAL			= IFF_NO_QUEUE | IFF_LLTX,
-	IFF_ONE_FOR_ALL			= IFF_HIGHDMA,
+	IFF_ONE_FOR_ALL			= IFF_HIGHDMA | IFF_VLAN_CHALLENGED,
 	IFF_ALL_FOR_ALL			= IFF_XMIT_DST_RELEASE |
 					  IFF_XMIT_DST_RELEASE_PERM,
 };

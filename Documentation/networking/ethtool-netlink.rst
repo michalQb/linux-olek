@@ -763,7 +763,7 @@ Kernel response contents:
   ``ETHTOOL_A_FEATURES_HW``             bitset  dev->hw_features
   ``ETHTOOL_A_FEATURES_WANTED``         bitset  dev->wanted_features
   ``ETHTOOL_A_FEATURES_ACTIVE``         bitset  dev->features
-  ``ETHTOOL_A_FEATURES_NOCHANGE``       bitset  NETIF_F_NEVER_CHANGE
+  ``ETHTOOL_A_FEATURES_NOCHANGE``       bitset  0
   ====================================  ======  ==========================
 
 Bitmaps in kernel response have the same meaning as bitmaps used in ioctl

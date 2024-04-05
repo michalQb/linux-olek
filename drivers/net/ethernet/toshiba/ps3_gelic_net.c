@@ -1499,7 +1499,7 @@ int gelic_net_setup_netdev(struct net_device *netdev, struct gelic_card *card)
 		 * As vlan is internally used,
 		 * we can not receive vlan packets
 		 */
-		netdev->features |= NETIF_F_VLAN_CHALLENGED;
+		netdev->priv_flags |= IFF_VLAN_CHALLENGED;
 	}
 
 	/* MTU range: 64 - 1518 */
@@ -1885,4 +1885,3 @@ module_init(ps3_gelic_driver_init);
 module_exit(ps3_gelic_driver_exit);
 
 MODULE_ALIAS(PS3_MODULE_ALIAS_GELIC);
-

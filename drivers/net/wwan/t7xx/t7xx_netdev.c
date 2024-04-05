@@ -231,8 +231,7 @@ static void t7xx_ccmni_wwan_setup(struct net_device *dev)
 	dev->watchdog_timeo = CCMNI_NETDEV_WDT_TO;
 
 	dev->flags = IFF_POINTOPOINT | IFF_NOARP;
-
-	dev->features = NETIF_F_VLAN_CHALLENGED;
+	dev->priv_flags |= IFF_VLAN_CHALLENGED;
 
 	dev->features |= NETIF_F_SG;
 	dev->hw_features |= NETIF_F_SG;

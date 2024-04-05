@@ -1655,9 +1655,6 @@ static void vrf_setup(struct net_device *dev)
 	/* Fill in device structure with ethernet-generic values. */
 	eth_hw_addr_random(dev);
 
-	/* does not make sense for a VLAN to be added to a vrf device */
-	dev->features   |= NETIF_F_VLAN_CHALLENGED;
-
 	/* enable offload features */
 	dev->features   |= NETIF_F_GSO_SOFTWARE;
 	dev->features   |= NETIF_F_RXCSUM | NETIF_F_HW_CSUM | NETIF_F_SCTP_CRC;
@@ -1670,6 +1667,8 @@ static void vrf_setup(struct net_device *dev)
 	dev->priv_flags |= IFF_NO_RX_HANDLER;
 	dev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
 	dev->priv_flags |= IFF_HIGHDMA;
+	/* does not make sense for a VLAN to be added to a vrf device */
+	dev->priv_flags |= IFF_VLAN_CHALLENGED;
 
 	/* VRF devices do not care about MTU, but if the MTU is set
 	 * too low then the ipv4 and ipv6 protocols are disabled
