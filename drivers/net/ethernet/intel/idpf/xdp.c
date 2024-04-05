@@ -484,7 +484,7 @@ static int idpf_xdp_reconfig_queues(struct idpf_vport *vport)
 				       vport->num_rxq, vport->num_bufq);
 	if (err) {
 		netdev_err(vport->netdev,
-			   "Could not add queues for XDP, VC message sent failed\n");
+			   "Could not add queues for XDP, VC message sent failed, error %d\n", err);
 		return err;
 	}
 
@@ -502,6 +502,7 @@ static int
 idpf_xdp_setup_prog(struct idpf_vport *vport, struct netdev_bpf *xdp)
 {
 	struct idpf_netdev_priv *np = netdev_priv(vport->netdev);
+	struct idpf_adapter *adapter = np->adapter;
 	struct bpf_prog *prog = xdp->prog;
 	struct xdp_attachment_info *info;
 	bool needs_reconfig, vport_is_up;
@@ -512,6 +513,13 @@ idpf_xdp_setup_prog(struct idpf_vport *vport, struct netdev_bpf *xdp)
 
 	info = &vport->adapter->vport_config[idx]->user_config.xdp;
 	needs_reconfig = !!info->prog != !!prog;
+
+	if (vport->netdev->reg_state == NETREG_UNREGISTERING && !prog) {
+		libeth_xdp_set_redirect(vport->netdev, prog);
+		xdp_attachment_setup(info, xdp);
+
+		return 0;
+	}
 
 	if (!needs_reconfig) {
 		idpf_copy_xdp_prog_to_qs(vport, prog);
