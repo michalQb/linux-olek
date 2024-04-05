@@ -485,6 +485,7 @@ static int idpf_xdp_reconfig_queues(struct idpf_vport *vport)
 	if (err) {
 		netdev_err(vport->netdev,
 			   "Could not add queues for XDP, VC message sent failed, error %d\n", err);
+		idpf_vport_queues_rel(vport);
 		return err;
 	}
 
@@ -554,6 +555,8 @@ idpf_xdp_setup_prog(struct idpf_vport *vport, struct netdev_bpf *xdp)
 					   "Could not reopen the vport after XDP setup");
 			return err;
 		}
+	} else {
+		idpf_vport_queues_rel(vport);
 	}
 
 	return 0;
