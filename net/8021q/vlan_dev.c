@@ -570,6 +570,7 @@ static int vlan_dev_init(struct net_device *dev)
 
 	dev->features |= dev->hw_features;
 	dev->priv_flags |= IFF_LLTX | (real_dev->priv_flags & IFF_HIGHDMA);
+	dev->priv_flags |= IFF_FCOE_MTU;
 	netif_inherit_tso_max(dev, real_dev);
 	if (dev->features & NETIF_F_VLAN_FEATURES)
 		netdev_warn(real_dev, "VLAN features are set incorrectly.  Q-in-Q configurations may not work correctly.\n");
