@@ -3587,6 +3587,12 @@ static inline void netdev_tx_reset_queue(struct netdev_queue *q)
 #endif
 }
 
+static inline void netdev_tx_reset_subqueue(const struct net_device *dev,
+					    u32 qid)
+{
+	netdev_tx_reset_queue(netdev_get_tx_queue(dev, qid));
+}
+
 /**
  * 	netdev_reset_queue - reset the packets and bytes count of a network device
  * 	@dev_queue: network device
