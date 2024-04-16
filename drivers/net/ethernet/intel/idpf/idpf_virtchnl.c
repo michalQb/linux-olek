@@ -2325,7 +2325,7 @@ int idpf_send_get_stats_msg(struct idpf_vport *vport)
 	netstats->rx_dropped = le64_to_cpu(stats_msg.rx_discards);
 	netstats->tx_dropped = le64_to_cpu(stats_msg.tx_discards);
 
-	vport->port_stats.vport_stats = stats_msg;
+	memcpy(&vport->vport_stats, &stats_msg, sizeof(stats_msg));
 
 	spin_unlock_bh(&np->stats_lock);
 

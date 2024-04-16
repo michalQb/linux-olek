@@ -129,6 +129,8 @@ static void idpf_tx_buf_rel_all(struct idpf_tx_queue *txq)
 static void idpf_tx_desc_rel(struct idpf_tx_queue *txq)
 {
 	idpf_tx_buf_rel_all(txq);
+
+	libeth_sq_stats_deinit(txq->netdev, txq->idx);
 	netdev_tx_reset_subqueue(txq->netdev, txq->idx);
 
 	if (!txq->desc_ring)
@@ -261,6 +263,8 @@ static int idpf_tx_desc_alloc(const struct idpf_vport *vport,
 	tx_q->next_to_use = 0;
 	tx_q->next_to_clean = 0;
 	idpf_queue_set(GEN_CHK, tx_q);
+
+	libeth_sq_stats_init(vport->netdev, &tx_q->stats, tx_q->idx);
 
 	return 0;
 
@@ -476,6 +480,8 @@ static void idpf_rx_desc_rel(struct idpf_rx_queue *rxq, struct device *dev,
 
 	if (!idpf_is_queue_model_split(model))
 		idpf_rx_buf_rel_all(rxq);
+
+	libeth_rq_stats_deinit(rxq->netdev, rxq->idx);
 
 	rxq->next_to_alloc = 0;
 	rxq->next_to_clean = 0;
@@ -876,6 +882,8 @@ static int idpf_rx_desc_alloc(const struct idpf_vport *vport,
 	rxq->next_to_clean = 0;
 	rxq->next_to_use = 0;
 	idpf_queue_set(GEN_CHK, rxq);
+
+	libeth_rq_stats_init(vport->netdev, &rxq->stats, rxq->idx);
 
 	return 0;
 }
@@ -1660,7 +1668,7 @@ static void idpf_tx_handle_sw_marker(struct idpf_tx_queue *tx_q)
  */
 static void idpf_tx_clean_stashed_bufs(struct idpf_tx_queue *txq,
 				       u16 compl_tag,
-				       struct idpf_cleaned_stats *cleaned,
+				       struct libeth_sq_napi_stats *cleaned,
 				       int budget)
 {
 	struct libeth_cq_pp cp = {
@@ -1761,7 +1769,7 @@ do {								\
  */
 static bool idpf_tx_splitq_clean(struct idpf_tx_queue *tx_q, u16 end,
 				 int napi_budget,
-				 struct idpf_cleaned_stats *cleaned,
+				 struct libeth_sq_napi_stats *cleaned,
 				 bool descs_only)
 {
 	union idpf_tx_flex_desc *next_pending_desc = NULL;
@@ -1853,7 +1861,7 @@ do {							\
  * this completion tag.
  */
 static bool idpf_tx_clean_buf_ring(struct idpf_tx_queue *txq, u16 compl_tag,
-				   struct idpf_cleaned_stats *cleaned,
+				   struct libeth_sq_napi_stats *cleaned,
 				   int budget)
 {
 	u16 idx = compl_tag & txq->compl_tag_bufid_m;
@@ -1931,7 +1939,7 @@ static bool idpf_tx_clean_buf_ring(struct idpf_tx_queue *txq, u16 compl_tag,
  */
 static void idpf_tx_handle_rs_completion(struct idpf_tx_queue *txq,
 					 struct idpf_splitq_tx_compl_desc *desc,
-					 struct idpf_cleaned_stats *cleaned,
+					 struct libeth_sq_napi_stats *cleaned,
 					 int budget)
 {
 	u16 compl_tag;
@@ -1975,7 +1983,7 @@ static bool idpf_tx_clean_complq(struct idpf_compl_queue *complq, int budget,
 	ntc -= complq->desc_count;
 
 	do {
-		struct idpf_cleaned_stats cleaned_stats = { };
+		struct libeth_sq_napi_stats cleaned_stats = { };
 		struct idpf_tx_queue *tx_q;
 		int rel_tx_qid;
 		u16 hw_head;
@@ -2021,13 +2029,10 @@ static bool idpf_tx_clean_complq(struct idpf_compl_queue *complq, int budget,
 			goto fetch_next_desc;
 		}
 
-		u64_stats_update_begin(&tx_q->stats_sync);
-		u64_stats_add(&tx_q->q_stats.packets, cleaned_stats.packets);
-		u64_stats_add(&tx_q->q_stats.bytes, cleaned_stats.bytes);
+		libeth_sq_napi_stats_add(&tx_q->stats, &cleaned_stats);
 		tx_q->cleaned_pkts += cleaned_stats.packets;
 		tx_q->cleaned_bytes += cleaned_stats.bytes;
 		complq->num_completions++;
-		u64_stats_update_end(&tx_q->stats_sync);
 
 fetch_next_desc:
 		tx_desc++;
@@ -2154,9 +2159,7 @@ static int idpf_tx_maybe_stop_splitq(struct idpf_tx_queue *tx_q,
 	return 0;
 
 splitq_stop:
-	u64_stats_update_begin(&tx_q->stats_sync);
-	u64_stats_inc(&tx_q->q_stats.q_busy);
-	u64_stats_update_end(&tx_q->stats_sync);
+	libeth_stats_inc_one(&tx_q->stats, busy);
 	netif_stop_subqueue(tx_q->netdev, tx_q->idx);
 
 out:
@@ -2234,9 +2237,7 @@ unsigned int idpf_tx_desc_count_required(struct idpf_tx_queue *txq,
 			return 0;
 
 		count = idpf_size_to_txd_count(skb->len);
-		u64_stats_update_begin(&txq->stats_sync);
-		u64_stats_inc(&txq->q_stats.linearize);
-		u64_stats_update_end(&txq->stats_sync);
+		libeth_stats_inc_one(&txq->stats, linearized);
 	}
 
 	return count;
@@ -2258,9 +2259,7 @@ void idpf_tx_dma_map_error(struct idpf_tx_queue *txq, struct sk_buff *skb,
 		.ss	= &ss,
 	};
 
-	u64_stats_update_begin(&txq->stats_sync);
-	u64_stats_inc(&txq->q_stats.dma_map_errs);
-	u64_stats_update_end(&txq->stats_sync);
+	libeth_stats_inc_one(&txq->stats, dma_map_errs);
 
 	/* clear dma mappings for failed tx_buf map */
 	for (;;) {
@@ -2500,11 +2499,13 @@ static void idpf_tx_splitq_map(struct idpf_tx_queue *tx_q,
  * idpf_tso - computes mss and TSO length to prepare for TSO
  * @skb: pointer to skb
  * @off: pointer to struct that holds offload parameters
+ * @ss: SQ xmit onstack stats
  *
  * Returns error (negative) if TSO was requested but cannot be applied to the
  * given skb, 0 if TSO does not apply to the given skb, or 1 otherwise.
  */
-int idpf_tso(struct sk_buff *skb, struct idpf_tx_offload_params *off)
+int idpf_tso(struct sk_buff *skb, struct idpf_tx_offload_params *off,
+	     struct libeth_sq_xmit_stats *ss)
 {
 	const struct skb_shared_info *shinfo;
 	union {
@@ -2551,6 +2552,8 @@ int idpf_tso(struct sk_buff *skb, struct idpf_tx_offload_params *off)
 		csum_replace_by_diff(&l4.tcp->check,
 				     (__force __wsum)htonl(paylen));
 		off->tso_hdr_len = __tcp_hdrlen(l4.tcp) + l4_start;
+
+		ss->tso++;
 		break;
 	case SKB_GSO_UDP_L4:
 		csum_replace_by_diff(&l4.udp->check,
@@ -2558,6 +2561,8 @@ int idpf_tso(struct sk_buff *skb, struct idpf_tx_offload_params *off)
 		/* compute length of segmentation header */
 		off->tso_hdr_len = sizeof(struct udphdr) + l4_start;
 		l4.udp->len = htons(shinfo->gso_size + sizeof(struct udphdr));
+
+		ss->uso++;
 		break;
 	default:
 		return -EINVAL;
@@ -2707,10 +2712,7 @@ idpf_tx_splitq_get_ctx_desc(struct idpf_tx_queue *txq)
  */
 netdev_tx_t idpf_tx_drop_skb(struct idpf_tx_queue *tx_q, struct sk_buff *skb)
 {
-	u64_stats_update_begin(&tx_q->stats_sync);
-	u64_stats_inc(&tx_q->q_stats.skb_drops);
-	u64_stats_update_end(&tx_q->stats_sync);
-
+	libeth_stats_inc_one(&tx_q->stats, drops);
 	idpf_tx_buf_hw_update(tx_q, tx_q->next_to_use, false);
 
 	dev_kfree_skb(skb);
@@ -2729,6 +2731,7 @@ static netdev_tx_t idpf_tx_splitq_frame(struct sk_buff *skb,
 					struct idpf_tx_queue *tx_q)
 {
 	struct idpf_tx_splitq_params tx_params = { };
+	struct libeth_sq_xmit_stats ss = { };
 	struct idpf_tx_buf *first;
 	unsigned int count;
 	int tso;
@@ -2737,7 +2740,7 @@ static netdev_tx_t idpf_tx_splitq_frame(struct sk_buff *skb,
 	if (unlikely(!count))
 		return idpf_tx_drop_skb(tx_q, skb);
 
-	tso = idpf_tso(skb, &tx_params.offload);
+	tso = idpf_tso(skb, &tx_params.offload, &ss);
 	if (unlikely(tso < 0))
 		return idpf_tx_drop_skb(tx_q, skb);
 
@@ -2764,10 +2767,6 @@ static netdev_tx_t idpf_tx_splitq_frame(struct sk_buff *skb,
 				cpu_to_le16(tx_params.offload.mss &
 					    IDPF_TXD_FLEX_CTX_MSS_RT_M);
 		ctx_desc->tso.qw0.hdr_len = tx_params.offload.tso_hdr_len;
-
-		u64_stats_update_begin(&tx_q->stats_sync);
-		u64_stats_inc(&tx_q->q_stats.lso_pkts);
-		u64_stats_update_end(&tx_q->stats_sync);
 	}
 
 	/* record the location of the first descriptor for this packet */
@@ -2808,6 +2807,9 @@ static netdev_tx_t idpf_tx_splitq_frame(struct sk_buff *skb,
 	}
 
 	idpf_tx_splitq_map(tx_q, &tx_params, first);
+
+	libeth_stats_add_frags(&ss, count);
+	libeth_sq_xmit_stats_add(&tx_q->stats, &ss);
 
 	return NETDEV_TX_OK;
 }
@@ -2921,9 +2923,7 @@ static void idpf_rx_csum(struct idpf_rx_queue *rxq, struct sk_buff *skb,
 	return;
 
 checksum_fail:
-	u64_stats_update_begin(&rxq->stats_sync);
-	u64_stats_inc(&rxq->q_stats.hw_csum_err);
-	u64_stats_update_end(&rxq->stats_sync);
+	libeth_stats_inc_one(&rxq->stats, csum_errs);
 }
 
 /**
@@ -2963,6 +2963,7 @@ idpf_rx_splitq_extract_csum_bits(const struct virtchnl2_rx_flex_desc_adv_nic_3 *
  * @skb : pointer to current skb being populated
  * @rx_desc: Receive descriptor
  * @decoded: Decoded Rx packet type related fields
+ * @ss: RQ polling onstack stats
  *
  * Return 0 on success and error code on failure
  *
@@ -2971,7 +2972,8 @@ idpf_rx_splitq_extract_csum_bits(const struct virtchnl2_rx_flex_desc_adv_nic_3 *
  */
 static int idpf_rx_rsc(struct idpf_rx_queue *rxq, struct sk_buff *skb,
 		       const struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc,
-		       struct libeth_rx_pt decoded)
+		       struct libeth_rx_pt decoded,
+		       struct libeth_rq_napi_stats *ss)
 {
 	u16 rsc_segments, rsc_seg_len;
 	bool ipv4, ipv6;
@@ -3022,10 +3024,7 @@ static int idpf_rx_rsc(struct idpf_rx_queue *rxq, struct sk_buff *skb,
 	}
 
 	tcp_gro_complete(skb);
-
-	u64_stats_update_begin(&rxq->stats_sync);
-	u64_stats_inc(&rxq->q_stats.rsc_pkts);
-	u64_stats_update_end(&rxq->stats_sync);
+	ss->gro_hw++;
 
 	return 0;
 }
@@ -3035,6 +3034,7 @@ static int idpf_rx_rsc(struct idpf_rx_queue *rxq, struct sk_buff *skb,
  * @rxq: Rx descriptor ring packet is being transacted on
  * @skb: pointer to current skb being populated
  * @rx_desc: Receive descriptor
+ * @ss: RQ polling onstack stats
  *
  * This function checks the ring, descriptor, and packet information in
  * order to populate the hash, checksum, protocol, and
@@ -3042,7 +3042,8 @@ static int idpf_rx_rsc(struct idpf_rx_queue *rxq, struct sk_buff *skb,
  */
 static int
 idpf_rx_process_skb_fields(struct idpf_rx_queue *rxq, struct sk_buff *skb,
-			   const struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc)
+			   const struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc,
+			   struct libeth_rq_napi_stats *ss)
 {
 	struct idpf_rx_csum_decoded csum_bits = { };
 	struct libeth_rx_pt decoded;
@@ -3059,7 +3060,7 @@ idpf_rx_process_skb_fields(struct idpf_rx_queue *rxq, struct sk_buff *skb,
 
 	if (le16_get_bits(rx_desc->hdrlen_flags,
 			  VIRTCHNL2_RX_FLEX_DESC_ADV_RSC_M))
-		return idpf_rx_rsc(rxq, skb, rx_desc, decoded);
+		return idpf_rx_rsc(rxq, skb, rx_desc, decoded, ss);
 
 	idpf_rx_splitq_extract_csum_bits(rx_desc, &csum_bits);
 	idpf_rx_csum(rxq, skb, csum_bits, decoded);
@@ -3177,13 +3178,13 @@ static bool idpf_rx_splitq_is_eop(struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_de
  */
 static int idpf_rx_splitq_clean(struct idpf_rx_queue *rxq, int budget)
 {
-	int total_rx_bytes = 0, total_rx_pkts = 0;
 	struct idpf_buf_queue *rx_bufq = NULL;
+	struct libeth_rq_napi_stats rs = { };
 	struct sk_buff *skb = rxq->skb;
 	u16 ntc = rxq->next_to_clean;
 
 	/* Process Rx packets bounded by budget */
-	while (likely(total_rx_pkts < budget)) {
+	while (likely(rs.packets < budget)) {
 		struct virtchnl2_rx_flex_desc_adv_nic_3 *rx_desc;
 		struct libeth_fqe *hdr, *rx_buf = NULL;
 		struct idpf_sw_queue *refillq = NULL;
@@ -3213,9 +3214,7 @@ static int idpf_rx_splitq_clean(struct idpf_rx_queue *rxq, int budget)
 				  rx_desc->rxdid_ucast);
 		if (rxdid != VIRTCHNL2_RXDID_2_FLEX_SPLITQ) {
 			IDPF_RX_BUMP_NTC(rxq, ntc);
-			u64_stats_update_begin(&rxq->stats_sync);
-			u64_stats_inc(&rxq->q_stats.bad_descs);
-			u64_stats_update_end(&rxq->stats_sync);
+			libeth_stats_inc_one(&rxq->stats, dma_errs);
 			continue;
 		}
 
@@ -3260,9 +3259,7 @@ static int idpf_rx_splitq_clean(struct idpf_rx_queue *rxq, int budget)
 			hdr_len = idpf_rx_hsplit_wa(hdr, rx_buf, pkt_len);
 			pkt_len -= hdr_len;
 
-			u64_stats_update_begin(&rxq->stats_sync);
-			u64_stats_inc(&rxq->q_stats.hsplit_buf_ovf);
-			u64_stats_update_end(&rxq->stats_sync);
+			libeth_stats_inc_one(&rxq->stats, hsplit_errs);
 		}
 
 		if (libeth_rx_sync_for_cpu(hdr, hdr_len)) {
@@ -3270,9 +3267,7 @@ static int idpf_rx_splitq_clean(struct idpf_rx_queue *rxq, int budget)
 			if (!skb)
 				break;
 
-			u64_stats_update_begin(&rxq->stats_sync);
-			u64_stats_inc(&rxq->q_stats.hsplit_pkts);
-			u64_stats_update_end(&rxq->stats_sync);
+			rs.hsplit++;
 		}
 
 		hdr->page = NULL;
@@ -3307,10 +3302,11 @@ skip_data:
 		}
 
 		/* probably a little skewed due to removing CRC */
-		total_rx_bytes += skb->len;
+		rs.bytes += skb->len;
 
 		/* protocol */
-		if (unlikely(idpf_rx_process_skb_fields(rxq, skb, rx_desc))) {
+		if (unlikely(idpf_rx_process_skb_fields(rxq, skb, rx_desc,
+							&rs))) {
 			dev_kfree_skb_any(skb);
 			skb = NULL;
 			continue;
@@ -3321,19 +3317,15 @@ skip_data:
 		skb = NULL;
 
 		/* update budget accounting */
-		total_rx_pkts++;
+		rs.packets++;
 	}
 
 	rxq->next_to_clean = ntc;
 
 	rxq->skb = skb;
-	u64_stats_update_begin(&rxq->stats_sync);
-	u64_stats_add(&rxq->q_stats.packets, total_rx_pkts);
-	u64_stats_add(&rxq->q_stats.bytes, total_rx_bytes);
-	u64_stats_update_end(&rxq->stats_sync);
+	libeth_rq_napi_stats_add(&rxq->stats, &rs);
 
-	/* guarantee a trip back through this routine if there was a failure */
-	return total_rx_pkts;
+	return rs.packets;
 }
 
 /**
@@ -3665,10 +3657,10 @@ static void idpf_net_dim(struct idpf_q_vector *q_vector)
 		unsigned int start;
 
 		do {
-			start = u64_stats_fetch_begin(&txq->stats_sync);
-			packets += u64_stats_read(&txq->q_stats.packets);
-			bytes += u64_stats_read(&txq->q_stats.bytes);
-		} while (u64_stats_fetch_retry(&txq->stats_sync, start));
+			start = u64_stats_fetch_begin(&txq->stats.syncp);
+			packets += u64_stats_read(&txq->stats.packets);
+			bytes += u64_stats_read(&txq->stats.bytes);
+		} while (u64_stats_fetch_retry(&txq->stats.syncp, start));
 	}
 
 	idpf_update_dim_sample(q_vector, &dim_sample, &q_vector->tx_dim,
@@ -3684,10 +3676,10 @@ check_rx_itr:
 		unsigned int start;
 
 		do {
-			start = u64_stats_fetch_begin(&rxq->stats_sync);
-			packets += u64_stats_read(&rxq->q_stats.packets);
-			bytes += u64_stats_read(&rxq->q_stats.bytes);
-		} while (u64_stats_fetch_retry(&rxq->stats_sync, start));
+			start = u64_stats_fetch_begin(&rxq->stats.syncp);
+			packets += u64_stats_read(&rxq->stats.packets);
+			bytes += u64_stats_read(&rxq->stats.bytes);
+		} while (u64_stats_fetch_retry(&rxq->stats.syncp, start));
 	}
 
 	idpf_update_dim_sample(q_vector, &dim_sample, &q_vector->rx_dim,

@@ -337,10 +337,6 @@ static void idpf_tx_singleq_build_ctx_desc(struct idpf_tx_queue *txq,
 		qw1 |= FIELD_PREP(IDPF_TXD_CTX_QW1_TSO_LEN_M,
 				  offload->tso_len);
 		qw1 |= FIELD_PREP(IDPF_TXD_CTX_QW1_MSS_M, offload->mss);
-
-		u64_stats_update_begin(&txq->stats_sync);
-		u64_stats_inc(&txq->q_stats.lso_pkts);
-		u64_stats_update_end(&txq->stats_sync);
 	}
 
 	desc->qw0.tunneling_params = cpu_to_le32(offload->cd_tunneling);
@@ -361,6 +357,7 @@ netdev_tx_t idpf_tx_singleq_frame(struct sk_buff *skb,
 				  struct idpf_tx_queue *tx_q)
 {
 	struct idpf_tx_offload_params offload = { };
+	struct libeth_sq_xmit_stats ss = { };
 	struct idpf_tx_buf *first;
 	unsigned int count;
 	__be16 protocol;
@@ -384,7 +381,7 @@ netdev_tx_t idpf_tx_singleq_frame(struct sk_buff *skb,
 	else if (protocol == htons(ETH_P_IPV6))
 		offload.tx_flags |= IDPF_TX_FLAGS_IPV6;
 
-	tso = idpf_tso(skb, &offload);
+	tso = idpf_tso(skb, &offload, &ss);
 	if (tso < 0)
 		goto out_drop;
 
@@ -407,6 +404,9 @@ netdev_tx_t idpf_tx_singleq_frame(struct sk_buff *skb,
 		first->packets = 1;
 	}
 	idpf_tx_singleq_map(tx_q, first, &offload);
+
+	libeth_stats_add_frags(&ss, count);
+	libeth_sq_xmit_stats_add(&tx_q->stats, &ss);
 
 	return NETDEV_TX_OK;
 
@@ -504,11 +504,7 @@ fetch_next_txq_desc:
 	tx_q->next_to_clean = ntc;
 
 	*cleaned += ss.packets;
-
-	u64_stats_update_begin(&tx_q->stats_sync);
-	u64_stats_add(&tx_q->q_stats.packets, ss.packets);
-	u64_stats_add(&tx_q->q_stats.bytes, ss.bytes);
-	u64_stats_update_end(&tx_q->stats_sync);
+	libeth_sq_napi_stats_add(&tx_q->stats, &ss);
 
 	np = netdev_priv(tx_q->netdev);
 	nq = netdev_get_tx_queue(tx_q->netdev, tx_q->idx);
@@ -644,9 +640,7 @@ static void idpf_rx_singleq_csum(struct idpf_rx_queue *rxq,
 	return;
 
 checksum_fail:
-	u64_stats_update_begin(&rxq->stats_sync);
-	u64_stats_inc(&rxq->q_stats.hw_csum_err);
-	u64_stats_update_end(&rxq->stats_sync);
+	libeth_stats_inc_one(&rxq->stats, csum_errs);
 }
 
 /**
@@ -962,14 +956,14 @@ idpf_rx_singleq_extract_fields(const struct idpf_rx_queue *rx_q,
  */
 static int idpf_rx_singleq_clean(struct idpf_rx_queue *rx_q, int budget)
 {
-	unsigned int total_rx_bytes = 0, total_rx_pkts = 0;
+	struct libeth_rq_napi_stats rs = { };
 	struct sk_buff *skb = rx_q->skb;
 	u16 ntc = rx_q->next_to_clean;
 	u16 cleaned_count = 0;
 	bool failure = false;
 
 	/* Process Rx packets bounded by budget */
-	while (likely(total_rx_pkts < (unsigned int)budget)) {
+	while (likely(rs.packets < budget)) {
 		struct idpf_rx_extracted fields = { };
 		union virtchnl2_rx_desc *rx_desc;
 		struct idpf_rx_buf *rx_buf;
@@ -1034,7 +1028,7 @@ skip_data:
 		}
 
 		/* probably a little skewed due to removing CRC */
-		total_rx_bytes += skb->len;
+		rs.bytes += skb->len;
 
 		/* protocol */
 		idpf_rx_singleq_process_skb_fields(rx_q, skb,
@@ -1045,7 +1039,7 @@ skip_data:
 		skb = NULL;
 
 		/* update budget accounting */
-		total_rx_pkts++;
+		rs.packets++;
 	}
 
 	rx_q->skb = skb;
@@ -1056,13 +1050,10 @@ skip_data:
 	if (cleaned_count)
 		failure = idpf_rx_singleq_buf_hw_alloc_all(rx_q, cleaned_count);
 
-	u64_stats_update_begin(&rx_q->stats_sync);
-	u64_stats_add(&rx_q->q_stats.packets, total_rx_pkts);
-	u64_stats_add(&rx_q->q_stats.bytes, total_rx_bytes);
-	u64_stats_update_end(&rx_q->stats_sync);
+	libeth_rq_napi_stats_add(&rx_q->stats, &rs);
 
 	/* guarantee a trip back through this routine if there was a failure */
-	return failure ? budget : (int)total_rx_pkts;
+	return failure ? budget : rs.packets;
 }
 
 /**
