@@ -1749,6 +1749,8 @@ enum netdev_reg_state {
  *			booleans combined, only to assert cacheline placement
  *	@priv_flags:	flags invisible to userspace defined as bits, see
  *			enum netdev_priv_flags for the definitions
+ *	@lltx:		device supports lockless Tx. Mainly used by logical
+ *			interfaces, such as tunnels
  *
  *	@name:	This is the first field of the "visible" part of this structure
  *		(i.e. as seen by users in the "Space.c" file).  It is the name
@@ -2046,6 +2048,7 @@ struct net_device {
 	__cacheline_group_begin(net_device_read_tx);
 	struct_group(priv_flags_fast,
 		unsigned long		priv_flags:32;
+		unsigned long		lltx:1;
 	);
 	const struct net_device_ops *netdev_ops;
 	const struct header_ops *header_ops;
@@ -4459,7 +4462,7 @@ static inline void netif_tx_unlock_bh(struct net_device *dev)
 }
 
 #define HARD_TX_LOCK(dev, txq, cpu) {			\
-	if ((dev->features & NETIF_F_LLTX) == 0) {	\
+	if (!(dev)->lltx) {				\
 		__netif_tx_lock(txq, cpu);		\
 	} else {					\
 		__netif_tx_acquire(txq);		\
@@ -4467,12 +4470,12 @@ static inline void netif_tx_unlock_bh(struct net_device *dev)
 }
 
 #define HARD_TX_TRYLOCK(dev, txq)			\
-	(((dev->features & NETIF_F_LLTX) == 0) ?	\
+	(!(dev)->lltx ?					\
 		__netif_tx_trylock(txq) :		\
 		__netif_tx_acquire(txq))
 
 #define HARD_TX_UNLOCK(dev, txq) {			\
-	if ((dev->features & NETIF_F_LLTX) == 0) {	\
+	if (!(dev)->lltx) {				\
 		__netif_tx_unlock(txq);			\
 	} else {					\
 		__netif_tx_release(txq);		\
