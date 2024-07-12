@@ -206,20 +206,6 @@ struct idpf_dev_ops {
 };
 
 /**
- * enum idpf_vport_reset_cause - Vport soft reset causes
- * @IDPF_SR_Q_CHANGE: Soft reset queue change
- * @IDPF_SR_Q_DESC_CHANGE: Soft reset descriptor change
- * @IDPF_SR_MTU_CHANGE: Soft reset MTU change
- * @IDPF_SR_RSC_CHANGE: Soft reset RSC change
- */
-enum idpf_vport_reset_cause {
-	IDPF_SR_Q_CHANGE,
-	IDPF_SR_Q_DESC_CHANGE,
-	IDPF_SR_MTU_CHANGE,
-	IDPF_SR_RSC_CHANGE,
-};
-
-/**
  * enum idpf_vport_flags - Vport flags
  * @IDPF_VPORT_DEL_QUEUES: To send delete queues message
  * @IDPF_VPORT_SW_MARKER: Indicate TX pipe drain software marker packets
@@ -821,8 +807,7 @@ void idpf_vf_dev_ops_init(struct idpf_adapter *adapter);
 int idpf_intr_req(struct idpf_adapter *adapter);
 void idpf_intr_rel(struct idpf_adapter *adapter);
 u16 idpf_get_max_tx_hdr_size(struct idpf_adapter *adapter);
-int idpf_initiate_soft_reset(struct idpf_vport *vport,
-			     enum idpf_vport_reset_cause reset_cause);
+int idpf_initiate_soft_reset(struct idpf_vport *vport);
 void idpf_deinit_task(struct idpf_adapter *adapter);
 int idpf_req_rel_vector_indexes(struct idpf_adapter *adapter,
 				u16 *q_vector_idxs,

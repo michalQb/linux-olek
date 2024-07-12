@@ -1335,9 +1335,8 @@ static void idpf_rx_init_buf_tail(struct idpf_vport *vport)
 /**
  * idpf_vport_open - Bring up a vport
  * @vport: vport to bring up
- * @alloc_res: allocate queue resources
  */
-static int idpf_vport_open(struct idpf_vport *vport, bool alloc_res)
+static int idpf_vport_open(struct idpf_vport *vport)
 {
 	struct idpf_netdev_priv *np = netdev_priv(vport->netdev);
 	struct idpf_adapter *adapter = vport->adapter;
@@ -1350,11 +1349,13 @@ static int idpf_vport_open(struct idpf_vport *vport, bool alloc_res)
 	/* we do not allow interface up just yet */
 	netif_carrier_off(vport->netdev);
 
-	if (alloc_res) {
-		err = idpf_vport_queues_alloc(vport);
-		if (err)
-			return err;
-	}
+	err = idpf_set_real_num_queues(vport);
+	if (err)
+		return err;
+
+	err = idpf_vport_queues_alloc(vport);
+	if (err)
+		return err;
 
 	err = idpf_vport_intr_alloc(vport);
 	if (err) {
@@ -1539,7 +1540,7 @@ void idpf_init_task(struct work_struct *work)
 	np = netdev_priv(vport->netdev);
 	np->state = __IDPF_VPORT_DOWN;
 	if (test_and_clear_bit(IDPF_VPORT_UP_REQUESTED, vport_config->flags))
-		idpf_vport_open(vport, true);
+		idpf_vport_open(vport);
 
 	/* Spawn and return 'idpf_init_task' work queue until all the
 	 * default vports are created
@@ -1838,6 +1839,35 @@ void idpf_vc_event_task(struct work_struct *work)
 	}
 }
 
+static int idpf_reconfig_queues(struct idpf_vport *vport)
+{
+	int ret;
+
+	ret = idpf_vport_adjust_qs(vport);
+	if (ret) {
+		netdev_err(vport->netdev,
+			   "Could not adjust the queue number for vport %u: %pe\n",
+			   vport->idx, ERR_PTR(ret));
+		return ret;
+	}
+
+	ret = idpf_send_add_queues_msg(vport, vport->num_txq,
+				       vport->num_complq,
+				       vport->num_rxq, vport->num_bufq);
+	if (ret) {
+		netdev_err(vport->netdev,
+			   "Could not add queues for vport %u: %pe\n",
+			   vport->idx, ERR_PTR(ret));
+		return ret;
+	}
+
+	idpf_vport_calc_num_q_desc(vport);
+	idpf_vport_calc_num_q_groups(vport);
+	idpf_vport_alloc_vec_indexes(vport);
+
+	return 0;
+}
+
 /**
  * idpf_initiate_soft_reset - Initiate a software reset
  * @vport: virtual port data struct
@@ -1846,107 +1876,37 @@ void idpf_vc_event_task(struct work_struct *work)
  * Soft reset only reallocs vport queue resources. Returns 0 on success,
  * negative on failure.
  */
-int idpf_initiate_soft_reset(struct idpf_vport *vport,
-			     enum idpf_vport_reset_cause reset_cause)
+int idpf_initiate_soft_reset(struct idpf_vport *vport)
 {
-	struct idpf_netdev_priv *np = netdev_priv(vport->netdev);
-	enum idpf_vport_state current_state = np->state;
-	struct idpf_adapter *adapter = vport->adapter;
-	struct idpf_vport *new_vport;
+	const struct idpf_netdev_priv *np = netdev_priv(vport->netdev);
+	bool vport_is_up = np->state == __IDPF_VPORT_UP;
 	int err;
 
-	/* If the system is low on memory, we can end up in bad state if we
-	 * free all the memory for queue resources and try to allocate them
-	 * again. Instead, we can pre-allocate the new resources before doing
-	 * anything and bailing if the alloc fails.
-	 *
-	 * Make a clone of the existing vport to mimic its current
-	 * configuration, then modify the new structure with any requested
-	 * changes. Once the allocation of the new resources is done, stop the
-	 * existing vport and copy the configuration to the main vport. If an
-	 * error occurred, the existing vport will be untouched.
-	 *
-	 */
-	new_vport = kzalloc(sizeof(*vport), GFP_KERNEL);
-	if (!new_vport)
-		return -ENOMEM;
-
-	/* This purposely avoids copying the end of the struct because it
-	 * contains wait_queues and mutexes and other stuff we don't want to
-	 * mess with. Nothing below should use those variables from new_vport
-	 * and should instead always refer to them in vport if they need to.
-	 */
-	memcpy(new_vport, vport, offsetof(struct idpf_vport, link_speed_mbps));
-
-	/* Adjust resource parameters prior to reallocating resources */
-	switch (reset_cause) {
-	case IDPF_SR_Q_CHANGE:
-		err = idpf_vport_adjust_qs(new_vport);
-		if (err)
-			goto free_vport;
-		break;
-	case IDPF_SR_Q_DESC_CHANGE:
-		/* Update queue parameters before allocating resources */
-		idpf_vport_calc_num_q_desc(new_vport);
-		break;
-	case IDPF_SR_MTU_CHANGE:
-	case IDPF_SR_RSC_CHANGE:
-		break;
-	default:
-		dev_err(&adapter->pdev->dev, "Unhandled soft reset cause\n");
-		err = -EINVAL;
-		goto free_vport;
-	}
-
-	err = idpf_vport_queues_alloc(new_vport);
-	if (err)
-		goto free_vport;
-	if (current_state <= __IDPF_VPORT_DOWN) {
-		idpf_send_delete_queues_msg(vport);
-	} else {
+	if (vport_is_up) {
 		set_bit(IDPF_VPORT_DEL_QUEUES, vport->flags);
 		idpf_vport_stop(vport);
+	} else {
+		idpf_send_delete_queues_msg(vport);
 	}
 
 	idpf_deinit_rss(vport);
-	/* We're passing in vport here because we need its wait_queue
-	 * to send a message and it should be getting all the vport
-	 * config data out of the adapter but we need to be careful not
-	 * to add code to add_queues to change the vport config within
-	 * vport itself as it will be wiped with a memcpy later.
-	 */
-	err = idpf_send_add_queues_msg(vport, new_vport->num_txq,
-				       new_vport->num_complq,
-				       new_vport->num_rxq,
-				       new_vport->num_bufq);
+
+	err = idpf_reconfig_queues(vport);
 	if (err)
-		goto err_reset;
+		return err;
 
-	/* Same comment as above regarding avoiding copying the wait_queues and
-	 * mutexes applies here. We do not want to mess with those if possible.
-	 */
-	memcpy(vport, new_vport, offsetof(struct idpf_vport, link_speed_mbps));
+	if (!vport_is_up)
+		return idpf_set_real_num_queues(vport);
 
-	if (reset_cause == IDPF_SR_Q_CHANGE)
-		idpf_vport_alloc_vec_indexes(vport);
+	err = idpf_vport_open(vport);
+	if (err) {
+		netdev_err(vport->netdev,
+			   "Could not reopen the vport %u: %pe", vport->idx,
+			   ERR_PTR(err));
+		return err;
+	}
 
-	err = idpf_set_real_num_queues(vport);
-	if (err)
-		goto err_reset;
-
-	if (current_state == __IDPF_VPORT_UP)
-		err = idpf_vport_open(vport, false);
-
-	kfree(new_vport);
-
-	return err;
-
-err_reset:
-	idpf_vport_queues_rel(new_vport);
-free_vport:
-	kfree(new_vport);
-
-	return err;
+	return 0;
 }
 
 /**
@@ -2135,7 +2095,7 @@ static int idpf_set_features(struct net_device *netdev,
 
 	if (changed & NETIF_F_GRO_HW) {
 		netdev->features ^= NETIF_F_GRO_HW;
-		err = idpf_initiate_soft_reset(vport, IDPF_SR_RSC_CHANGE);
+		err = idpf_initiate_soft_reset(vport);
 		if (err)
 			goto unlock_mutex;
 	}
@@ -2171,7 +2131,7 @@ static int idpf_open(struct net_device *netdev)
 	idpf_vport_ctrl_lock(netdev);
 	vport = idpf_netdev_to_vport(netdev);
 
-	err = idpf_vport_open(vport, true);
+	err = idpf_vport_open(vport);
 
 	idpf_vport_ctrl_unlock(netdev);
 
@@ -2195,7 +2155,7 @@ static int idpf_change_mtu(struct net_device *netdev, int new_mtu)
 
 	WRITE_ONCE(netdev->mtu, new_mtu);
 
-	err = idpf_initiate_soft_reset(vport, IDPF_SR_MTU_CHANGE);
+	err = idpf_initiate_soft_reset(vport);
 
 	idpf_vport_ctrl_unlock(netdev);
 
