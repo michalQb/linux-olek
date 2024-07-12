@@ -271,7 +271,7 @@ static int idpf_set_channels(struct net_device *netdev,
 	vport_config->user_config.num_req_tx_qs = num_req_tx_q;
 	vport_config->user_config.num_req_rx_qs = num_req_rx_q;
 
-	err = idpf_initiate_soft_reset(vport, IDPF_SR_Q_CHANGE);
+	err = idpf_initiate_soft_reset(vport);
 	if (err) {
 		/* roll back queue change */
 		vport_config->user_config.num_req_tx_qs = num_txq;
@@ -391,7 +391,7 @@ static int idpf_set_ringparam(struct net_device *netdev,
 			IDPF_RX_BUFQ_DESC_COUNT(new_rx_count,
 						vport->num_bufqs_per_qgrp);
 
-	err = idpf_initiate_soft_reset(vport, IDPF_SR_Q_DESC_CHANGE);
+	err = idpf_initiate_soft_reset(vport);
 
 unlock_mutex:
 	idpf_vport_ctrl_unlock(netdev);
