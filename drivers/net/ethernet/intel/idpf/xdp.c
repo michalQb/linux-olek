@@ -475,7 +475,8 @@ idpf_xdp_setup_prog(struct idpf_vport *vport, struct netdev_bpf *xdp)
 	int ret;
 
 	info = &vport->adapter->vport_config[vport->idx]->user_config.xdp;
-	reconfig = !!info->prog != !!prog;
+	reconfig = !!info->prog != !!prog &&
+		   !test_bit(IDPF_REMOVE_IN_PROG, vport->adapter->flags);
 
 	xdp_attachment_setup(info, xdp);
 
