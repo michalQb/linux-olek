@@ -290,6 +290,7 @@ struct idpf_vport {
 	struct idpf_tx_queue **txqs;
 	bool crc_enable;
 
+	struct bpf_prog *xdp_prog;
 	bool xdpq_share;
 	u16 num_xdp_txq;
 	u16 xdp_txq_offset;
@@ -599,10 +600,7 @@ static inline int idpf_is_queue_model_split(u16 q_model)
  */
 static inline bool idpf_xdp_is_prog_ena(const struct idpf_vport *vport)
 {
-	if (!vport->adapter)
-		return false;
-
-	return !!vport->adapter->vport_config[vport->idx]->user_config.xdp.prog;
+	return !!vport->xdp_prog;
 }
 
 #define idpf_is_cap_ena(adapter, field, flag) \
