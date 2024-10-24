@@ -196,14 +196,6 @@ struct ice_tx_offload_params {
 	u8 header_len;
 };
 
-struct ice_rx_buf {
-	dma_addr_t dma;
-	struct page *page;
-	unsigned int page_offset;
-	unsigned int pgcnt;
-	unsigned int act;
-};
-
 struct ice_q_stats {
 	u64 pkts;
 	u64 bytes;
@@ -323,10 +315,11 @@ struct ice_rx_ring {
 	u16 reg_idx;			/* HW register index of the ring */
 	u16 next_to_alloc;
 
-	union {
-		struct ice_rx_buf *rx_buf;
-		struct xdp_buff **xdp_buf;
-	};
+	struct page_pool *pp;
+
+	struct libeth_fqe *rx_fqes;
+	struct xdp_buff **xdp_buf;
+
 	/* CL2 - 2nd cacheline starts here */
 	union {
 		struct ice_xdp_buff xdp_ext;
@@ -347,6 +340,7 @@ struct ice_rx_ring {
 	u16 next_to_use;
 	u16 next_to_clean;
 	u16 first_desc;
+	u32 truesize;
 
 	/* stats structs */
 	struct ice_ring_stats *ring_stats;
@@ -367,6 +361,7 @@ struct ice_rx_ring {
 	u8 flags;
 	/* CL5 - 5th cacheline starts here */
 	struct xdp_rxq_info xdp_rxq;
+	u32 rx_buf_len;
 } ____cacheline_internodealigned_in_smp;
 
 struct ice_tx_ring {
