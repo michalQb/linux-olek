@@ -4857,8 +4857,8 @@ static void ice_init_features(struct ice_pf *pf)
 		ice_dpll_init(pf);
 
 	/* Note: Flow director init failure is non-fatal to load */
-	if (ice_init_fdir(pf))
-		dev_err(dev, "could not initialize flow director\n");
+	//if (ice_init_fdir(pf))
+	//	dev_err(dev, "could not initialize flow director\n");
 
 	/* Note: DCB init failure is non-fatal to load */
 	if (ice_init_pf_dcb(pf, false)) {
@@ -4882,7 +4882,7 @@ static void ice_deinit_features(struct ice_pf *pf)
 	ice_deinit_lag(pf);
 	if (test_bit(ICE_FLAG_DCB_CAPABLE, pf->flags))
 		ice_cfg_lldp_mib_change(&pf->hw, false);
-	ice_deinit_fdir(pf);
+	//ice_deinit_fdir(pf);
 	if (ice_is_feature_supported(pf, ICE_F_GNSS))
 		ice_gnss_exit(pf);
 	if (test_bit(ICE_FLAG_PTP_SUPPORTED, pf->flags))
