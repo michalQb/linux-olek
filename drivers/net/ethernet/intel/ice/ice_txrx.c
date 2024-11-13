@@ -402,10 +402,16 @@ void ice_clean_rx_ring(struct ice_rx_ring *rx_ring)
 	}
 
 	/* Free all the Rx ring sk_buffs */
+	//printk("queue_idx = %d, ntc = %d, ntu = %d\n", rx_ring->q_index, rx_ring->next_to_clean, rx_ring->next_to_use);
 	for (u32 i = rx_ring->next_to_clean; i != rx_ring->next_to_use; ) {
-		const struct libeth_fqe *rx_fqes = &rx_ring->rx_fqes[i];
+//	for (u32 i = 0; i < rx_ring->count; i++) {
+		struct libeth_fqe *rx_fqes = &rx_ring->rx_fqes[i];
 
-		page_pool_put_full_page(rx_ring->pp, rx_fqes->page, false);
+		if (rx_fqes->page) {
+			page_pool_put_full_page(rx_ring->pp, rx_fqes->page, false);
+			rx_fqes->page = NULL;
+			rx_fqes->offset = 0;
+		}
 
 		if (unlikely(++i == rx_ring->count))
 			i = 0;
@@ -439,11 +445,15 @@ void ice_free_rx_ring(struct ice_rx_ring *rx_ring)
 		.pp	= rx_ring->pp,
 	};
 	u32 size;
+	netmem_ref netmem = rx_ring->pp->frag_page;
+	atomic_long_t *pp_ref_count = netmem_get_pp_ref_count_ref(netmem);
 
 	ice_clean_rx_ring(rx_ring);
 	if (rx_ring->vsi->type == ICE_VSI_PF)
-		if (xdp_rxq_info_is_reg(&rx_ring->xdp_rxq))
+		if (xdp_rxq_info_is_reg(&rx_ring->xdp_rxq)) {
+			xdp_rxq_info_detach_mem_model(&rx_ring->xdp_rxq);
 			xdp_rxq_info_unreg(&rx_ring->xdp_rxq);
+		}
 	WRITE_ONCE(rx_ring->xdp_prog, NULL);
 	if (rx_ring->xsk_pool) {
 		kfree(rx_ring->xdp_buf);
@@ -458,6 +468,10 @@ void ice_free_rx_ring(struct ice_rx_ring *rx_ring)
 		rx_ring->desc = NULL;
 	}
 
+	//printk("pp_ref_count = %ld\n", atomic_long_read(pp_ref_count));
+	//printk("destroy pp pool = %p, frag_users = %ld, frag_page = %lx\n", rx_ring->pp,
+	//								    rx_ring->pp->frag_users,
+	//								    rx_ring->pp->frag_page);
 	libeth_rx_fq_destroy(&fq);
 	rx_ring->rx_fqes = NULL;
 	rx_ring->pp = NULL;
@@ -488,6 +502,7 @@ int ice_setup_rx_ring(struct ice_rx_ring *rx_ring)
 	rx_ring->rx_fqes = fq.fqes;
 	rx_ring->truesize = fq.truesize;
 	rx_ring->rx_buf_len = fq.buf_len;
+
 
 	/* round up to nearest page */
 	size = ALIGN(rx_ring->count * sizeof(union ice_32byte_rx_desc),
@@ -532,6 +547,7 @@ ice_run_xdp(struct ice_rx_ring *rx_ring, struct xdp_buff *xdp,
 	    union ice_32b_rx_flex_desc *eop_desc)
 {
 	unsigned int ret = ICE_XDP_PASS;
+	struct page *page;
 	u32 act;
 
 	if (!xdp_prog)
@@ -565,6 +581,8 @@ out_failure:
 		trace_xdp_exception(rx_ring->netdev, xdp_prog, act);
 		fallthrough;
 	case XDP_DROP:
+		page = virt_to_head_page(xdp->data);
+		page_pool_put_full_page(rx_ring->pp, page, true);
 		ret = ICE_XDP_CONSUMED;
 	}
 
@@ -687,10 +705,13 @@ bool ice_alloc_rx_bufs(struct ice_rx_ring *rx_ring, unsigned int cleaned_count)
 	/* get the Rx descriptor and buffer based on next_to_use */
 	rx_desc = ICE_RX_DESC(rx_ring, ntu);
 
+	//printk("alloc_rx_bufs ----- ntu = %d, cleaned_count = %d\n", ntu, cleaned_count);
+
 	do {
 		dma_addr_t addr;
 
 		addr = libeth_rx_alloc(&fq, ntu);
+
 		if (addr == DMA_MAPPING_ERROR) {
 			rx_ring->ring_stats->rx_stats.alloc_page_failed++;
 			break;
@@ -713,6 +734,8 @@ bool ice_alloc_rx_bufs(struct ice_rx_ring *rx_ring, unsigned int cleaned_count)
 
 		cleaned_count--;
 	} while (cleaned_count);
+	
+	//printk("AFTER alloc_rx_bufs ----- ntu = %d, cleaned_count = %d\n", ntu, cleaned_count);
 
 	if (rx_ring->next_to_use != ntu)
 		ice_release_rx_desc(rx_ring, ntu);
@@ -795,6 +818,8 @@ ice_build_skb(struct ice_rx_ring *rx_ring, struct xdp_buff *xdp)
 	if (unlikely(!skb))
 		return NULL;
 
+	skb_mark_for_recycle(skb);
+
 	/* must to record Rx queue, otherwise OS features such as
 	 * symmetric queue won't work
 	 */
@@ -811,7 +836,7 @@ ice_build_skb(struct ice_rx_ring *rx_ring, struct xdp_buff *xdp)
 					   sinfo->xdp_frags_size,
 					   nr_frags * xdp->frame_sz,
 					   xdp_buff_is_frag_pfmemalloc(xdp));
-
+	
 	return skb;
 }
 
@@ -838,7 +863,7 @@ int ice_clean_rx_irq(struct ice_rx_ring *rx_ring, int budget)
 	u32 cnt = rx_ring->count;
 	u32 xdp_xmit = 0;
 	u32 cached_ntu;
-	bool failure;
+	bool failure = false;
 	u32 act;
 
 	xdp_prog = READ_ONCE(rx_ring->xdp_prog);
@@ -891,16 +916,17 @@ int ice_clean_rx_irq(struct ice_rx_ring *rx_ring, int budget)
 			ICE_RX_FLX_DESC_PKT_LEN_M;
 
 		/* retrieve a buffer from the ring */
-		rx_buf = &rx_ring->rx_fqes[rx_ring->next_to_clean];
-		if (!libeth_rx_sync_for_cpu(rx_buf, size))
+		rx_buf = &rx_ring->rx_fqes[ntc];
+		if (!libeth_rx_sync_for_cpu(rx_buf, size)) {
 			continue;
+		}
 
 		if (!xdp->data) {
 			void *hard_start;
 
-			hard_start = page_address(rx_buf->page) + rx_buf->offset -
-				     offset;
-			xdp_prepare_buff(xdp, hard_start, offset, size, !!offset);
+			hard_start = page_address(rx_buf->page) + rx_buf->offset;
+			xdp_prepare_buff(xdp, hard_start, rx_buf->page->pp->p.offset, size, true);
+			//libeth_xdp_prepare_buff(xdp, rx_buf, size);
 			xdp_buff_clear_frags_flag(xdp);
 		} else if (ice_add_xdp_frag(rx_ring, xdp, rx_buf, size)) {
 			break;
@@ -924,8 +950,16 @@ int ice_clean_rx_irq(struct ice_rx_ring *rx_ring, int budget)
 		continue;
 construct_skb:
 		skb = ice_build_skb(rx_ring, xdp);
+
+		/* TODO: Consider using "xdp_build_skb_from_buff".
+		 *       The only problem is skb->protocol which is set in "ice_process_skb_fields()".
+		 *    	 So, some refactoring is needed first.
+		 */ 
+		//skb = xdp_build_skb_from_buff(xdp);
+
 		/* exit if we failed to retrieve a buffer */
 		if (!skb) {
+			printk("SKB is NULL after ice_build_skb\n");
 			rx_ring->ring_stats->rx_stats.alloc_page_failed++;
 			act = ICE_XDP_CONSUMED;
 			xdp->data = NULL;
@@ -947,8 +981,9 @@ construct_skb:
 		vlan_tci = ice_get_vlan_tci(rx_desc);
 
 		/* pad the skb if needed, to make a valid ethernet frame */
-		if (eth_skb_pad(skb))
+		if (eth_skb_pad(skb)) {
 			continue;
+		}
 
 		/* probably a little skewed due to removing CRC */
 		total_rx_bytes += skb->len;
@@ -969,7 +1004,8 @@ construct_skb:
 
 	rx_ring->next_to_clean = ntc;
 	/* return up to cleaned_count buffers to hardware */
-	failure = ice_alloc_rx_bufs(rx_ring, ICE_RX_DESC_UNUSED(rx_ring));
+//	if (ICE_RX_DESC_UNUSED(rx_ring) >= 16)
+		failure = ice_alloc_rx_bufs(rx_ring, ICE_RX_DESC_UNUSED(rx_ring));
 
 	if (xdp_xmit)
 		ice_finalize_xdp_rx(xdp_ring, xdp_xmit, cached_ntu);

@@ -5,6 +5,7 @@
 #define _ICE_TXRX_H_
 
 #include "ice_type.h"
+#include <net/libeth/xdp.h>
 
 #define ICE_DFLT_IRQ_WORK	256
 #define ICE_RXBUF_3072		3072

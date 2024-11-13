@@ -530,7 +530,7 @@ static int ice_vsi_cfg_rxq(struct ice_rx_ring *ring)
 			err = __xdp_rxq_info_reg(&ring->xdp_rxq, ring->netdev,
 						 ring->q_index,
 						 ring->q_vector->napi.napi_id,
-						 ICE_RXBUF_3072);
+						 ring->rx_buf_len);
 			if (err)
 				return err;
 		}
@@ -562,20 +562,22 @@ static int ice_vsi_cfg_rxq(struct ice_rx_ring *ring)
 				err = __xdp_rxq_info_reg(&ring->xdp_rxq, ring->netdev,
 							 ring->q_index,
 							 ring->q_vector->napi.napi_id,
-							 ICE_RXBUF_3072);
+							 ring->rx_buf_len);
 				if (err)
 					return err;
 			}
 
-			err = xdp_rxq_info_reg_mem_model(&ring->xdp_rxq,
-							 MEM_TYPE_PAGE_SHARED,
-							 NULL);
-			if (err)
-				return err;
+			//err = xdp_rxq_info_reg_mem_model(&ring->xdp_rxq,
+							 //MEM_TYPE_PAGE_SHARED,
+							 //NULL);
+			//				 MEM_TYPE_PAGE_POOL,
+			//				 ring->pp);
+			xdp_rxq_info_attach_page_pool(&ring->xdp_rxq,
+						      ring->pp);
 		}
 	}
 
-	xdp_init_buff(&ring->xdp, ice_get_frame_sz(ring), &ring->xdp_rxq);
+	xdp_init_buff(&ring->xdp, ring->truesize, &ring->xdp_rxq);
 	ring->xdp.data = NULL;
 	ring->xdp_ext.pkt_ctx = &ring->pkt_ctx;
 	err = ice_setup_rx_ctx(ring);
@@ -607,7 +609,7 @@ static int ice_vsi_cfg_rxq(struct ice_rx_ring *ring)
 		return 0;
 	}
 
-	ice_alloc_rx_bufs(ring, num_bufs);
+	err = ice_alloc_rx_bufs(ring, num_bufs);
 
 	return 0;
 }

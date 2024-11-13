@@ -244,15 +244,18 @@ static void
 ice_clean_xdp_tx_buf(struct device *dev, struct ice_tx_buf *tx_buf,
 		     struct xdp_frame_bulk *bq)
 {
-	dma_unmap_single(dev, dma_unmap_addr(tx_buf, dma),
-			 dma_unmap_len(tx_buf, len), DMA_TO_DEVICE);
-	dma_unmap_len_set(tx_buf, len, 0);
+	u32 len = dma_unmap_len(tx_buf, len);
+	struct page *page;
 
 	switch (tx_buf->type) {
 	case ICE_TX_BUF_XDP_TX:
-		page_frag_free(tx_buf->raw_buf);
+		page = virt_to_page(tx_buf->raw_buf);
+		page_pool_put_page(page->pp, page, len, true);
 		break;
 	case ICE_TX_BUF_XDP_XMIT:
+		dma_unmap_single(dev, dma_unmap_addr(tx_buf, dma),
+				 dma_unmap_len(tx_buf, len), DMA_TO_DEVICE);
+		dma_unmap_len_set(tx_buf, len, 0);
 		xdp_return_frame_bulk(tx_buf->xdpf, bq);
 		break;
 	}
@@ -374,19 +377,22 @@ int __ice_xmit_xdp_ring(struct xdp_buff *xdp, struct ice_tx_ring *xdp_ring,
 	tx_buf = tx_head;
 
 	for (;;) {
+		struct page *page = virt_to_page(data);
+		enum dma_data_direction dma_dir = page_pool_get_dma_dir(page->pp);
 		dma_addr_t dma;
-
-		dma = dma_map_single(dev, data, size, DMA_TO_DEVICE);
-		if (dma_mapping_error(dev, dma))
-			goto dma_unmap;
 
 		/* record length, and DMA address */
 		dma_unmap_len_set(tx_buf, len, size);
 		dma_unmap_addr_set(tx_buf, dma, dma);
 
 		if (frame) {
+			dma = dma_map_single(dev, data, size, DMA_TO_DEVICE);
+			if (dma_mapping_error(dev, dma))
+				goto dma_unmap;
 			tx_buf->type = ICE_TX_BUF_FRAG;
 		} else {
+			dma = page_pool_get_dma_addr(page) + xdp->data - xdp->data_hard_start;
+			dma_sync_single_for_device(dev, dma, size, dma_dir);
 			tx_buf->type = ICE_TX_BUF_XDP_TX;
 			tx_buf->raw_buf = data;
 		}
