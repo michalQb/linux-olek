@@ -944,6 +944,9 @@ int ice_clean_rx_irq(struct ice_rx_ring *rx_ring, int budget)
 		act = ice_run_xdp(rx_ring, xdp, xdp_prog, xdp_ring, rx_desc);
 		if (act == ICE_XDP_PASS)
 			goto construct_skb;
+
+		if (act & (ICE_XDP_TX | ICE_XDP_REDIR))
+			xdp_xmit |= act;
 		total_rx_bytes += xdp_get_buff_len(xdp);
 		total_rx_pkts++;
 
@@ -1001,9 +1004,6 @@ construct_skb:
 		/* update budget accounting */
 		total_rx_pkts++;
 	}
-
-	if (act & (ICE_XDP_TX | ICE_XDP_REDIR))
-		xdp_xmit |= act;
 
 	rx_ring->next_to_clean = ntc;
 	/* return up to cleaned_count buffers to hardware */
