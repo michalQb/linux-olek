@@ -255,11 +255,11 @@ ice_clean_xdp_tx_buf(struct device *dev, struct ice_tx_buf *tx_buf,
 	case ICE_TX_BUF_XDP_XMIT:
 		dma_unmap_single(dev, dma_unmap_addr(tx_buf, dma),
 				 dma_unmap_len(tx_buf, len), DMA_TO_DEVICE);
-		dma_unmap_len_set(tx_buf, len, 0);
 		xdp_return_frame_bulk(tx_buf->xdpf, bq);
 		break;
 	}
 
+	dma_unmap_len_set(tx_buf, len, 0);
 	tx_buf->type = ICE_TX_BUF_EMPTY;
 }
 
