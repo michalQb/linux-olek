@@ -5,6 +5,8 @@
 #define _ICE_TXRX_H_
 
 #include "ice_type.h"
+#include <net/libeth/cache.h>
+#include <net/libeth/types.h>
 #include <net/libeth/xdp.h>
 
 #define ICE_DFLT_IRQ_WORK	256
@@ -324,7 +326,7 @@ struct ice_rx_ring {
 	/* CL2 - 2nd cacheline starts here */
 	union {
 		struct ice_xdp_buff xdp_ext;
-		struct xdp_buff xdp;
+		struct libeth_xdp_buff_stash xdp;
 	};
 	/* CL3 - 3rd cacheline starts here */
 	union {
