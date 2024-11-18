@@ -291,6 +291,7 @@ config ICE
 	select AUXILIARY_BUS
 	select DIMLIB
 	select LIBIE
+	select LIBETH_XDP
 	select NET_DEVLINK
 	select PLDMFW
 	select DPLL

@@ -387,7 +387,6 @@ err:
  */
 void ice_clean_rx_ring(struct ice_rx_ring *rx_ring)
 {
-	struct xdp_buff *xdp = &rx_ring->xdp;
 	u32 size;
 
 	/* ring already cleared, nothing to do */
@@ -399,10 +398,7 @@ void ice_clean_rx_ring(struct ice_rx_ring *rx_ring)
 		goto rx_skip_free;
 	}
 
-	if (xdp->data) {
-		xdp_return_buff(xdp);
-		xdp->data = NULL;
-	}
+	libeth_xdp_return_stash(&rx_ring->xdp);
 
 	/* Free all the Rx ring sk_buffs */
 	//printk("queue_idx = %d, ntc = %d, ntu = %d\n", rx_ring->q_index, rx_ring->next_to_clean, rx_ring->next_to_use);
@@ -545,7 +541,7 @@ err:
  * Returns any of ICE_XDP_{PASS, CONSUMED, TX, REDIR}
  */
 static unsigned int
-ice_run_xdp(struct ice_rx_ring *rx_ring, struct xdp_buff *xdp,
+ice_run_xdp(struct ice_rx_ring *rx_ring, struct libeth_xdp_buff *xdp,
 	    struct bpf_prog *xdp_prog, struct ice_tx_ring *xdp_ring,
 	    union ice_32b_rx_flex_desc *eop_desc)
 {
@@ -556,23 +552,23 @@ ice_run_xdp(struct ice_rx_ring *rx_ring, struct xdp_buff *xdp,
 	if (!xdp_prog)
 		goto exit;
 
-	ice_xdp_meta_set_desc(xdp, eop_desc);
+	ice_xdp_meta_set_desc(&xdp->base, eop_desc);
 
-	act = bpf_prog_run_xdp(xdp_prog, xdp);
+	act = bpf_prog_run_xdp(xdp_prog, &xdp->base);
 	switch (act) {
 	case XDP_PASS:
 		break;
 	case XDP_TX:
 		if (static_branch_unlikely(&ice_xdp_locking_key))
 			spin_lock(&xdp_ring->tx_lock);
-		ret = __ice_xmit_xdp_ring(xdp, xdp_ring, false);
+		ret = __ice_xmit_xdp_ring(&xdp->base, xdp_ring, false);
 		if (static_branch_unlikely(&ice_xdp_locking_key))
 			spin_unlock(&xdp_ring->tx_lock);
 		if (ret == ICE_XDP_CONSUMED)
 			goto out_failure;
 		break;
 	case XDP_REDIRECT:
-		if (xdp_do_redirect(rx_ring->netdev, xdp, xdp_prog))
+		if (xdp_do_redirect(rx_ring->netdev, &xdp->base, xdp_prog))
 			goto out_failure;
 		ret = ICE_XDP_REDIR;
 		break;
@@ -584,8 +580,7 @@ out_failure:
 		trace_xdp_exception(rx_ring->netdev, xdp_prog, act);
 		fallthrough;
 	case XDP_DROP:
-		page = virt_to_head_page(xdp->data);
-		page_pool_put_full_page(rx_ring->pp, page, true);
+		libeth_xdp_return_buff(xdp);
 		ret = ICE_XDP_CONSUMED;
 	}
 
@@ -859,15 +854,17 @@ int ice_clean_rx_irq(struct ice_rx_ring *rx_ring, int budget)
 {
 	unsigned int total_rx_bytes = 0, total_rx_pkts = 0;
 	unsigned int offset = rx_ring->rx_offset;
-	struct xdp_buff *xdp = &rx_ring->xdp;
 	struct ice_tx_ring *xdp_ring = NULL;
 	struct bpf_prog *xdp_prog = NULL;
 	u32 ntc = rx_ring->next_to_clean;
+	LIBETH_XDP_ONSTACK_BUFF(xdp);
 	u32 cnt = rx_ring->count;
+	bool failure = false;
 	u32 xdp_xmit = 0;
 	u32 cached_ntu;
-	bool failure = false;
 	u32 act;
+
+	libeth_xdp_init_buff(xdp, &rx_ring->xdp, &rx_ring->xdp_rxq);
 
 	xdp_prog = READ_ONCE(rx_ring->xdp_prog);
 	if (xdp_prog) {
@@ -927,11 +924,11 @@ int ice_clean_rx_irq(struct ice_rx_ring *rx_ring, int budget)
 		if (!xdp->data) {
 			void *hard_start;
 
-			hard_start = page_address(rx_buf->page) + rx_buf->offset;
-			xdp_prepare_buff(xdp, hard_start, rx_buf->page->pp->p.offset, size, true);
-			//libeth_xdp_prepare_buff(xdp, rx_buf, size);
-			xdp_buff_clear_frags_flag(xdp);
-		} else if (ice_add_xdp_frag(rx_ring, xdp, rx_buf, size)) {
+			//hard_start = page_address(rx_buf->page) + rx_buf->offset;
+			//xdp_prepare_buff(&xdp->base, hard_start, rx_buf->page->pp->p.offset, size, true);
+			libeth_xdp_prepare_buff(xdp, rx_buf, size);
+			xdp_buff_clear_frags_flag(&xdp->base);
+		} else if (ice_add_xdp_frag(rx_ring, &xdp->base, rx_buf, size)) {
 			break;
 		}
 		if (++ntc == cnt)
@@ -947,7 +944,7 @@ int ice_clean_rx_irq(struct ice_rx_ring *rx_ring, int budget)
 
 		if (act & (ICE_XDP_TX | ICE_XDP_REDIR))
 			xdp_xmit |= act;
-		total_rx_bytes += xdp_get_buff_len(xdp);
+		total_rx_bytes += xdp_get_buff_len(&xdp->base);
 		total_rx_pkts++;
 
 		xdp->data = NULL;
@@ -955,7 +952,7 @@ int ice_clean_rx_irq(struct ice_rx_ring *rx_ring, int budget)
 		rx_ring->nr_frags = 0;
 		continue;
 construct_skb:
-		skb = ice_build_skb(rx_ring, xdp);
+		skb = ice_build_skb(rx_ring, &xdp->base);
 
 		/* TODO: Consider using "xdp_build_skb_from_buff".
 		 *       The only problem is skb->protocol which is set in "ice_process_skb_fields()".
@@ -1010,6 +1007,7 @@ construct_skb:
 	//if (ICE_RX_DESC_UNUSED(rx_ring) >= 16)
 		failure = ice_alloc_rx_bufs(rx_ring, ICE_RX_DESC_UNUSED(rx_ring));
 
+	libeth_xdp_save_buff(&rx_ring->xdp, xdp);
 	if (xdp_xmit)
 		ice_finalize_xdp_rx(xdp_ring, xdp_xmit, cached_ntu);
 
