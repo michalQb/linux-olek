@@ -316,21 +316,16 @@ ice_xsk_pool_enable(struct ice_vsi *vsi, struct xsk_buff_pool *pool, u16 qid)
 static int
 ice_realloc_rx_xdp_bufs(struct ice_rx_ring *rx_ring, bool pool_present)
 {
-	size_t elem_size = pool_present ? sizeof(*rx_ring->xdp_buf) :
-					  sizeof(*rx_ring->rx_buf);
+	size_t elem_size = sizeof(*rx_ring->xdp_buf);
 	void *sw_ring = kcalloc(rx_ring->count, elem_size, GFP_KERNEL);
 
 	if (!sw_ring)
 		return -ENOMEM;
 
 	if (pool_present) {
-		kfree(rx_ring->rx_buf);
-		rx_ring->rx_buf = NULL;
 		rx_ring->xdp_buf = sw_ring;
 	} else {
-		kfree(rx_ring->xdp_buf);
 		rx_ring->xdp_buf = NULL;
-		rx_ring->rx_buf = sw_ring;
 	}
 
 	return 0;
