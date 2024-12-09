@@ -10,6 +10,7 @@
 #include "ice_lib.h"
 #include "ice_dcb_lib.h"
 #include <net/dcbnl.h>
+#include <net/libeth/rx.h>
 
 struct ice_stats {
 	char stat_string[ETH_GSTRING_LEN];
@@ -1228,7 +1229,7 @@ static int ice_diag_send(struct ice_tx_ring *tx_ring, u8 *data, u16 size)
  */
 static int ice_lbtest_receive_frames(struct ice_rx_ring *rx_ring)
 {
-	struct ice_rx_buf *rx_buf;
+	struct libeth_fqe *rx_buf;
 	int valid_frames, i;
 	u8 *received_buf;
 
@@ -1244,8 +1245,8 @@ static int ice_lbtest_receive_frames(struct ice_rx_ring *rx_ring)
 		     cpu_to_le16(BIT(ICE_RX_FLEX_DESC_STATUS0_EOF_S)))))
 			continue;
 
-		rx_buf = &rx_ring->rx_buf[i];
-		received_buf = page_address(rx_buf->page) + rx_buf->page_offset;
+		rx_buf = &rx_ring->rx_fqes[i];
+		received_buf = netmem_address(rx_buf->netmem) + rx_buf->offset;
 
 		if (ice_lbtest_check_frame(received_buf))
 			valid_frames++;
@@ -3327,7 +3328,8 @@ process_rx:
 		rx_rings[i].count = new_rx_cnt;
 		rx_rings[i].cached_phctime = pf->ptp.cached_phc_time;
 		rx_rings[i].desc = NULL;
-		rx_rings[i].rx_buf = NULL;
+		rx_rings[i].xdp_buf = NULL;
+
 		/* this is to allow wr32 to have something to write to
 		 * during early allocation of Rx buffers
 		 */
@@ -3336,10 +3338,6 @@ process_rx:
 		err = ice_setup_rx_ring(&rx_rings[i]);
 		if (err)
 			goto rx_unwind;
-
-		/* allocate Rx buffers */
-		err = ice_alloc_rx_bufs(&rx_rings[i],
-					ICE_RX_DESC_UNUSED(&rx_rings[i]));
 rx_unwind:
 		if (err) {
 			while (i) {
