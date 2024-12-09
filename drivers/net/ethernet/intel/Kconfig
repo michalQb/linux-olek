@@ -295,6 +295,8 @@ config ICE
 	depends on GNSS || GNSS = n
 	select AUXILIARY_BUS
 	select DIMLIB
+	select LIBETH
+	select LIBETH_XDP
 	select LIBIE
 	select LIBIE_ADMINQ
 	select NET_DEVLINK
