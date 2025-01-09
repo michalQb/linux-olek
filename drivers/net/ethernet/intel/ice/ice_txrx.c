@@ -638,6 +638,37 @@ ice_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 }
 
 /**
+ * ice_init_ctrl_rx_descs - Initialize Rx descriptors for control vsi.
+ * @rx_ring: ring to init descriptors on
+ * @count: number of descriptors to initialize
+ */
+void ice_init_ctrl_rx_descs(struct ice_rx_ring *rx_ring, u32 count)
+{
+	union ice_32b_rx_flex_desc *rx_desc;
+	u16 ntu = rx_ring->next_to_use;
+
+	if (!count)
+		return;
+
+	rx_desc = ICE_RX_DESC(rx_ring, ntu);
+
+	do {
+		rx_desc++;
+		ntu++;
+		if (unlikely(ntu == rx_ring->count)) {
+			rx_desc = ICE_RX_DESC(rx_ring, 0);
+			ntu = 0;
+		}
+
+		rx_desc->wb.status_error0 = 0;
+		count--;
+	} while (count);
+
+	if (rx_ring->next_to_use != ntu)
+		ice_release_rx_desc(rx_ring, ntu);
+}
+
+/**
  * ice_alloc_rx_bufs - Replace used receive buffers
  * @rx_ring: ring to place buffers on
  * @cleaned_count: number of buffers to replace
@@ -662,8 +693,7 @@ bool ice_alloc_rx_bufs(struct ice_rx_ring *rx_ring, unsigned int cleaned_count)
 	u16 ntu = rx_ring->next_to_use;
 
 	/* do nothing if no valid netdev defined */
-	if ((!rx_ring->netdev && rx_ring->vsi->type != ICE_VSI_CTRL) ||
-	    !cleaned_count)
+	if (!rx_ring->netdev || !cleaned_count)
 		return false;
 
 	/* get the Rx descriptor and buffer based on next_to_use */
@@ -701,6 +731,55 @@ bool ice_alloc_rx_bufs(struct ice_rx_ring *rx_ring, unsigned int cleaned_count)
 		ice_release_rx_desc(rx_ring, ntu);
 
 	return !!cleaned_count;
+}
+
+void ice_clean_ctrl_rx_irq(struct ice_rx_ring *rx_ring, int budget)
+{
+	u32 ntc = rx_ring->next_to_clean;
+	unsigned int total_rx_pkts = 0;
+	u32 cnt = rx_ring->count;
+
+	/* start the loop to process Rx packets bounded by 'budget' */
+	while (likely(total_rx_pkts < (unsigned int)budget)) {
+		union ice_32b_rx_flex_desc *rx_desc;
+		u16 stat_err_bits;
+
+		/* get the Rx desc from Rx ring based on 'next_to_clean' */
+		rx_desc = ICE_RX_DESC(rx_ring, ntc);
+
+		/* status_error_len will always be zero for unused descriptors
+		 * because it's cleared in cleanup, and overlaps with hdr_addr
+		 * which is always zero because packet split isn't used, if the
+		 * hardware wrote DD then it will be non-zero
+		 */
+		stat_err_bits = BIT(ICE_RX_FLEX_DESC_STATUS0_DD_S);
+		if (!ice_test_staterr(rx_desc->wb.status_error0, stat_err_bits))
+			break;
+
+		/* This memory barrier is needed to keep us from reading
+		 * any other fields out of the rx_desc until we know the
+		 * DD bit is set.
+		 */
+		dma_rmb();
+
+		if (rx_desc->wb.rxdid == FDIR_DESC_RXDID || !rx_ring->netdev) {
+			struct ice_vsi *ctrl_vsi = rx_ring->vsi;
+
+			if (rx_desc->wb.rxdid == FDIR_DESC_RXDID &&
+			    ctrl_vsi->vf)
+				ice_vc_fdir_irq_handler(ctrl_vsi, rx_desc);
+			if (++ntc == cnt)
+				ntc = 0;
+			rx_ring->first_desc = ntc;
+			continue;
+		}
+
+		/* update budget accounting */
+		total_rx_pkts++;
+	}
+
+	rx_ring->next_to_clean = ntc;
+	ice_init_ctrl_rx_descs(rx_ring, ICE_RX_DESC_UNUSED(rx_ring));
 }
 
 /**
@@ -764,17 +843,6 @@ int ice_clean_rx_irq(struct ice_rx_ring *rx_ring, int budget)
 		dma_rmb();
 
 		ice_trace(clean_rx_irq, rx_ring, rx_desc);
-		if (rx_desc->wb.rxdid == FDIR_DESC_RXDID || !rx_ring->netdev) {
-			struct ice_vsi *ctrl_vsi = rx_ring->vsi;
-
-			if (rx_desc->wb.rxdid == FDIR_DESC_RXDID &&
-			    ctrl_vsi->vf)
-				ice_vc_fdir_irq_handler(ctrl_vsi, rx_desc);
-			if (++ntc == cnt)
-				ntc = 0;
-			rx_ring->first_desc = ntc;
-			continue;
-		}
 
 		size = le16_to_cpu(rx_desc->wb.pkt_len) &
 			ICE_RX_FLX_DESC_PKT_LEN_M;

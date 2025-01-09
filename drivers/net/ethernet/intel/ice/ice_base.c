@@ -603,7 +603,10 @@ static int ice_vsi_cfg_rxq(struct ice_rx_ring *ring)
 		return 0;
 	}
 
-	err = ice_alloc_rx_bufs(ring, num_bufs);
+	if (ring->vsi->type == ICE_VSI_CTRL)
+		ice_init_ctrl_rx_descs(ring, num_bufs);
+	else
+		err = ice_alloc_rx_bufs(ring, num_bufs);
 
 	return 0;
 
