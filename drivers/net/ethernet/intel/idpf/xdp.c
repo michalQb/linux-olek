@@ -336,6 +336,8 @@ static u32 idpf_xdp_tx_prep(void *_xdpq, struct libeth_xdpsq *sq)
 
 	libeth_xdpsq_lock(&xdpq->xdp_lock);
 
+	printk("XDP queue id = %d\n", xdpq->q_id);
+
 	free = xdpq->desc_count - xdpq->pending;
 	if (unlikely(free < xdpq->thresh))
 		free += idpf_clean_xdp_irq(xdpq, NAPI_POLL_WEIGHT);

@@ -70,7 +70,7 @@ static void idpf_mb_intr_reg_init(struct idpf_adapter *adapter)
 static int idpf_intr_reg_init(struct idpf_vport *vport)
 {
 	struct idpf_adapter *adapter = vport->adapter;
-	int num_vecs = vport->num_q_vectors;
+	int num_vecs = vport->num_q_vectors + vport->num_xdp_q_vectors;
 	struct idpf_vec_regs *reg_vals;
 	int num_regs, i, err = 0;
 	u32 rx_itr, tx_itr;

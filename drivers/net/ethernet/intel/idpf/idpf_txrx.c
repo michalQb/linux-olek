@@ -3979,6 +3979,14 @@ static void idpf_vport_intr_ena_irq_all(struct idpf_vport *vport)
 		if (qv->num_txq || qv->num_rxq)
 			idpf_vport_intr_update_itr_ena_irq(qv);
 	}
+
+#if 1
+	if (vport->num_xdp_q_vectors) {
+		struct idpf_q_vector *qv = &vport->q_vectors[vport->num_q_vectors];
+			
+		idpf_vport_intr_set_wb_on_itr(qv);
+	}
+#endif
 }
 
 /**
@@ -4294,7 +4302,7 @@ static int idpf_vport_intr_init_vec_idx(struct idpf_vport *vport)
 
 	ac = adapter->req_vec_chunks;
 	if (!ac) {
-		for (i = 0; i < vport->num_q_vectors; i++)
+		for (i = 0; i < vport->num_q_vectors + vport->num_xdp_q_vectors; i++)
 			vport->q_vectors[i].v_idx = vport->q_vector_idxs[i];
 
 		return 0;
@@ -4307,7 +4315,7 @@ static int idpf_vport_intr_init_vec_idx(struct idpf_vport *vport)
 
 	idpf_get_vec_ids(adapter, vecids, total_vecs, &ac->vchunks);
 
-	for (i = 0; i < vport->num_q_vectors; i++)
+	for (i = 0; i < vport->num_q_vectors + vport->num_xdp_q_vectors; i++)
 		vport->q_vectors[i].v_idx = vecids[vport->q_vector_idxs[i]];
 
 	kfree(vecids);
@@ -4353,7 +4361,7 @@ int idpf_vport_intr_alloc(struct idpf_vport *vport)
 	struct idpf_q_vector *q_vector;
 	u32 complqs_per_vector, v_idx;
 
-	vport->q_vectors = kcalloc(vport->num_q_vectors,
+	vport->q_vectors = kcalloc(vport->num_q_vectors + vport->num_xdp_q_vectors,
 				   sizeof(struct idpf_q_vector), GFP_KERNEL);
 	if (!vport->q_vectors)
 		return -ENOMEM;

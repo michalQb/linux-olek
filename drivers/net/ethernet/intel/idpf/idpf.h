@@ -325,6 +325,7 @@ struct idpf_vport {
 	bool base_rxd;
 
 	u16 num_q_vectors;
+	u16 num_xdp_q_vectors;
 	struct idpf_q_vector *q_vectors;
 	u16 *q_vector_idxs;
 	u16 max_mtu;

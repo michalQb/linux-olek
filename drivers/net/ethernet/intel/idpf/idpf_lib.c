@@ -324,6 +324,8 @@ int idpf_intr_req(struct idpf_adapter *adapter)
 	total_vecs = idpf_get_reserved_vecs(adapter);
 	num_q_vecs = total_vecs - IDPF_MBX_Q_VEC;
 
+	printk("total_vecs = %d, num_q_vecs = %d\n", total_vecs, num_q_vecs);
+
 	err = idpf_send_alloc_vectors_msg(adapter, num_q_vecs);
 	if (err) {
 		dev_err(&adapter->pdev->dev,
