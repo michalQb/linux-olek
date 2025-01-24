@@ -31,6 +31,7 @@ struct idpf_vport_max_q;
 #define IDPF_NUM_DFLT_MBX_Q		2	/* includes both TX and RX */
 #define IDPF_DFLT_MBX_Q_LEN		64
 #define IDPF_DFLT_MBX_ID		-1
+#define IDPF_NUM_XDP_VECTORS		1
 /* maximum number of times to try before resetting mailbox */
 #define IDPF_MB_MAX_ERR			20
 #define IDPF_NUM_CHUNKS_PER_MSG(struct_sz, chunk_sz)	\
@@ -326,6 +327,8 @@ struct idpf_vport {
 
 	u16 num_q_vectors;
 	struct idpf_q_vector *q_vectors;
+	struct idpf_q_vector xdp_q_vector;
+	u16 num_vector_idxs;
 	u16 *q_vector_idxs;
 	u16 max_mtu;
 	u8 default_mac_addr[ETH_ALEN];

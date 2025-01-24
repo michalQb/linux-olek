@@ -1130,7 +1130,8 @@ static struct idpf_vport *idpf_vport_alloc(struct idpf_adapter *adapter,
 			       idpf_get_default_vports(adapter);
 
 	num_max_q = max(max_q->max_txq, max_q->max_rxq);
-	vport->q_vector_idxs = kcalloc(num_max_q, sizeof(u16), GFP_KERNEL);
+	vport->q_vector_idxs = kcalloc(num_max_q + IDPF_NUM_XDP_VECTORS,
+				       sizeof(u16), GFP_KERNEL);
 	if (!vport->q_vector_idxs) {
 		kfree(vport);
 

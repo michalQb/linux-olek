@@ -63,6 +63,37 @@ static void idpf_mb_intr_reg_init(struct idpf_adapter *adapter)
 	intr->icr_ena_ctlq_m = PF_INT_DIR_OICR_ENA_M;
 }
 
+static void idpf_q_vector_reg_init(struct idpf_adapter *adapter,
+				   struct idpf_q_vector *q_vector,
+				   struct idpf_vec_regs *reg_val)
+{
+	struct idpf_intr_reg *intr = &q_vector->intr_reg;
+	u32 rx_itr, tx_itr;
+	u32 spacing;
+
+	intr->dyn_ctl = idpf_get_reg_addr(adapter,
+					  reg_val->dyn_ctl_reg);
+	intr->dyn_ctl_intena_m = PF_GLINT_DYN_CTL_INTENA_M;
+	intr->dyn_ctl_intena_msk_m = PF_GLINT_DYN_CTL_INTENA_MSK_M;
+	intr->dyn_ctl_itridx_s = PF_GLINT_DYN_CTL_ITR_INDX_S;
+	intr->dyn_ctl_intrvl_s = PF_GLINT_DYN_CTL_INTERVAL_S;
+	intr->dyn_ctl_wb_on_itr_m = PF_GLINT_DYN_CTL_WB_ON_ITR_M;
+	intr->dyn_ctl_swint_trig_m = PF_GLINT_DYN_CTL_SWINT_TRIG_M;
+	intr->dyn_ctl_sw_itridx_ena_m =
+		PF_GLINT_DYN_CTL_SW_ITR_INDX_ENA_M;
+
+	spacing = IDPF_ITR_IDX_SPACING(reg_val->itrn_index_spacing,
+				       IDPF_PF_ITR_IDX_SPACING);
+	rx_itr = PF_GLINT_ITR_ADDR(VIRTCHNL2_ITR_IDX_0,
+				   reg_val->itrn_reg,
+				   spacing);
+	tx_itr = PF_GLINT_ITR_ADDR(VIRTCHNL2_ITR_IDX_1,
+				   reg_val->itrn_reg,
+				   spacing);
+	intr->rx_itr = idpf_get_reg_addr(adapter, rx_itr);
+	intr->tx_itr = idpf_get_reg_addr(adapter, tx_itr);
+}
+
 /**
  * idpf_intr_reg_init - Initialize interrupt registers
  * @vport: virtual port structure
@@ -73,8 +104,7 @@ static int idpf_intr_reg_init(struct idpf_vport *vport)
 	int num_vecs = vport->num_q_vectors;
 	struct idpf_vec_regs *reg_vals;
 	int num_regs, i, err = 0;
-	u32 rx_itr, tx_itr;
-	u16 total_vecs;
+	u16 total_vecs, vec_id;
 
 	total_vecs = idpf_get_reserved_vecs(vport->adapter);
 	reg_vals = kcalloc(total_vecs, sizeof(struct idpf_vec_regs),
@@ -90,32 +120,13 @@ static int idpf_intr_reg_init(struct idpf_vport *vport)
 
 	for (i = 0; i < num_vecs; i++) {
 		struct idpf_q_vector *q_vector = &vport->q_vectors[i];
-		u16 vec_id = vport->q_vector_idxs[i] - IDPF_MBX_Q_VEC;
-		struct idpf_intr_reg *intr = &q_vector->intr_reg;
-		u32 spacing;
 
-		intr->dyn_ctl = idpf_get_reg_addr(adapter,
-						  reg_vals[vec_id].dyn_ctl_reg);
-		intr->dyn_ctl_intena_m = PF_GLINT_DYN_CTL_INTENA_M;
-		intr->dyn_ctl_intena_msk_m = PF_GLINT_DYN_CTL_INTENA_MSK_M;
-		intr->dyn_ctl_itridx_s = PF_GLINT_DYN_CTL_ITR_INDX_S;
-		intr->dyn_ctl_intrvl_s = PF_GLINT_DYN_CTL_INTERVAL_S;
-		intr->dyn_ctl_wb_on_itr_m = PF_GLINT_DYN_CTL_WB_ON_ITR_M;
-		intr->dyn_ctl_swint_trig_m = PF_GLINT_DYN_CTL_SWINT_TRIG_M;
-		intr->dyn_ctl_sw_itridx_ena_m =
-			PF_GLINT_DYN_CTL_SW_ITR_INDX_ENA_M;
-
-		spacing = IDPF_ITR_IDX_SPACING(reg_vals[vec_id].itrn_index_spacing,
-					       IDPF_PF_ITR_IDX_SPACING);
-		rx_itr = PF_GLINT_ITR_ADDR(VIRTCHNL2_ITR_IDX_0,
-					   reg_vals[vec_id].itrn_reg,
-					   spacing);
-		tx_itr = PF_GLINT_ITR_ADDR(VIRTCHNL2_ITR_IDX_1,
-					   reg_vals[vec_id].itrn_reg,
-					   spacing);
-		intr->rx_itr = idpf_get_reg_addr(adapter, rx_itr);
-		intr->tx_itr = idpf_get_reg_addr(adapter, tx_itr);
+		vec_id = vport->q_vector_idxs[i] - IDPF_MBX_Q_VEC;
+		idpf_q_vector_reg_init(adapter, q_vector, &reg_vals[vec_id]);
 	}
+
+	vec_id = vport->q_vector_idxs[i] - IDPF_MBX_Q_VEC;
+	idpf_q_vector_reg_init(adapter, &vport->xdp_q_vector, &reg_vals[vec_id]);
 
 free_reg_vals:
 	kfree(reg_vals);

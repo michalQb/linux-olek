@@ -1893,7 +1893,7 @@ int idpf_send_map_unmap_queue_vector_msg(struct idpf_vport *vport, bool map)
 				v_idx = vec->v_idx;
 				tx_itr_idx = vec->tx_itr_idx;
 			} else {
-				v_idx = 0;
+				v_idx = vport->xdp_q_vector.v_idx;
 				tx_itr_idx = VIRTCHNL2_ITR_IDX_1;
 			}
 
@@ -1925,7 +1925,7 @@ int idpf_send_map_unmap_queue_vector_msg(struct idpf_vport *vport, bool map)
 			vqv[k].queue_id = cpu_to_le32(rxq->q_id);
 
 			if (idpf_queue_has(NOIRQ, rxq)) {
-				v_idx = 0;
+				v_idx = vport->xdp_q_vector.v_idx;
 				rx_itr_idx = VIRTCHNL2_ITR_IDX_0;
 			} else {
 				v_idx = rxq->q_vector->v_idx;
@@ -3113,8 +3113,9 @@ int idpf_vport_alloc_vec_indexes(struct idpf_vport *vport)
 	struct idpf_vector_info vec_info;
 	int num_alloc_vecs;
 
-	vec_info.num_curr_vecs = vport->num_q_vectors;
-	vec_info.num_req_vecs = max(vport->num_txq, vport->num_rxq);
+	vec_info.num_curr_vecs = vport->num_vector_idxs;
+	vec_info.num_req_vecs = max(vport->num_txq, vport->num_rxq) +
+				IDPF_NUM_XDP_VECTORS;
 	vec_info.default_vport = vport->default_vport;
 	vec_info.index = vport->idx;
 
@@ -3127,7 +3128,8 @@ int idpf_vport_alloc_vec_indexes(struct idpf_vport *vport)
 	if (idpf_xdp_is_prog_ena(vport))
 		vec_info.num_req_vecs = max_t(u16,
 					      vport->num_txq - vport->num_xdp_txq,
-					      vport->num_rxq);
+					      vport->num_rxq) +
+					IDPF_NUM_XDP_VECTORS;
 
 	num_alloc_vecs = idpf_req_rel_vector_indexes(vport->adapter,
 						     vport->q_vector_idxs,
@@ -3138,7 +3140,8 @@ int idpf_vport_alloc_vec_indexes(struct idpf_vport *vport)
 		return -EINVAL;
 	}
 
-	vport->num_q_vectors = num_alloc_vecs;
+	vport->num_vector_idxs = num_alloc_vecs;
+	vport->num_q_vectors = vport->num_vector_idxs - IDPF_NUM_XDP_VECTORS;
 
 	return 0;
 }

@@ -3979,6 +3979,8 @@ static void idpf_vport_intr_ena_irq_all(struct idpf_vport *vport)
 		if (qv->num_txq || qv->num_rxq)
 			idpf_vport_intr_update_itr_ena_irq(qv);
 	}
+
+	idpf_vport_intr_set_wb_on_itr(&vport->xdp_q_vector);
 }
 
 /**
@@ -4296,6 +4298,7 @@ static int idpf_vport_intr_init_vec_idx(struct idpf_vport *vport)
 	if (!ac) {
 		for (i = 0; i < vport->num_q_vectors; i++)
 			vport->q_vectors[i].v_idx = vport->q_vector_idxs[i];
+		vport->xdp_q_vector.v_idx = vport->q_vector_idxs[i];
 
 		return 0;
 	}
@@ -4309,6 +4312,7 @@ static int idpf_vport_intr_init_vec_idx(struct idpf_vport *vport)
 
 	for (i = 0; i < vport->num_q_vectors; i++)
 		vport->q_vectors[i].v_idx = vecids[vport->q_vector_idxs[i]];
+	vport->xdp_q_vector.v_idx = vecids[vport->q_vector_idxs[i]];
 
 	kfree(vecids);
 
