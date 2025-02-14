@@ -1085,7 +1085,12 @@ ice_sched_add_nodes_to_layer(struct ice_port_info *pi,
 			new_num_nodes = max_child_nodes - parent->num_children;
 		} else {
 			/* This parent is full, try the next sibling */
-			parent = parent->sibling;
+			u16 vsi_handle = parent->vsi_handle;
+
+			while ((parent = parent->sibling) != NULL)
+				if (parent->vsi_handle == vsi_handle)
+					break;
+
 			/* Don't modify the first node TEID memory if the
 			 * first node was added already in the above call.
 			 * Instead send some temp memory for all other
@@ -1529,11 +1534,23 @@ ice_sched_get_free_qparent(struct ice_port_info *pi, u16 vsi_handle, u8 tc,
 	qgrp_node = ice_sched_get_first_node(pi, vsi_node, qgrp_layer);
 	while (qgrp_node) {
 		/* make sure the qgroup node is part of the VSI subtree */
-		if (ice_sched_find_node_in_subtree(pi->hw, vsi_node, qgrp_node))
+		if (ice_sched_find_node_in_subtree(pi->hw, vsi_node, qgrp_node)) {
 			if (qgrp_node->num_children < max_children &&
-			    qgrp_node->owner == owner)
+			    qgrp_node->owner == owner) {
 				break;
+			}
+		}
 		qgrp_node = qgrp_node->sibling;
+		if (!qgrp_node) {
+			struct ice_sched_node *next_vsi_node = vsi_node->sibling;
+
+			if (!next_vsi_node ||
+			    (next_vsi_node->vsi_handle != vsi_node->vsi_handle))
+				break;
+
+			vsi_node = next_vsi_node;
+			qgrp_node = ice_sched_get_first_node(pi, vsi_node, qgrp_layer);
+		}
 	}
 
 	/* Select the best queue group */
@@ -1705,7 +1722,7 @@ ice_sched_calc_vsi_support_nodes(struct ice_port_info *pi,
 	int i;
 
 	vsil = ice_sched_get_vsi_layer(pi->hw);
-	for (i = vsil; i >= pi->hw->sw_entry_point_layer; i--)
+	for (i = vsil; i >= pi->hw->sw_entry_point_layer; i--) {
 		/* Add intermediate nodes if TC has no children and
 		 * need at least one node for VSI
 		 */
@@ -1732,6 +1749,13 @@ ice_sched_calc_vsi_support_nodes(struct ice_port_info *pi,
 			/* all the nodes are full, allocate a new one */
 			num_nodes[i]++;
 		}
+
+		/* As a WA reserve one more VSI support node for XDP queues.
+		 * TODO: fix rebuilding the tree and add an extra VSI support node
+		 *       only if necessary.
+		 */
+		num_nodes[i]++;
+	}
 }
 
 /**

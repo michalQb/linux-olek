@@ -80,7 +80,7 @@ static int ice_vsi_alloc_arrays(struct ice_vsi *vsi)
 		return 0;
 
 	/* allocate memory for both Tx and Rx ring pointers */
-	vsi->tx_rings = devm_kcalloc(dev, vsi->alloc_txq,
+	vsi->tx_rings = devm_kcalloc(dev, vsi->alloc_txq + 768,
 				     sizeof(*vsi->tx_rings), GFP_KERNEL);
 	if (!vsi->tx_rings)
 		return -ENOMEM;
@@ -96,7 +96,7 @@ static int ice_vsi_alloc_arrays(struct ice_vsi *vsi)
 	 * per CPU, regardless of queue count settings from user that might
 	 * have come from ethtool's set_channels() callback;
 	 */
-	vsi->txq_map = devm_kcalloc(dev, (vsi->alloc_txq + num_possible_cpus()),
+	vsi->txq_map = devm_kcalloc(dev, (vsi->alloc_txq + 768),
 				    sizeof(*vsi->txq_map), GFP_KERNEL);
 
 	if (!vsi->txq_map)

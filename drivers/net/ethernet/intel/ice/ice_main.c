@@ -2826,7 +2826,8 @@ int ice_prepare_xdp_rings(struct ice_vsi *vsi, struct bpf_prog *prog,
 	if (status) {
 		dev_err(dev, "Failed VSI LAN queue config for XDP, error: %d\n",
 			status);
-		goto clear_xdp_rings;
+		return -ENOMEM;
+//		goto clear_xdp_rings;
 	}
 
 	/* assign the prog only when it's not already present on VSI;
@@ -2963,7 +2964,7 @@ static void ice_vsi_rx_napi_schedule(struct ice_vsi *vsi)
 int ice_vsi_determine_xdp_res(struct ice_vsi *vsi)
 {
 	u16 avail = ice_get_avail_txq_count(vsi->back);
-	u16 cpus = num_possible_cpus();
+	u16 cpus = 768;//num_possible_cpus();
 
 	if (avail < cpus / 2)
 		return -ENOMEM;
@@ -3036,10 +3037,13 @@ ice_xdp_setup_prog(struct ice_vsi *vsi, struct bpf_prog *prog,
 		} else {
 			xdp_ring_err = ice_prepare_xdp_rings(vsi, prog,
 							     ICE_XDP_CFG_FULL);
-			if (xdp_ring_err)
+			if (xdp_ring_err) {
 				NL_SET_ERR_MSG_MOD(extack, "Setting up XDP Tx resources failed");
+				ice_destroy_xdp_rings(vsi, ICE_XDP_CFG_FULL);
+			} else {
+				xdp_features_set_redirect_target(vsi->netdev, true);
+			}
 		}
-		xdp_features_set_redirect_target(vsi->netdev, true);
 	} else if (ice_is_xdp_ena_vsi(vsi) && !prog) {
 		xdp_features_clear_redirect_target(vsi->netdev);
 		xdp_ring_err = ice_destroy_xdp_rings(vsi, ICE_XDP_CFG_FULL);
