@@ -1087,9 +1087,10 @@ ice_sched_add_nodes_to_layer(struct ice_port_info *pi,
 			/* This parent is full, try the next sibling */
 			u16 vsi_handle = parent->vsi_handle;
 
-			while ((parent = parent->sibling) != NULL)
-				if (parent->vsi_handle == vsi_handle)
-					break;
+			parent = parent->sibling;
+			//while ((parent = parent->sibling) != NULL)
+				//if (parent->vsi_handle == vsi_handle)
+				//	break;
 
 			/* Don't modify the first node TEID memory if the
 			 * first node was added already in the above call.
@@ -1544,8 +1545,8 @@ ice_sched_get_free_qparent(struct ice_port_info *pi, u16 vsi_handle, u8 tc,
 		if (!qgrp_node) {
 			struct ice_sched_node *next_vsi_node = vsi_node->sibling;
 
-			if (!next_vsi_node ||
-			    (next_vsi_node->vsi_handle != vsi_node->vsi_handle))
+			if (!next_vsi_node)// ||
+//			    (next_vsi_node->vsi_handle != vsi_node->vsi_handle))
 				break;
 
 			vsi_node = next_vsi_node;
@@ -1633,6 +1634,8 @@ ice_sched_calc_vsi_child_nodes(struct ice_hw *hw, u16 num_qs, u16 *num_nodes)
 	u16 num = num_qs;
 	u8 i, qgl, vsil;
 
+	printk("calc_vsi_child_nodes --- num_qs = %d\n", num_qs);
+
 	qgl = ice_sched_get_qgrp_layer(hw);
 	vsil = ice_sched_get_vsi_layer(hw);
 
@@ -1640,6 +1643,9 @@ ice_sched_calc_vsi_child_nodes(struct ice_hw *hw, u16 num_qs, u16 *num_nodes)
 	for (i = qgl; i > vsil; i--) {
 		/* round to the next integer if there is a remainder */
 		num = DIV_ROUND_UP(num, hw->max_children[i]);
+	
+		printk("calc_vsi_child_nodes --- [ i = %d ], num = %d, max = %d\n",
+			i, num, hw->max_children[i]);
 
 		/* need at least one node */
 		num_nodes[i] = num ? num : 1;
@@ -1667,10 +1673,58 @@ ice_sched_add_vsi_child_nodes(struct ice_port_info *pi, u16 vsi_handle,
 	u32 first_node_teid;
 	u16 num_added = 0;
 	u8 i, qgl, vsil;
+//	u32 existing_children;
+//	u32 num_vsi;
 
 	qgl = ice_sched_get_qgrp_layer(hw);
 	vsil = ice_sched_get_vsi_layer(hw);
 	parent = ice_sched_get_vsi_node(pi, tc_node, vsi_handle);
+#if 0
+	printk("Max children for VSI node: %d, num_children: %d, requested children:%d\n",
+		hw->max_children[vsil], parent->num_children, num_nodes[vsil + 1]);
+	node = parent;
+	num_vsi = 1;
+	existing_children = parent->num_children;
+	while ((node = node->sibling) != NULL) {
+		printk("VSI sibling, num_children = %d\n", node->num_children);
+		existing_children += node->num_children;
+		num_vsi++;
+	}
+	
+	if (num_nodes[vsil + 1] > ((num_vsi * hw->max_children[vsil]) - existing_children)) {
+		int status;
+		struct ice_sched_node *new_parent;
+
+		printk("New supporting VSI node is needed --- adding\n");
+		printk("requested_nodes = %d, available_nodes = %d\n", num_nodes[vsil + 1], ((num_vsi * hw->max_children[vsil]) - existing_children));
+
+		status = ice_sched_add_nodes_to_layer(pi, tc_node, parent->parent,
+						      vsil, 1, &first_node_teid, &num_added);
+		if (status || num_added != 1) {
+			printk("Could not add any new supporting VSI node, status = %d num_added = %d\n", status, num_added);
+			return -EIO;
+		}
+
+		new_parent = ice_sched_find_node_by_teid(tc_node, first_node_teid);
+		if (!new_parent) {
+			printk("Could not find the newly added parent\n");
+			return -EIO;
+		}
+
+		new_parent->vsi_handle = parent->vsi_handle;
+		num_added = 0;
+	}
+
+	node = parent;
+	num_vsi = 1;
+	existing_children = parent->num_children;
+	while ((node = node->sibling) != NULL) {
+		printk("STAGE 2 --- VSI sibling, num_children = %d\n", node->num_children);
+		existing_children += node->num_children;
+		num_vsi++;
+	}
+#endif
+		
 	for (i = vsil + 1; i <= qgl; i++) {
 		int status;
 
@@ -1681,6 +1735,7 @@ ice_sched_add_vsi_child_nodes(struct ice_port_info *pi, u16 vsi_handle,
 						      num_nodes[i],
 						      &first_node_teid,
 						      &num_added);
+		printk("layer = %d --- num_nodes = %d, num_added = %d\n", i, num_nodes[i], num_added);
 		if (status || num_nodes[i] != num_added)
 			return -EIO;
 
@@ -1754,7 +1809,7 @@ ice_sched_calc_vsi_support_nodes(struct ice_port_info *pi,
 		 * TODO: fix rebuilding the tree and add an extra VSI support node
 		 *       only if necessary.
 		 */
-		num_nodes[i]++;
+		//num_nodes[i]++;
 	}
 }
 
@@ -1857,6 +1912,9 @@ ice_sched_update_vsi_child_nodes(struct ice_port_info *pi, u16 vsi_handle,
 	struct ice_hw *hw = pi->hw;
 	u16 prev_numqs;
 	int status = 0;
+	u8 qgl, vsil;
+	u32 queue_cnt = 0;
+	u32 num_new_vsi_nodes = 0;
 
 	tc_node = ice_sched_get_tc_node(pi, tc);
 	if (!tc_node)
@@ -1874,6 +1932,8 @@ ice_sched_update_vsi_child_nodes(struct ice_port_info *pi, u16 vsi_handle,
 		prev_numqs = vsi_ctx->sched.max_lanq[tc];
 	else
 		prev_numqs = vsi_ctx->sched.max_rdmaq[tc];
+
+	printk("sched_update_vsi_child_nodes ---- prev_numqs = %d, new_numqs = %d\n", prev_numqs, new_numqs);
 	/* num queues are not changed or less than the previous number */
 	if (new_numqs <= prev_numqs)
 		return status;
@@ -1885,6 +1945,21 @@ ice_sched_update_vsi_child_nodes(struct ice_port_info *pi, u16 vsi_handle,
 		status = ice_alloc_rdma_q_ctx(hw, vsi_handle, tc, new_numqs);
 		if (status)
 			return status;
+	}
+
+	qgl = ice_sched_get_qgrp_layer(hw);
+	vsil = ice_sched_get_vsi_layer(hw);
+
+	queue_cnt = 1;
+	for (int i = vsil; i <= qgl; i++)
+		queue_cnt *= hw->max_children[i];
+
+	printk("Maximum number of supported queues per VSI: %d", queue_cnt);
+
+	if (new_numqs > queue_cnt) {
+		new_num_nodes[vsil] = DIV_ROUND_UP(new_numqs, queue_cnt) - 1;
+		printk("Adding %d new VSIs\n", new_num_nodes[vsil]);
+		status = ice_sched_add_vsi_support_nodes(pi, vsi_handle, tc_node, new_num_nodes);
 	}
 
 	if (new_numqs)
